@@ -1,0 +1,195 @@
+import os
+os.environ['QT_API'] = 'pyqt6'
+import sys
+from PyQt6.QtCore import Qt, QSize, QThread
+from PyQt6.QtGui import QIcon
+from PyQt6.QtWidgets import QApplication
+
+from qfluentwidgets import (FluentWindow, NavigationItemPosition, FluentTranslator, 
+                            FluentIcon as FIF, SplashScreen, InfoBar, InfoBarPosition)
+from qfluentwidgets import setTheme, Theme
+
+from src.core.translation_pipeline import TranslationPipeline
+from src.core.enums import PipelineStage
+
+from src.ui.interfaces.home_interface import HomeInterface
+from src.ui.interfaces.settings_interface import SettingsInterface
+from src.ui.interfaces.export_interface import ExportInterface
+from src.ui.interfaces.about_interface import AboutInterface
+from src.ui.components.console_log import ConsoleLog
+
+class MainWindow(FluentWindow):
+    def __init__(self):
+        super(MainWindow, self).__init__()
+        
+        # 1. Pipeline Setup
+        self.thread = None
+        self.pipeline = None
+        
+        # 2. UI Setup
+        self.initWindow()
+        
+        # 3. Create Sub-Interfaces
+        self.homeInterface = HomeInterface(self)
+        self.settingsInterface = SettingsInterface(self)
+        self.exportInterface = ExportInterface(self)
+        self.aboutInterface = AboutInterface(self)
+        self.consoleInterface = ConsoleLog(self)
+        self.consoleInterface.setObjectName("consoleInterface")
+        
+        # 4. Add to Navigation
+        self.addSubInterface(self.homeInterface, FIF.HOME, "Translation")
+        self.addSubInterface(self.settingsInterface, FIF.SETTING, "Settings")
+        self.addSubInterface(self.exportInterface, FIF.SHARE, "Export/Import")
+        self.addSubInterface(self.aboutInterface, FIF.INFO, "About", position=NavigationItemPosition.BOTTOM)
+        self.addSubInterface(self.consoleInterface, FIF.COMMAND_PROMPT, "Console", position=NavigationItemPosition.BOTTOM)
+        
+        # Add Support/Donate button
+        self.navigationInterface.addItem(
+            routeKey="support",
+            icon=FIF.HEART,
+            text="Support Developer",
+            onClick=self._open_patreon,
+            selectable=False,
+            position=NavigationItemPosition.BOTTOM
+        )
+        
+        # 5. Connect Signals
+        self.homeInterface.start_requested.connect(self.start_pipeline)
+        self.homeInterface.stop_requested.connect(self.stop_pipeline)
+        self.settingsInterface.btn_clear_cache.clicked.connect(self.clear_cache)
+
+    def initWindow(self):
+        self.resize(900, 700)
+        self.setWindowTitle("RPGMLocalizer")
+        
+        # Set window icon (scale from 2048x2048 to 64x64)
+        from PyQt6.QtGui import QPixmap
+        from PyQt6.QtCore import Qt as QtCore_Qt
+        from src.utils.paths import resource_path
+        
+        icon_path = resource_path("icon.ico")
+        if os.path.exists(icon_path):
+            pixmap = QPixmap(icon_path)
+            scaled_pixmap = pixmap.scaled(64, 64, QtCore_Qt.AspectRatioMode.KeepAspectRatio, QtCore_Qt.TransformationMode.SmoothTransformation)
+            self.setWindowIcon(QIcon(scaled_pixmap))
+        
+        # Center on screen
+        desktop = QApplication.screens()[0].availableGeometry()
+        w, h = desktop.width(), desktop.height()
+        self.move(w//2 - self.width()//2, h//2 - self.height()//2)
+        
+        # Default Theme: Dark
+        setTheme(Theme.DARK)
+
+    def start_pipeline(self, data: dict):
+        if self.thread and self.thread.isRunning():
+            return
+            
+        # 1. Gather all settings (Merge Home data with Settings page data)
+        settings = data.copy()
+        
+        # Parser Settings
+        settings["translate_notes"] = self.settingsInterface.chk_translate_notes.isChecked()
+        settings["translate_comments"] = self.settingsInterface.chk_translate_comments.isChecked()
+        
+        # Pipeline Settings
+        settings["backup_enabled"] = self.settingsInterface.chk_backup.isChecked()
+        settings["use_cache"] = self.settingsInterface.chk_cache.isChecked()
+        
+        # Glossary Settings
+        if self.settingsInterface.chk_glossary.isChecked() and self.settingsInterface.glossary_path:
+            settings["glossary_path"] = self.settingsInterface.glossary_path
+
+        # Filtering Settings
+        regex_text = self.settingsInterface.txt_regex.toPlainText()
+        if regex_text:
+            settings["regex_blacklist"] = [line for line in regex_text.split('\n') if line.strip()]
+        
+        # Export/Import Settings
+        if self.exportInterface.export_path:
+            settings["export_path"] = self.exportInterface.export_path
+            settings["export_only"] = self.exportInterface.chk_export_only.isChecked()
+        if self.exportInterface.import_path:
+            settings["import_path"] = self.exportInterface.import_path
+        
+        # 2. Initialize Thread & Pipeline
+        self.thread = QThread()
+        self.pipeline = TranslationPipeline(settings)
+        self.pipeline.moveToThread(self.thread)
+        
+        # 3. Connect Pipeline Signals
+        self.thread.started.connect(self.pipeline.run)
+        self.pipeline.finished.connect(self.on_finished)
+        self.pipeline.stage_changed.connect(self.on_stage_changed)
+        self.pipeline.progress_updated.connect(self.on_progress)
+        self.pipeline.log_message.connect(self.on_log_message)
+        
+        # Cleanup on finish
+        self.pipeline.finished.connect(self.thread.quit)
+        self.pipeline.finished.connect(self.pipeline.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+        
+        # 4. Update UI State
+        self.homeInterface.set_running(True)
+        self.consoleInterface.clear()
+        # Switch to console automatically to show progress? Maybe not, keep on home.
+        
+        # 5. Start
+        self.thread.start()
+
+    def stop_pipeline(self):
+        if self.pipeline:
+            self.pipeline.stop()
+            self.on_log_message("warning", "Stopping...")
+
+    def on_finished(self, success, message):
+        self.homeInterface.set_running(False)
+        self.homeInterface.update_status(message if success else f"Error: {message}")
+        
+        level = "success" if success else "error"
+        self.on_log_message(level, message)
+        
+        # No need to manually set to None, allow deleteLater to handle cleanup
+        # self.thread = None
+        # self.pipeline = None
+
+    def on_progress(self, current, total):
+        if total > 0:
+            percent = int((current / total) * 100)
+            self.homeInterface.update_status(f"Processing... {percent}% ({current}/{total})", percent)
+        else:
+            self.homeInterface.update_status("Processing...", 0)
+
+    def on_stage_changed(self, stage_val, message):
+        self.homeInterface.update_status(message)
+        self.on_log_message("info", f"Stage: {message}")
+
+    def on_log_message(self, level, message):
+        self.consoleInterface.log(level, message)
+        
+    def clear_cache(self):
+        from src.core.cache import get_cache
+        
+        try:
+            cache = get_cache()
+            cache.clear()
+            cache.save()
+            msg = "Translation cache has been cleared."
+            self.on_log_message("success", msg)
+            
+            InfoBar.success(
+                title='Cache Cleared',
+                content=msg,
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP_RIGHT,
+                parent=self
+            )
+        except Exception as e:
+            self.on_log_message("error", f"Failed to clear cache: {e}")
+
+    def _open_patreon(self):
+        """Open Patreon support page in browser."""
+        import webbrowser
+        webbrowser.open("https://www.patreon.com/cw/LordOfTurk")

@@ -2,7 +2,7 @@
 
 **RPGMLocalizer** is a powerful automated translation tool designed for RPG Maker games. It extracts text from game data, translates it using high-quality machine translation services (Google Translate), and re-inserts it back into the game files, all while preserving game logic, control codes, and scripts.
 
-![RPGMLocalizer Screenshot](https://via.placeholder.com/800x450?text=RPGMLocalizer+Screenshot)
+<img width="1119" height="868" alt="Ekran görüntüsü 2026-01-03 124948" src="https://github.com/user-attachments/assets/815162bb-9d1f-4b25-b760-f7ef4c2dd353" />
 
 ## Features
 
@@ -44,7 +44,7 @@
 
 If you find this tool useful, consider supporting development on Patreon:
 
-[![Support on Patreon](https://img.shields.io/badge/Support-Patreon-orange?style=for-the-badge&logo=patreon)](https://www.patreon.com/c/LordOfTurk)
+[![Support on Patreon](https://img.shields.io/badge/Support-Patreon-orange?style=for-the-badge&logo=patreon)](https://www.patreon.com/cw/LordOfTurk)
 
 ## License
 

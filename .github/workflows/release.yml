@@ -15,7 +15,7 @@ jobs:
         os: [windows-latest, ubuntu-latest, macos-latest]
         include:
           - os: windows-latest
-            artifact_name: RPGMLocalizer.exe
+            artifact_name: dist/RPGMLocalizer.exe
             asset_name: RPGMLocalizer_Windows.exe
           - os: ubuntu-latest
             artifact_name: dist/RPGMLocalizer

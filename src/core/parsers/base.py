@@ -83,21 +83,25 @@ class BaseParser(QObject, metaclass=ParserMeta):
         
         # 3. Ignore technical identifiers / Asset IDs
         if ' ' not in trimmed:
+            # Allow if it contains non-ASCII characters (likely localized text even if single word/no spaces)
+            if any(ord(c) > 127 for c in trimmed):
+                return False
+                
             # If it has underscores or Mixed_Case, likely a key
             if '_' in trimmed:
-                return False
+                return True
             
             # Check for asset IDs (starts with text, ends with numbers e.g., pla1, actor1)
             # But allow if is_dialogue is true (e.g., "Attack1" might be a skill name)
             if not is_dialogue:
                 if any(c.isdigit() for c in trimmed):
-                    return False
+                    return True
                 if any(c.isupper() for c in trimmed[1:]) and any(c.islower() for c in trimmed):
-                    return False
+                    return True
             
             # Short ASCII strings that look like IDs (e.g., 'v1', 'id')
             if len(trimmed) < 2 and trimmed.isascii():
-                return False
+                return True
 
         # 4. Ignore pure numbers or special symbols
         clean_num = trimmed.replace('.', '').replace('-', '').replace(' ', '')

@@ -222,3 +222,11 @@ def get_cache(cache_dir: Optional[str] = None) -> TranslationCache:
     if _cache is None:
         _cache = TranslationCache(cache_dir)
     return _cache
+
+
+def reset_cache():
+    """Reset the global cache singleton. Call between different project runs."""
+    global _cache
+    if _cache is not None:
+        _cache.save()  # Save before resetting
+    _cache = None

@@ -1,14 +1,11 @@
-"""
-Ruby Parser for RPG Maker XP/VX/VX Ace games.
-Handles extraction and injection of translatable text from .rvdata2 and .rxdata files.
-Uses rubymarshal library for reading/writing Ruby Marshal format.
-"""
 import rubymarshal.reader
 import rubymarshal.writer
 import rubymarshal.classes
 from typing import List, Tuple, Dict, Any, Set
 from .base import BaseParser
 import logging
+import zlib
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +41,14 @@ class RubyParser(BaseParser):
     SYSTEM_KEYS = {
         'words', 'terms', 'game_title', 'currency_unit',
     }
+
+    # Heuristics for skipping non-translatable text in scripts
+    SKIP_PATTERNS = [
+        r'^[a-zA-Z0-9_]+$',  # Variable names
+        r'\.png$', r'\.jpg$', r'\.ogg$', r'\.wav$', r'\.mp3$',  # Files
+        r'^Basic \d+$',  # Internal basic labels
+        r'^[A-Z][A-Z0-9_]*$',  # CONSTANTS
+    ]
     
     def __init__(self, translate_notes: bool = False, translate_comments: bool = True, **kwargs):
         super().__init__(**kwargs)
@@ -51,6 +56,7 @@ class RubyParser(BaseParser):
         self.translate_comments = translate_comments
         self.extracted: List[Tuple[str, str]] = []
         self.visited: Set[int] = set()
+        self.MAX_RECURSION_DEPTH = 100
     
     def extract_text(self, file_path: str) -> List[Tuple[str, str]]:
         """
@@ -68,11 +74,14 @@ class RubyParser(BaseParser):
         
         self.extracted = []
         self.visited = set()
-        self._walk(data, "")
+        self._walk(data, "", 0)
         return self.extracted
 
-    def _walk(self, obj: Any, path: str):
+    def _walk(self, obj: Any, path: str, depth: int):
         """Recursively walk Ruby objects to find translatable text."""
+        if depth > self.MAX_RECURSION_DEPTH:
+            return
+
         obj_id = id(obj)
         if obj_id in self.visited:
             return
@@ -91,6 +100,12 @@ class RubyParser(BaseParser):
                 pass
         
         elif isinstance(obj, list):
+            # Check if this looks like the Scripts.rvdata2 array
+            # Format: [[id, name, compressed_code], ...]
+            if len(obj) > 0 and len(obj[0]) == 3 and isinstance(obj[0][2], bytes) and path == "":
+                self._process_scripts_array(obj)
+                return
+
             for i, item in enumerate(obj):
                 self._check_and_walk(item, f"{path}.{i}" if path else str(i))
         
@@ -99,7 +114,7 @@ class RubyParser(BaseParser):
                 key_name = str(k) if not isinstance(k, (str, bytes)) else k
                 if isinstance(key_name, bytes):
                     key_name = key_name.decode('utf-8', errors='replace')
-                self._check_and_walk(v, f"{path}.{key_name}" if path else str(key_name), key_name=key_name)
+                self._check_and_walk(v, f"{path}.{key_name}" if path else str(key_name), depth + 1, key_name=key_name)
         
         elif hasattr(obj, 'attributes'):
             # rubymarshal RubyObject
@@ -119,15 +134,90 @@ class RubyParser(BaseParser):
                     
                 # Remove leading @ from Ruby instance variable names
                 display_key = key_name.lstrip('@') if isinstance(key_name, str) else key_name
-                self._check_and_walk(v, f"{path}.@{display_key}" if path else f"@{display_key}", key_name=display_key)
+                self._check_and_walk(v, f"{path}.@{display_key}" if path else f"@{display_key}", depth + 1, key_name=display_key)
         
         elif hasattr(obj, '__dict__'):
             for k, v in obj.__dict__.items():
                 if not k.startswith('_'):
-                    self._check_and_walk(v, f"{path}.{k}" if path else str(k), key_name=k)
+                    self._check_and_walk(v, f"{path}.{k}" if path else str(k), depth + 1, key_name=k)
 
-    def _check_and_walk(self, val: Any, path: str, key_name: str = None):
+    def _process_scripts_array(self, scripts: list):
+        """Process the special Scripts.rvdata2 array structure."""
+        logger.info("Detected Scripts.rvdata2 structure. Extracting strings from ruby code...")
+        for i, entry in enumerate(scripts):
+            if len(entry) < 3:
+                continue
+                
+            script_id = entry[0]
+            script_name = self._to_string(entry[1])
+            compressed_code = entry[2]
+            
+            if not isinstance(compressed_code, bytes):
+                continue
+                
+            try:
+                # 1. Decompress
+                code_bytes = zlib.decompress(compressed_code)
+                # 2. Decode
+                code_text = code_bytes.decode('utf-8', errors='ignore')
+                
+                # 3. Extract strings from code
+                self._extract_from_code(code_text, f"{i}.code")
+                
+            except Exception as e:
+                logger.warning(f"Failed to process script {i} ({script_name}): {e}")
+
+    def _extract_from_code(self, code: str, path_prefix: str):
+        """Extract valid strings from raw Ruby code using heuristics."""
+        # Find single or double quoted strings
+        # This is a basic regex, could benefit from a proper tokenizer but that's complex
+        # We look for "..." or '...'
+        matches = re.finditer(r'(["\'])(.*?)\1', code)
+        
+        seen_strings = set()
+        
+        for idx, match in enumerate(matches):
+            text = match.group(2)
+            
+            if text in seen_strings:
+                continue
+                
+            if not text or len(text) < 2:
+                continue
+                
+            # --- Heuristics to Skip Garbage ---
+            
+            # 1. Skip if only ASCII letters/numbers/underscore (likely variable/func name)
+            if re.match(r'^[a-zA-Z0-9_]+$', text):
+                continue
+                
+            # 2. Skip standard file extensions
+            if any(text.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.bmp', '.ogg', '.wav', '.mp3', '.rvdata2']):
+                continue
+                
+            # 3. Skip symbols starting with : (though regex usually won't catch simple :sys unless quoted)
+            if text.startswith(':'):
+                continue
+
+            # 4. Filter strictly: Must contain at least one space OR one non-ascii char
+            # This avoids simple keywords but keeps "Game Over" or "ゲーム"
+            has_space = ' ' in text
+            has_non_ascii = any(ord(c) > 127 for c in text)
+            
+            if not (has_space or has_non_ascii):
+                # If it's single word ascii, it's likely a technical string
+                continue
+                
+            # 5. Check explicitly for Vocab-like usage or things that look like messages
+            # (We accept it if it passed step 4)
+            
+            self.extracted.append((f"{path_prefix}.string_{idx}", text))
+            seen_strings.add(text)
+
+    def _check_and_walk(self, val: Any, path: str, depth: int, key_name: str = None):
         """Check if value should be extracted, then continue walking."""
+        if depth > self.MAX_RECURSION_DEPTH:
+            return
         # Convert bytes to string if needed
         text_val = val
         if isinstance(val, bytes):
@@ -163,9 +253,9 @@ class RubyParser(BaseParser):
             if code is not None and params is not None:
                 self._extract_event_command(code, params, path)
             
-            self._walk(val, path)
+            self._walk(val, path, depth + 1)
         else:
-            self._walk(val, path)
+            self._walk(val, path, depth + 1)
 
     def _extract_event_command(self, code: int, params: list, path: str):
         """Extract translatable text from an event command."""
@@ -210,10 +300,12 @@ class RubyParser(BaseParser):
         if isinstance(val, str):
             return val
         elif isinstance(val, bytes):
-            for encoding in ['utf-8', 'shift_jis', 'latin-1']:
+            # Try Shift-JIS first for higher accuracy in RPG Maker files (XP/VX/Ace)
+            encodings = ['shift_jis', 'utf-8', 'euc-jp', 'latin-1']
+            for encoding in encodings:
                 try:
                     return val.decode(encoding)
-                except UnicodeDecodeError:
+                except (UnicodeDecodeError, LookupError):
                     continue
             return val.decode('utf-8', errors='replace')
         return None
@@ -221,13 +313,6 @@ class RubyParser(BaseParser):
     def apply_translation(self, file_path: str, translations: Dict[str, str]) -> Any:
         """
         Apply translations back to the Ruby Marshal file.
-        
-        Args:
-            file_path: Path to the original file
-            translations: Dict mapping path -> translated_text
-            
-        Returns:
-            Modified data object
         """
         with open(file_path, 'rb') as f:
             data = rubymarshal.reader.load(f)
@@ -235,6 +320,14 @@ class RubyParser(BaseParser):
         applied_count = 0
         failed_paths = []
         
+        # Check if this is a scripts file
+        is_scripts = isinstance(data, list) and len(data) > 0 and len(data[0]) == 3 and isinstance(data[0][2], bytes)
+        
+        if is_scripts:
+            # We need to perform a different application strategy for scripts
+            data = self._apply_scripts_translation(data, translations)
+            return data
+            
         for path, text in translations.items():
             if not text:
                 continue
@@ -258,6 +351,85 @@ class RubyParser(BaseParser):
             logger.warning(f"Failed to apply {len(failed_paths)} translations")
         
         return data
+
+    def _apply_scripts_translation(self, scripts: list, translations: Dict[str, str]) -> list:
+        """Apply translations to the scripts array (re-compressing)."""
+        # Group translations by script index
+        script_trans = {}
+        for path, text in translations.items():
+            if ".code.string_" in path:
+                # format: {index}.code.string_{match_idx}
+                parts = path.split('.')
+                idx = int(parts[0])
+                if idx not in script_trans:
+                    script_trans[idx] = []
+                script_trans[idx].append((path, text))
+        
+        for idx in script_trans:
+            if idx >= len(scripts):
+                continue
+                
+            entry = scripts[idx]
+            compressed_code = entry[2]
+            
+            try:
+                # 1. Decompress
+                code_bytes = zlib.decompress(compressed_code)
+                code_text = code_bytes.decode('utf-8')
+                
+                # 2. Replace Strings
+                # This is tricky because indices change if we just replace.
+                # But since we use simple string replacement on the whole code block,
+                # duplicate strings might be an issue.
+                # Ideally we should reconstruct, but for now we'll do search/replace
+                # based on unique context if possible, or just exact match replace.
+                
+                # BETTER APPROACH:
+                # Iterate matches again to find locations, then apply replacements in reverse order
+                # to keep indices valid.
+                
+                # Find all string matches again to locate them
+                matches = list(re.finditer(r'(["\'])(.*?)\1', code_text))
+                
+                # Map extracted path suffix to match index
+                # extracted format: {idx}.code.string_{match_index}
+                
+                replacements = [] # (start, end, new_text)
+                
+                for path, new_text in script_trans[idx]:
+                    match_idx = int(path.split('_')[-1])
+                    if match_idx < len(matches):
+                        m = matches[match_idx]
+                        qs = m.group(1) # quote style
+                        # Properly escape for Ruby strings:
+                        # 1. Escape existing backslashes first
+                        # 2. Then escape the quote character itself
+                        escaped_text = new_text.replace('\\', '\\\\')
+                        escaped_text = escaped_text.replace(qs, '\\' + qs)
+                        replacement = f"{qs}{escaped_text}{qs}"
+                        replacements.append((m.start(), m.end(), replacement))
+                
+                # Apply in reverse order
+                replacements.sort(key=lambda x: x[0], reverse=True)
+                
+                new_code_list = list(code_text)
+                for start, end, rep_text in replacements:
+                    new_code_list[start:end] = list(rep_text)
+                    
+                new_code_text = "".join(new_code_list)
+                
+                # 3. Compress
+                new_bytes = zlib.compress(new_code_text.encode('utf-8'))
+                
+                # 4. Update entry
+                # Entry is [id, name, compressed_code]
+                # We need to modify the list in place
+                scripts[idx][2] = new_bytes
+                
+            except Exception as e:
+                logger.error(f"Failed to apply translations to script {idx}: {e}")
+                
+        return scripts
 
     def _traverse_key(self, ref: Any, key: str) -> Any:
         """Traverse to a key in the object structure."""

@@ -85,7 +85,9 @@ class AboutInterface(ScrollArea):
         self.lbl_license = CaptionLabel("Licensed under GNU GPLv3", self.scrollWidget)
         self.lbl_license.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
-        self.lbl_copyright = CaptionLabel("Copyright © 2024 LordOfTurk. All rights reserved.", self.scrollWidget)
+        import datetime
+        current_year = datetime.datetime.now().year
+        self.lbl_copyright = CaptionLabel(f"Copyright © {current_year} LordOfTurk. All rights reserved.", self.scrollWidget)
         self.lbl_copyright.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         # Add to main layout

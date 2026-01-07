@@ -52,7 +52,12 @@ class TranslationPipeline(QObject):
         super().__init__()
         self.settings = settings
         self.should_stop = False
-        self.translator = GoogleTranslator()
+        
+        # Get performance settings (defaults: 20 concurrent, 200 batch)
+        concurrency = self.settings.get("concurrent_requests", 20)
+        batch_size = self.settings.get("batch_size", 200)
+        
+        self.translator = GoogleTranslator(concurrency=concurrency, batch_size=batch_size)
         self.logger = logging.getLogger("Pipeline")
         
         # Optional components
@@ -206,43 +211,73 @@ class TranslationPipeline(QObject):
 
         if os.path.exists(plugin_js):
             files.append(plugin_js)
+        
+        # DKTools Localization / Plugin locale files (locales/*.json)
+        # Check both project root and www folder for locales
+        locale_candidates = [
+            os.path.join(project_root, "locales"),
+            os.path.join(os.path.dirname(project_root), "locales"),
+        ]
+        
+        for locales_dir in locale_candidates:
+            if os.path.exists(locales_dir) and os.path.isdir(locales_dir):
+                for entry in os.scandir(locales_dir):
+                    # Only include JSON files from locales folder (skip .pak files)
+                    if entry.is_file() and entry.name.lower().endswith('.json'):
+                        files.append(entry.path)
+                        self.log_message.emit("info", f"Found locale file: {entry.name}")
+                break  # Only use the first found locales dir
             
         # Sort for consistent ordering
         files.sort()
         return files
 
     def _extract_all_text(self, files: List[str]) -> Tuple[List[Tuple], Dict]:
-        """Extract text from all files."""
+        """Extract text from all files using parallel processing."""
         all_entries = []  # (file, path_key, text)
         parsed_files = {}  # file -> (parser, entries)
         
-        for file_path in files:
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        
+        lock = threading.Lock()
+        max_workers = min(os.cpu_count() or 4, 8) # Don't overwhelm IO but use cores
+        
+        def process_file(file_path):
             if self.should_stop:
-                break
-            
+                return None
+                
             parser = get_parser(file_path, self.settings)
             if not parser:
-                continue
+                return None
             
-            # Connect parser signals to pipeline
-            parser.log_message.connect(self.log_message.emit)
-            
+            # Use a safe way to emit from thread
             filename = os.path.basename(file_path)
-            self.log_message.emit("info", f"Parsing {filename}")
             
             try:
                 entries = parser.extract_text(file_path)
-                
                 if entries:
-                    parsed_files[file_path] = (parser, entries)
-                    for path, text in entries:
-                        # Basic filter: skip very short text
-                        if len(text.strip()) > 1:
-                            all_entries.append((file_path, path, text))
-                            
+                    # Filter short text here to reduce memory/overhead
+                    filtered = [(p, t) for p, t in entries if len(t.strip()) > 1]
+                    return file_path, parser, filtered
+                return None
             except Exception as e:
-                self.log_message.emit("error", f"Failed to parse {filename}: {e}")
+                self.logger.error(f"Failed to parse {filename}: {e}")
+                return None
+
+        self.log_message.emit("info", f"Starting parallel extraction with {max_workers} workers...")
         
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            results = list(executor.map(process_file, files))
+            
+        for res in results:
+            if res:
+                file_path, parser, entries = res
+                parsed_files[file_path] = (parser, entries)
+                for path, text in entries:
+                    all_entries.append((file_path, path, text))
+        
+        self.log_message.emit("info", f"Extraction completed. Found {len(all_entries)} items across {len(parsed_files)} files.")
         return all_entries, parsed_files
 
     def _translate_entries(self, entries: List[Tuple], source_lang: str, target_lang: str) -> Dict:
@@ -288,22 +323,31 @@ class TranslationPipeline(QObject):
         self.log_message.emit("info", f"Translating {len(to_translate)} entries ({total - len(to_translate)} from cache)")
         
         # Run async translation
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        chunk_size = 50
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
         requests = [req for _, req in to_translate]
         
-        async def process_chunks():
+        async def process_all():
+            self.log_message.emit("info", f"Sending {len(requests)} requests to translation engine...")
+            
+            # Helper for progress
             done = 0
-            for i in range(0, len(requests), chunk_size):
-                if self.should_stop:
-                    break
-                
-                chunk = requests[i:i + chunk_size]
-                results = await self.translator.translate_batch(chunk)
+            def on_progress(count):
+                nonlocal done
+                done += count
+                self.progress_updated.emit(done, len(requests), f"Processed {done}/{len(requests)}")
+
+            try:
+                results = await self.translator.translate_batch(requests, progress_callback=on_progress)
                 
                 for result in results:
+                    if self.should_stop:
+                        break
+                        
                     try:
                         if result.success:
                             file_path = result.metadata['file']
@@ -318,25 +362,28 @@ class TranslationPipeline(QObject):
                                 translated = self.glossary.restore_terms(translated, glossary_map)
                             
                             results_map[(file_path, path)] = translated
-                            self.log_message.emit("info", f"TL: {original[:30]}... -> {translated[:30]}...")
                             
                             # Cache the result
                             if self.cache:
                                 self.cache.set(original, translated, result.source_lang, result.target_lang)
+                                
                     except Exception as e:
-                        self.log_message.emit("error", f"Error processing translation result: {e}")
+                        self.logger.error(f"Error processing translation result: {e}")
                 
-                done += len(chunk)
-                self.progress_updated.emit(done, len(requests), f"Translated {done}/{len(requests)}")
+            except Exception as e:
+                self.log_message.emit("error", f"Translation failed: {e}")
+            
+            # Ensure translator is closed properly
+            await self.translator.close()
         
-        loop.run_until_complete(process_chunks())
-        loop.run_until_complete(self.translator.close())
-        loop.close()
+        loop.run_until_complete(process_all())
         
         return results_map
 
     def _save_translations(self, parsed_files: Dict, results_map: Dict):
-        """Apply translations and save files."""
+        """Apply translations and save files using parallel processing."""
+        from concurrent.futures import ThreadPoolExecutor
+        
         # Group by file
         file_updates = {}
         for (file_path, path), text in results_map.items():
@@ -344,24 +391,24 @@ class TranslationPipeline(QObject):
                 file_updates[file_path] = {}
             file_updates[file_path][path] = text
         
-        for file_path, changes in file_updates.items():
+        def save_file(file_path):
             if self.should_stop:
-                break
+                return
             
-            if file_path not in parsed_files:
-                continue
+            changes = file_updates.get(file_path)
+            if not changes or file_path not in parsed_files:
+                return
             
             parser, _ = parsed_files[file_path]
             filename = os.path.basename(file_path)
-            self.log_message.emit("info", f"Saving {filename} ({len(changes)} changes)")
             
             try:
                 # Create backup first
                 if self.backup_manager:
                     backup_path = self.backup_manager.create_backup(file_path)
                     if not backup_path:
-                        self.log_message.emit("warning", f"Backup failed for {filename}, skipping")
-                        continue
+                        self.logger.warning(f"Backup failed for {filename}, skipping")
+                        return
                 
                 # Apply translations
                 new_data = parser.apply_translation(file_path, changes)
@@ -372,11 +419,8 @@ class TranslationPipeline(QObject):
                         json.dump(new_data, f, ensure_ascii=False)
                 
                 elif file_path.endswith('.js'):
-                    # For js/plugins.js, we must restore the variable prefix
                     prefix = getattr(parser, '_js_prefix', "var $plugins = ")
                     suffix = getattr(parser, '_js_suffix', ";")
-                    
-                    # Ensure the applied data is serializable
                     with open(file_path, 'w', encoding='utf-8') as f:
                         f.write(prefix)
                         json.dump(new_data, f, ensure_ascii=False, indent=0)
@@ -387,17 +431,25 @@ class TranslationPipeline(QObject):
                     with open(file_path, 'wb') as f:
                         rubymarshal.writer.write(f, new_data)
                 
-                self.log_message.emit("success", f"Saved {filename}")
+                return filename
                 
             except Exception as e:
-                self.log_message.emit("error", f"Failed to save {filename}: {e}")
-                
+                self.logger.error(f"Failed to save {filename}: {e}")
                 # Try to restore from backup
                 if self.backup_manager:
                     backups = self.backup_manager.get_backups_for_file(file_path)
                     if backups:
-                        self.log_message.emit("info", f"Restoring {filename} from backup")
                         self.backup_manager.restore_backup(backups[-1], file_path)
+                return None
+
+        self.log_message.emit("info", f"Saving {len(file_updates)} files in parallel...")
+        
+        max_workers = min(os.cpu_count() or 4, 8)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            saved_filenames = list(executor.map(save_file, file_updates.keys()))
+            
+        success_count = len([f for f in saved_filenames if f])
+        self.log_message.emit("success", f"Successfully saved {success_count} files.")
 
     def _export_entries(self, entries: List[Tuple], export_path: str):
         """Export extracted entries to file."""

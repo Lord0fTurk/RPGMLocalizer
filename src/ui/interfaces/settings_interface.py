@@ -1,8 +1,45 @@
-from PyQt6.QtWidgets import QWidget, QVBoxLayout
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel
 from qfluentwidgets import (ScrollArea, SettingCardGroup, SwitchSettingCard, 
                             OptionsSettingCard, PushSettingCard, FluentIcon as FIF,
-                            TextEdit, CardWidget, StrongBodyLabel, CaptionLabel)
+                            TextEdit, CardWidget, StrongBodyLabel, CaptionLabel,
+                            Slider, SettingCard)
 from PyQt6.QtCore import Qt
+
+class SliderSettingCard(SettingCard):
+    """
+    Custom SettingCard with a Slider and Value Label, independent of qconfig.
+    """
+    def __init__(self, icon, title, content=None, parent=None):
+        super().__init__(icon, title, content, parent)
+        
+        self.valueLabel = QLabel(self)
+        self.slider = Slider(Qt.Orientation.Horizontal, self)
+        
+        # Add to layout
+        self.hBoxLayout.addWidget(self.valueLabel)
+        self.hBoxLayout.addSpacing(10)
+        self.hBoxLayout.addWidget(self.slider)
+        self.hBoxLayout.addSpacing(16)
+        
+        # Style
+        self.slider.setFixedWidth(200)
+        self.valueLabel.setObjectName("valueLabel")
+        
+        # Connect
+        self.slider.valueChanged.connect(self._on_value_changed)
+        
+    def _on_value_changed(self, value):
+        self.valueLabel.setText(str(value))
+        
+    def setValue(self, value):
+        self.slider.setValue(value)
+        self.valueLabel.setText(str(value))
+        
+    def value(self):
+        return self.slider.value()
+        
+    def setRange(self, min_val, max_val):
+        self.slider.setRange(min_val, max_val)
 
 class SettingsInterface(ScrollArea):
     """
@@ -67,6 +104,30 @@ class SettingsInterface(ScrollArea):
         self.pipelineGroup.addSettingCard(self.chk_cache)
         self.pipelineGroup.addSettingCard(self.btn_clear_cache)
 
+        # Performance Group
+        self.performanceGroup = SettingCardGroup("Performance", self.scrollWidget)
+        
+        self.slider_batch_size = SliderSettingCard(
+            icon=FIF.SPEED_HIGH,
+            title="Batch Processing Size",
+            content="Number of text entries to translate in a single request (50-500)",
+            parent=self.performanceGroup
+        )
+        self.slider_batch_size.setRange(50, 500)
+        self.slider_batch_size.setValue(200)
+        
+        self.slider_concurrent = SliderSettingCard(
+            icon=FIF.PEOPLE,
+            title="Concurrent Requests",
+            content="Maximum number of parallel translation requests (5-50)",
+            parent=self.performanceGroup
+        )
+        self.slider_concurrent.setRange(5, 50)
+        self.slider_concurrent.setValue(20)
+        
+        self.performanceGroup.addSettingCard(self.slider_batch_size)
+        self.performanceGroup.addSettingCard(self.slider_concurrent)
+        
         # Glossary Group
         self.glossaryGroup = SettingCardGroup("Glossary", self.scrollWidget)
         
@@ -121,6 +182,7 @@ class SettingsInterface(ScrollArea):
         # Add groups to layout
         self.expandLayout.addWidget(self.parserGroup)
         self.expandLayout.addWidget(self.pipelineGroup)
+        self.expandLayout.addWidget(self.performanceGroup)
         self.expandLayout.addWidget(self.glossaryGroup)
         self.expandLayout.addWidget(self.filterGroup)
         self.expandLayout.addStretch(1)

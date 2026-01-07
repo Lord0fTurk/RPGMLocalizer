@@ -59,7 +59,7 @@ class BaseTranslator(ABC):
             self._connector = None
 
     @abstractmethod
-    async def translate_batch(self, requests: List[TranslationRequest]) -> List[TranslationResult]:
+    async def translate_batch(self, requests: List[TranslationRequest], progress_callback=None) -> List[TranslationResult]:
         pass
 
 class GoogleTranslator(BaseTranslator):
@@ -92,9 +92,10 @@ class GoogleTranslator(BaseTranslator):
 
     BATCH_SEPARATOR = " ||| " 
 
-    def __init__(self, concurrency=16, max_slice_chars=3000):
+    def __init__(self, concurrency=16, batch_size=50, max_slice_chars=4500):
         super().__init__()
         self.concurrency = concurrency
+        self.batch_size = batch_size
         self.max_slice_chars = max_slice_chars
         self._endpoint_failures: Dict[str, int] = {}
         self._endpoint_index = 0
@@ -117,27 +118,24 @@ class GoogleTranslator(BaseTranslator):
         self._lingva_index = (self._lingva_index + 1) % len(self.lingva_instances)
         return self.lingva_instances[self._lingva_index]
 
-    async def translate_batch(self, requests: List[TranslationRequest]) -> List[TranslationResult]:
-        if not requests:
-            return []
-
-        # 1. Deduplicate
+    async def translate_batch(self, requests: List[TranslationRequest], progress_callback=None) -> List[TranslationResult]:
+        """Translate a list of requests with deduplication and batching."""
+        if not requests: return []
+        
+        # 1. Deduplication and indexing
         indexed = list(enumerate(requests))
-        unique_map: Dict[str, int] = {}
-        unique_list: List[Tuple[int, TranslationRequest]] = [] # original_index, req
-        dup_links: Dict[int, int] = {} # original_index -> unique_index
-
+        unique_reqs: Dict[str, int] = {} # text -> first_index
+        dup_links: Dict[int, int] = {} # original_index -> unique_first_index
+        
+        unique_list = []
         for idx, req in indexed:
-            if req.text in unique_map:
-                dup_links[idx] = unique_map[req.text]
-            else:
-                u_index = len(unique_list)
-                unique_map[req.text] = u_index
-                unique_list.append((u_index, req)) # store u_index for clarity
-                dup_links[idx] = u_index
+            if req.text not in unique_reqs:
+                unique_reqs[req.text] = idx
+                unique_list.append((idx, req))
+            dup_links[idx] = unique_reqs[req.text]
 
-        # Prepare protected text for all unique entries
-        unique_protected: List[Tuple[int, str, Dict[str, str], TranslationRequest]] = []
+        # 2. Protection
+        unique_protected = []
         for u_idx, req in unique_list:
             p_text, p_map = protect_rpgm_syntax(req.text)
             unique_protected.append((u_idx, p_text, p_map, req))
@@ -151,7 +149,7 @@ class GoogleTranslator(BaseTranslator):
              l = len(p_text)
              overhead = len(self.BATCH_SEPARATOR) if cur_batch else 0
              
-             if cur_batch and (cur_len + overhead + l > self.max_slice_chars or len(cur_batch) >= 25):
+             if cur_batch and (cur_len + overhead + l > self.max_slice_chars or len(cur_batch) >= self.batch_size):
                  final_slices.append(cur_batch)
                  cur_batch = []
                  cur_len = 0
@@ -164,48 +162,58 @@ class GoogleTranslator(BaseTranslator):
             final_slices.append(cur_batch)
 
         # 3. Process slices
-        # We need a way to map unique_index -> result
         unique_results: Dict[int, TranslationResult] = {}
-        
         sem = asyncio.Semaphore(self.concurrency)
 
         async def process_slice(indices: List[int]):
             async with sem:
+                s_lang = unique_protected[indices[0]][3].source_lang
+                t_lang = unique_protected[indices[0]][3].target_lang
+                
                 # Construct batch text
                 batch_texts = [unique_protected[i][1] for i in indices]
                 joined_text = self.BATCH_SEPARATOR.join(batch_texts)
                 
-                # Assume all have same lang (we should have grouped by lang earlier, but assuming single lang batch for now)
-                # If mixed langs, this fails. Validation required in caller or here.
-                # Assuming all same lang for MVP.
-                s_lang = unique_protected[indices[0]][3].source_lang
-                t_lang = unique_protected[indices[0]][3].target_lang
-                
                 translated_parts = await self._try_translate(joined_text, s_lang, t_lang, len(batch_texts))
                 
-                # If failed, return empty results
                 if not translated_parts:
-                    # Fill with error/empty
+                    # Retry items individually without racing to be gentle on Google
                     for i in indices:
-                        req = unique_protected[i][3]
-                        unique_results[unique_protected[i][0]] = TranslationResult(
-                            req.text, "", s_lang, t_lang, False, "Translation failed",
-                            metadata=req.metadata
-                        )
+                        if self._session is None: break # Closed
+                        u_idx = unique_protected[i][0]
+                        p_text, p_map, req = unique_protected[i][1], unique_protected[i][2], unique_protected[i][3]
+                        
+                        single_res = await self._try_translate(p_text, s_lang, t_lang, 1, racing=False)
+                        
+                        if single_res and single_res[0]:
+                            final_val = restore_rpgm_syntax(single_res[0], p_map)
+                            unique_results[u_idx] = TranslationResult(
+                                req.text, final_val, s_lang, t_lang, True, "", metadata=req.metadata
+                            )
+                        else:
+                            unique_results[u_idx] = TranslationResult(
+                                req.text, "", s_lang, t_lang, False, "Translation failed", metadata=req.metadata
+                            )
+                        
+                        # Report progress for each individual item during retry
+                        if progress_callback:
+                            progress_callback(1)
                     return
 
-                # Map back
+                # Map back successful batch
                 for i, t_text in zip(indices, translated_parts):
                     u_idx = unique_protected[i][0]
                     p_map = unique_protected[i][2]
                     req = unique_protected[i][3]
                     
                     final_text = restore_rpgm_syntax(t_text.strip(), p_map)
-                    
                     unique_results[u_idx] = TranslationResult(
-                        req.text, final_text, s_lang, t_lang, True,
-                        metadata=req.metadata
+                        req.text, final_text, s_lang, t_lang, True, metadata=req.metadata
                     )
+
+                # Report progress for the whole batch
+                if progress_callback:
+                    progress_callback(len(indices))
 
         tasks = [process_slice(sl) for sl in final_slices]
         await asyncio.gather(*tasks)
@@ -217,12 +225,11 @@ class GoogleTranslator(BaseTranslator):
             if u_idx in unique_results:
                 results.append(unique_results[u_idx])
             else:
-                 # Should not happen if all slices handled
                  results.append(TranslationResult(req.text, "", req.source_lang, req.target_lang, False, "Missing result", metadata=req.metadata))
                  
         return results
 
-    async def _try_translate(self, text: str, source: str, target: str, expected_count: int) -> Optional[List[str]]:
+    async def _try_translate(self, text: str, source: str, target: str, expected_count: int, racing: bool = True) -> Optional[List[str]]:
         """Try with Google endpoints, then Lingva."""
         
         params = {
@@ -233,10 +240,9 @@ class GoogleTranslator(BaseTranslator):
             "q": text
         }
         
-        query = urllib.parse.urlencode(params)
-        
-        # 1. Google Racing (Parallel)
-        endpoints = [self._get_next_endpoint() for _ in range(3)]
+        # 1. Google Racing (Parallel) - Use 3 endpoints if racing, else only 1
+        n_endpoints = 3 if racing else 1
+        endpoints = [self._get_next_endpoint() for _ in range(n_endpoints)]
         
         async def call_endpoint(ep):
             try:

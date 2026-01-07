@@ -1,0 +1,97 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: Build for ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        include:
+          - os: windows-latest
+            artifact_name: RPGMLocalizer.exe
+            asset_name: RPGMLocalizer_Windows.exe
+          - os: ubuntu-latest
+            artifact_name: dist/RPGMLocalizer
+            asset_name: RPGMLocalizer_Linux
+          - os: macos-latest
+            artifact_name: dist/RPGMLocalizer
+            asset_name: RPGMLocalizer_MacOS
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller RPGMLocalizer.spec
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.artifact_name }}
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download Windows Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: RPGMLocalizer_Windows.exe
+          path: ./dist-windows
+
+      - name: Download Linux Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: RPGMLocalizer_Linux
+          path: ./dist-linux
+
+      - name: Download MacOS Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: RPGMLocalizer_MacOS
+          path: ./dist-macos
+
+      - name: Prepare Release Assets
+        run: |
+          mv ./dist-windows/RPGMLocalizer.exe ./RPGMLocalizer_Windows.exe
+          mv ./dist-linux/RPGMLocalizer ./RPGMLocalizer_Linux
+          chmod +x ./RPGMLocalizer_Linux
+          mv ./dist-macos/RPGMLocalizer ./RPGMLocalizer_MacOS
+          chmod +x ./RPGMLocalizer_MacOS
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            RPGMLocalizer_Windows.exe
+            RPGMLocalizer_Linux
+            RPGMLocalizer_MacOS
+          body_path: CHANGELOG.md
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

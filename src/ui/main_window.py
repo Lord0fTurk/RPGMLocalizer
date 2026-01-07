@@ -7,7 +7,6 @@ from PyQt6.QtWidgets import QApplication
 
 from qfluentwidgets import (FluentWindow, NavigationItemPosition, FluentTranslator, 
                             FluentIcon as FIF, SplashScreen, InfoBar, InfoBarPosition)
-from qfluentwidgets import setTheme, Theme
 
 from src.core.translation_pipeline import TranslationPipeline
 from src.core.enums import PipelineStage
@@ -79,12 +78,17 @@ class MainWindow(FluentWindow):
         w, h = desktop.width(), desktop.height()
         self.move(w//2 - self.width()//2, h//2 - self.height()//2)
         
-        # Default Theme: Dark
-        setTheme(Theme.DARK)
+        # Theme is set in main.py before widget creation
 
     def start_pipeline(self, data: dict):
-        if self.thread and self.thread.isRunning():
-            return
+        # Check if thread exists AND is still valid (not deleted)
+        try:
+            if self.thread is not None and self.thread.isRunning():
+                return
+        except RuntimeError:
+            # Thread was deleted, reset references
+            self.thread = None
+            self.pipeline = None
             
         # 1. Gather all settings (Merge Home data with Settings page data)
         settings = data.copy()
@@ -112,6 +116,11 @@ class MainWindow(FluentWindow):
             settings["export_only"] = self.exportInterface.chk_export_only.isChecked()
         if self.exportInterface.import_path:
             settings["import_path"] = self.exportInterface.import_path
+            
+        # Performance Settings
+        # Custom SliderSettingCard exposes .value() directly
+        settings["batch_size"] = self.settingsInterface.slider_batch_size.value()
+        settings["concurrent_requests"] = self.settingsInterface.slider_concurrent.value()
         
         # 2. Initialize Thread & Pipeline
         self.thread = QThread()
@@ -128,6 +137,7 @@ class MainWindow(FluentWindow):
         # Cleanup on finish
         self.pipeline.finished.connect(self.thread.quit)
         self.pipeline.finished.connect(self.pipeline.deleteLater)
+        self.thread.finished.connect(self._cleanup_thread)
         self.thread.finished.connect(self.thread.deleteLater)
         
         # 4. Update UI State
@@ -137,6 +147,14 @@ class MainWindow(FluentWindow):
         
         # 5. Start
         self.thread.start()
+
+    def _cleanup_thread(self):
+        """Reset thread and pipeline references after cleanup."""
+        try:
+            self.thread = None
+            self.pipeline = None
+        except Exception:
+            pass
 
     def stop_pipeline(self):
         if self.pipeline:
@@ -149,10 +167,6 @@ class MainWindow(FluentWindow):
         
         level = "success" if success else "error"
         self.on_log_message(level, message)
-        
-        # No need to manually set to None, allow deleteLater to handle cleanup
-        # self.thread = None
-        # self.pipeline = None
 
     def on_progress(self, current, total):
         if total > 0:

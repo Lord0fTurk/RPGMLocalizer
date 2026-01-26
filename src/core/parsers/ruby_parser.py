@@ -22,11 +22,13 @@ class RubyParser(BaseParser):
         401: 'show_text',           # Show Text line
         102: 'show_choices',        # Show Choices
         402: 'choice_when',         # When [Choice]
+        105: 'scroll_text_header',  # Scroll Text header
         405: 'scroll_text',         # Scroll Text line
         108: 'comment',             # Comment
         408: 'comment_cont',        # Comment continuation
         320: 'change_name',         # Change Actor Name
         324: 'change_nickname',     # Change Actor Nickname (VX Ace)
+        325: 'change_profile',      # Change Actor Profile
         355: 'script_single',       # Script
         655: 'script_line',         # Script continuation
     }
@@ -35,6 +37,8 @@ class RubyParser(BaseParser):
     TRANSLATABLE_ATTRS = {
         'name', 'description', 'nickname', 'profile',
         'message1', 'message2', 'message3', 'message4',
+        'help', 'title', 'display_name', 'text', 'msg', 'message',
+        'game_title', 'currency_unit'
     }
     
     # System data keys to translate
@@ -243,9 +247,16 @@ class RubyParser(BaseParser):
         elif hasattr(val, 'attributes'):
             attrs = getattr(val, 'attributes', {})
             
-            # Normalize attribute access (handle @code vs code)
+            # Normalize attribute access (handle @code vs code, bytes vs str)
             def get_attr(name):
-                return attrs.get(name) or attrs.get(f'@{name}') or attrs.get(name.lstrip('@'))
+                # rubymarshal keys can be bytes (symbols) or strings
+                possibilities = [
+                    name, f"@{name}", name.encode('utf-8'), f"@{name}".encode('utf-8')
+                ]
+                for p in possibilities:
+                    if p in attrs:
+                        return attrs[p]
+                return None
             
             code = get_attr('code')
             params = get_attr('parameters')
@@ -294,6 +305,21 @@ class RubyParser(BaseParser):
                 text = self._to_string(params[1])
                 if self.is_safe_to_translate(text, is_dialogue=True):
                     self.extracted.append((f"{path}.@parameters.1", text))
+        
+        # Change Profile (325)
+        elif code == 325:
+            if len(params) > 1:
+                text = self._to_string(params[1])
+                if self.is_safe_to_translate(text, is_dialogue=True):
+                    self.extracted.append((f"{path}.@parameters.1", text))
+        
+        # Show Choices (102)
+        elif code == 102:
+            if len(params) > 0 and isinstance(params[0], (list, tuple)):
+                for i, choice in enumerate(params[0]):
+                    text = self._to_string(choice)
+                    if self.is_safe_to_translate(text, is_dialogue=True):
+                        self.extracted.append((f"{path}.@parameters.0.{i}", text))
 
     def _to_string(self, val: Any) -> str:
         """Convert a value to string, handling bytes and common encodings."""
@@ -444,7 +470,10 @@ class RubyParser(BaseParser):
                 return ref.get(attr_name) or ref.get(key)
             elif hasattr(ref, 'attributes'):
                 attrs = ref.attributes
-                return attrs.get(attr_name) or attrs.get(key)
+                # Try all combinations: string, @string, bytes, @bytes
+                for k in [attr_name, key, attr_name.encode('utf-8'), key.encode('utf-8')]:
+                    if k in attrs: return attrs[k]
+                return None
         
         # Regular dict/list access
         if isinstance(ref, dict):
@@ -480,7 +509,15 @@ class RubyParser(BaseParser):
                 ref[orig_key] = final_value
             elif hasattr(ref, 'attributes'):
                 attrs = ref.attributes
-                orig_key = attr_name if attr_name in attrs else key
+                # Determine original key type (bytes vs str)
+                orig_key = None
+                for k in [attr_name, key, attr_name.encode('utf-8'), key.encode('utf-8')]:
+                    if k in attrs:
+                        orig_key = k
+                        break
+                
+                if orig_key is None: orig_key = key.encode('utf-8') # Default to symbol
+                
                 if isinstance(attrs.get(orig_key), bytes):
                     final_value = value.encode('utf-8')
                 attrs[orig_key] = final_value

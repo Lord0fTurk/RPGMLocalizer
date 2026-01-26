@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.5.3] - 2026-01-26
+
+### Added
+- **VX Ace Show Choices Support**: Added Code 102 (Show Choices) extraction for VX Ace games.
+- **VX Ace Change Profile Support**: Added Code 325 (Change Actor Profile) for VX Ace.
+- **Extended System Terms**: Added `etypeNames`, `stypeNames`, `wtypeNames`, `atypeNames` to translatable System.json fields (Equipment/Skill/Weapon/Armor type names).
+
+### Fixed
+- **RPG Maker VX Ace Support**: Fixed critical bug where Ruby Marshal symbols (bytes keys like `b'@code'`) were not being recognized, causing "No text found to translate" error on all VX Ace games.
+- **Expanded Translatable Fields**: Added `display_name`, `help`, `title`, `text`, `msg`, `message`, `game_title`, `currency_unit` to the list of translatable Ruby attributes.
+- **Filter Logic Correction**: Fixed inverted logic in `is_safe_to_translate` that was incorrectly accepting technical identifiers (e.g., `Actor1`, `Map_001`) while rejecting valid text.
+- **Improved Placeholder Restoration**: Enhanced regex patterns to recover mangled placeholders from translation engines (handles `(0)`, `[0]`, `{0}`, `<0>` variations).
+
 ## [v0.5.2] - 2026-01-25
 
 ### Added

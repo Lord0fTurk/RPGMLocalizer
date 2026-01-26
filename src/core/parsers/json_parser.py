@@ -54,7 +54,9 @@ class JsonParser(BaseParser):
     SYSTEM_TERMS = {
         'basic', 'commands', 'params', 'messages',
         'elements', 'skillTypes', 'weaponTypes', 'armorTypes', 'equipTypes',
-        'terms', 'types'
+        'terms', 'types',
+        # Additional MV/MZ system arrays
+        'etypeNames', 'stypeNames', 'wtypeNames', 'atypeNames',
     }
     
     # Fields to skip (internal use, not for translation)

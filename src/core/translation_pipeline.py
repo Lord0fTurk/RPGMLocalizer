@@ -23,6 +23,7 @@ from .cache import TranslationCache, get_cache
 from .export_import import TranslationExporter, TranslationImporter
 from src.utils.backup import BackupManager, get_backup_manager
 from .enums import PipelineStage
+from src.utils.file_ops import safe_write
 
 
 class TranslationPipeline(QObject):
@@ -415,20 +416,20 @@ class TranslationPipeline(QObject):
                 
                 # Write file
                 if file_path.endswith('.json'):
-                    with open(file_path, 'w', encoding='utf-8') as f:
+                    with safe_write(file_path, 'w', encoding='utf-8') as f:
                         json.dump(new_data, f, ensure_ascii=False)
                 
                 elif file_path.endswith('.js'):
                     prefix = getattr(parser, '_js_prefix', "var $plugins = ")
                     suffix = getattr(parser, '_js_suffix', ";")
-                    with open(file_path, 'w', encoding='utf-8') as f:
+                    with safe_write(file_path, 'w', encoding='utf-8') as f:
                         f.write(prefix)
                         json.dump(new_data, f, ensure_ascii=False, indent=0)
                         f.write(suffix)
                         
                 elif file_path.endswith(('.rvdata2', '.rxdata', '.rvdata')):
                     import rubymarshal.writer
-                    with open(file_path, 'wb') as f:
+                    with safe_write(file_path, 'wb') as f:
                         rubymarshal.writer.write(f, new_data)
                 
                 return filename

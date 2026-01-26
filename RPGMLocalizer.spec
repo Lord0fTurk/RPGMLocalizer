@@ -33,6 +33,7 @@ a = Analysis(
         'src.utils.backup',
         'src.utils.paths',
         'src.utils.placeholder',
+        'src.utils.file_ops',
         'rubymarshal',
         'aiohttp',
         'qfluentwidgets',

@@ -240,6 +240,8 @@ class GoogleTranslator(BaseTranslator):
             "q": text
         }
         
+        query = urllib.parse.urlencode(params)
+        
         # 1. Google Racing (Parallel) - Use 3 endpoints if racing, else only 1
         n_endpoints = 3 if racing else 1
         endpoints = [self._get_next_endpoint() for _ in range(n_endpoints)]

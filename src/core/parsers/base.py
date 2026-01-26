@@ -85,7 +85,7 @@ class BaseParser(QObject, metaclass=ParserMeta):
         if ' ' not in trimmed:
             # Allow if it contains non-ASCII characters (likely localized text even if single word/no spaces)
             if any(ord(c) > 127 for c in trimmed):
-                return False
+                return True
                 
             # If it has underscores or Mixed_Case, likely a key
             if '_' in trimmed:

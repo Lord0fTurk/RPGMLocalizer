@@ -110,47 +110,44 @@ def restore_rpgm_syntax(text: str, placeholders: Dict[str, str]) -> str:
     result = text
     missing_keys = []
     
+    # 1. First Pass: Exact Replacements (Fastest & Safest)
     for key, original in placeholders.items():
-        # Key format is 〖n〗
-        # Extract the ID
-        try:
-            ph_id = key[1:-1]
-        except IndexError:
-            ph_id = "0"
-            
-        # 1. Strict (Fast)
         if key in result:
             result = result.replace(key, original)
-            continue
             
-        # 2. Robust Regex Search for Mangled Keys
-        # Look for [n], (n), {n}, 〖n〗 with optional spaces
-        # Pattern: (open_bracket)\s*ID\s*(close_bracket)
-        # where brackets can be [], (), {}, 〖〗
-        esc_id = re.escape(ph_id)
-        
-        # Matches: 〖 0 〗, [ 0 ], ( 0 ), { 0 }, 0
-        # Check specific common corrupted forms first
-        patterns = [
-            r'〖\s*' + esc_id + r'\s*〗',  # Modified original 〖 0 〗
-            r'\[\s*' + esc_id + r'\s*\]',  # [ 0 ]
-            r'\(\s*' + esc_id + r'\s*\)',  # ( 0 )
-            r'\{\s*' + esc_id + r'\s*\}',  # { 0 }
-        ]
-        
-        found = False
-        for pat in patterns:
-            regex = re.compile(pat)
-            if regex.search(result):
-                result = regex.sub(lambda m: original, result, count=1)
-                found = True
-                break
-        
-        if not found:
-            missing_keys.append(key)
+    # Check what's still missing
+    for key, original in placeholders.items():
+        if key not in result and original not in result: # Check if original might have been put back already
+             
+            # Key format is 〖n〗
+            try:
+                ph_id = key[1:-1]
+            except IndexError:
+                continue
+
+            # 2. Robust Regex Search for Mangled Keys
+            # Looks for any bracket type with the ID inside: (0), [0], {0}, <0>, 〖0〗
+            # Also handles flexible whitespace: ( 0 )
+            esc_id = re.escape(ph_id)
+            
+            # Pattern: Any opening bracket + whitespace? + ID + whitespace? + Any closing bracket
+            # We construct a specific pattern for this ID to minimize false positives
+            pattern = r'(?:[〖\[\(\{\<])\s*' + esc_id + r'\s*(?:[〗\]\)\}\>])'
+            
+            match = re.search(pattern, result)
+            if match:
+                # Replace the first occurrence found
+                result = result.replace(match.group(0), original, 1)
+            else:
+                # 3. Last Resort: Check if the number itself exists surrounded by weird characters?
+                # Maybe too risky. For now, mark as missing.
+                missing_keys.append(key)
     
     if missing_keys:
         logger.warning(f"Could not restore {len(missing_keys)} placeholders: {missing_keys[:3]}...")
+        # Optional: Append missing originals to the end to prevent game logic break?
+        # for key in missing_keys:
+        #     result += " " + placeholders[key]
             
     return result
 

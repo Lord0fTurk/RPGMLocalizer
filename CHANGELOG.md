@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.5.2] - 2026-01-25
+
+### Added
+- **Atomic File Writes**: Implemented safe file writing to prevent data corruption during crashes or power loss.
+- **Encrypted Game Detection**: Added automatic detection and warning for encrypted RPG Maker games (`.rgss3a`, `.rpgmvp`), guiding users to decrypt them first.
+
+### Fixed
+- **Major Translation Fix**: Fixed a critical bug where text containing non-ASCII characters (e.g., Vietnamese, Japanese) was erroneously filtered out, preventing translation.
+- **Translator API Fix**: Resolved a critical issue where the query string was not being correctly formed, causing API requests to fail completely.
+
 ## [v0.5.1] - 2026-01-06
 
 ### Added

@@ -3,7 +3,8 @@ from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QFileDialog, QLab
 from PyQt6.QtCore import Qt, pyqtSignal as Signal
 from qfluentwidgets import (LineEdit, PrimaryPushButton, PushButton, ComboBox, 
                             StrongBodyLabel, CaptionLabel, CardWidget, BodyLabel,
-                            TransparentToolButton, FluentIcon as FIF, ProgressBar)
+                            TransparentToolButton, FluentIcon as FIF, ProgressBar,
+                            InfoBar, InfoBarPosition)
 
 class HomeInterface(QWidget):
     """
@@ -207,6 +208,53 @@ class HomeInterface(QWidget):
             # We save the directory containing the exe as the project path
             directory = os.path.dirname(file_path)
             self.txt_path.setText(directory)
+            self._check_encrypted_game(directory)
+            
+    def _check_encrypted_game(self, path):
+        """Check for potentially encrypted game files and warn user."""
+        try:
+            # Common encrypted archive extensions
+            encrypted = False
+            enc_files = []
+            
+            # Check root and standard subfolders
+            to_check = [path]
+            if os.path.isdir(os.path.join(path, "www")):
+                to_check.append(os.path.join(path, "www"))
+                
+            for p in to_check:
+                if not os.path.exists(p): continue
+                found = [f for f in os.listdir(p) if f.lower().endswith(('.rgss3a', '.rpgmvp', '.rpgmwo', '.rpgmvm'))]
+                if found:
+                    encrypted = True
+                    enc_files.extend(found)
+            
+            # If encrypted files exist, check if we can find open Data files
+            has_data = False
+            data_dirs = [os.path.join(path, "Data"), os.path.join(path, "data"), os.path.join(path, "www", "data")]
+            
+            for d in data_dirs:
+                if os.path.exists(d) and os.path.isdir(d):
+                    # Check if it has readable content
+                    json_or_rb = [f for f in os.listdir(d) if f.lower().endswith(('.json', '.rvdata2', '.rxdata'))]
+                    if json_or_rb:
+                        has_data = True
+                        break
+            
+            if encrypted and not has_data:
+                InfoBar.warning(
+                    title="Şifreli Oyun Tespit Edildi",
+                    content=f"Bu oyun şifreli dosyalara ({enc_files[0]} vb.) sahip ve açık 'Data' klasörü bulunamadı.\n"
+                            "Lütfen önce bir 'RPG Maker Decrypter' aracı ile oyun dosyalarını açınız, aksi halde çeviri yapılamaz.",
+                    orient=Qt.Orientation.Horizontal,
+                    isClosable=True,
+                    position=InfoBarPosition.TOP_RIGHT,
+                    duration=10000,
+                    parent=self
+                )
+                
+        except Exception as e:
+            print(f"Error checking encryption: {e}")
             
     def _on_start(self):
         path = self.txt_path.text().strip()

@@ -110,11 +110,11 @@ class SettingsInterface(ScrollArea):
         self.slider_batch_size = SliderSettingCard(
             icon=FIF.SPEED_HIGH,
             title="Batch Processing Size",
-            content="Number of text entries to translate in a single request (50-500)",
+            content="Number of text entries to merge per request (1=safest, 10=fast, 50+=risky)",
             parent=self.performanceGroup
         )
-        self.slider_batch_size.setRange(50, 500)
-        self.slider_batch_size.setValue(200)
+        self.slider_batch_size.setRange(1, 200)
+        self.slider_batch_size.setValue(1)
         
         self.slider_concurrent = SliderSettingCard(
             icon=FIF.PEOPLE,
@@ -127,6 +127,58 @@ class SettingsInterface(ScrollArea):
         
         self.performanceGroup.addSettingCard(self.slider_batch_size)
         self.performanceGroup.addSettingCard(self.slider_concurrent)
+
+        # Network Group
+        self.networkGroup = SettingCardGroup("Network", self.scrollWidget)
+
+        self.chk_multi_endpoint = SwitchSettingCard(
+            FIF.SPEED_HIGH,
+            "Use Multiple Google Mirrors",
+            "Rotate between multiple Google endpoints for stability",
+            parent=self.networkGroup
+        )
+        self.chk_multi_endpoint.setChecked(True)
+
+        self.chk_lingva_fallback = SwitchSettingCard(
+            FIF.SPEED_HIGH,
+            "Enable Lingva Fallback",
+            "Use Lingva as a fallback if Google endpoints fail",
+            parent=self.networkGroup
+        )
+        self.chk_lingva_fallback.setChecked(True)
+
+        self.slider_request_delay = SliderSettingCard(
+            icon=FIF.SPEED_HIGH,
+            title="Request Delay (ms)",
+            content="Delay between requests to reduce rate limits",
+            parent=self.networkGroup
+        )
+        self.slider_request_delay.setRange(0, 1000)
+        self.slider_request_delay.setValue(150)
+
+        self.slider_timeout = SliderSettingCard(
+            icon=FIF.SPEED_HIGH,
+            title="Request Timeout (sec)",
+            content="Maximum time to wait for a response",
+            parent=self.networkGroup
+        )
+        self.slider_timeout.setRange(5, 30)
+        self.slider_timeout.setValue(15)
+
+        self.slider_max_retries = SliderSettingCard(
+            icon=FIF.SPEED_HIGH,
+            title="Max Retries",
+            content="Retry count for transient failures",
+            parent=self.networkGroup
+        )
+        self.slider_max_retries.setRange(1, 5)
+        self.slider_max_retries.setValue(3)
+
+        self.networkGroup.addSettingCard(self.chk_multi_endpoint)
+        self.networkGroup.addSettingCard(self.chk_lingva_fallback)
+        self.networkGroup.addSettingCard(self.slider_request_delay)
+        self.networkGroup.addSettingCard(self.slider_timeout)
+        self.networkGroup.addSettingCard(self.slider_max_retries)
         
         # Glossary Group
         self.glossaryGroup = SettingCardGroup("Glossary", self.scrollWidget)
@@ -183,6 +235,7 @@ class SettingsInterface(ScrollArea):
         self.expandLayout.addWidget(self.parserGroup)
         self.expandLayout.addWidget(self.pipelineGroup)
         self.expandLayout.addWidget(self.performanceGroup)
+        self.expandLayout.addWidget(self.networkGroup)
         self.expandLayout.addWidget(self.glossaryGroup)
         self.expandLayout.addWidget(self.filterGroup)
         self.expandLayout.addStretch(1)
@@ -234,3 +287,38 @@ class SettingsInterface(ScrollArea):
                 QMessageBox.information(self, "Success", f"Sample glossary created at:\n{path}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to create file:\n{e}")
+
+    def set_glossary_path(self, path: str):
+        """Update the glossary path from external source."""
+        if path:
+            self.glossary_path = path
+            self.card_glossary_path.setContent(path)
+            self.chk_glossary.setChecked(True)
+
+    def apply_settings(self, settings: dict):
+        if not settings:
+            return
+
+        self.chk_translate_comments.setChecked(settings.get("translate_comments", True))
+        self.chk_translate_notes.setChecked(settings.get("translate_notes", False))
+
+        self.chk_backup.setChecked(settings.get("backup_enabled", True))
+        self.chk_cache.setChecked(settings.get("use_cache", True))
+
+        self.slider_batch_size.setValue(settings.get("batch_size", self.slider_batch_size.value()))
+        self.slider_concurrent.setValue(settings.get("concurrent_requests", self.slider_concurrent.value()))
+
+        self.chk_multi_endpoint.setChecked(settings.get("use_multi_endpoint", True))
+        self.chk_lingva_fallback.setChecked(settings.get("enable_lingva_fallback", True))
+        self.slider_request_delay.setValue(settings.get("request_delay_ms", self.slider_request_delay.value()))
+        self.slider_timeout.setValue(settings.get("request_timeout", self.slider_timeout.value()))
+        self.slider_max_retries.setValue(settings.get("max_retries", self.slider_max_retries.value()))
+
+        regex_list = settings.get("regex_blacklist")
+        if isinstance(regex_list, list):
+            self.txt_regex.setPlainText("\n".join(regex_list))
+
+        glossary_path = settings.get("glossary_path", "")
+        if glossary_path:
+            self.set_glossary_path(glossary_path)
+            self.chk_glossary.setChecked(settings.get("use_glossary", True))

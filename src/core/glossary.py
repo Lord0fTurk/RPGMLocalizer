@@ -25,9 +25,10 @@ class Glossary:
         Args:
             glossary_path: Optional path to a JSON glossary file.
         """
-        self.terms: Dict[str, str] = {}
+        self.terms: Dict[str, Dict[str, Any]] = {}  # { original: { 'translation': str, 'is_regex': bool } }
         self.case_sensitive: bool = False
         self._pattern: Optional[re.Pattern] = None
+        self._regex_rules: List[Tuple[re.Pattern, str]] = []  # List of (compiled_pattern, translation_template)
         
         if glossary_path:
             self.load(glossary_path)
@@ -50,7 +51,14 @@ class Glossary:
                 data = json.load(f)
             
             if isinstance(data, dict):
-                self.terms = data.get('terms', data)  # Support both formats
+                raw_terms = data.get('terms', {})
+                # Normalize terms to new structure
+                for key, val in raw_terms.items():
+                    if isinstance(val, str):
+                        self.terms[key] = {'translation': val, 'is_regex': False}
+                    elif isinstance(val, dict):
+                        self.terms[key] = val
+                
                 self.case_sensitive = data.get('case_sensitive', False)
             else:
                 logger.warning(f"Invalid glossary format in {file_path}")
@@ -81,9 +89,9 @@ class Glossary:
             logger.error(f"Failed to save glossary: {e}")
             return False
     
-    def add_term(self, original: str, translation: str):
+    def add_term(self, original: str, translation: str, is_regex: bool = False):
         """Add a term to the glossary."""
-        self.terms[original] = translation
+        self.terms[original] = {'translation': translation, 'is_regex': is_regex}
         self._build_pattern()
     
     def remove_term(self, original: str):
@@ -93,45 +101,72 @@ class Glossary:
     
     def _build_pattern(self):
         """Build regex pattern for matching glossary terms."""
+        self._pattern = None
+        self._regex_rules = []
+        
         if not self.terms:
-            self._pattern = None
             return
         
-        # Sort by length (longest first) to match longer terms first
-        sorted_terms = sorted(self.terms.keys(), key=len, reverse=True)
+        # Split into normal and regex terms
+        normal_terms = []
         
-        # Escape special regex characters
-        escaped = [re.escape(term) for term in sorted_terms]
+        for key, data in self.terms.items():
+            if data.get('is_regex'):
+                try:
+                    flags = 0 if self.case_sensitive else re.IGNORECASE
+                    self._regex_rules.append((re.compile(key, flags), data['translation']))
+                except re.error as e:
+                    logger.error(f"Invalid regex glossary term '{key}': {e}")
+            else:
+                normal_terms.append(key)
         
-        # Build pattern with word boundaries
-        pattern_str = r'\b(' + '|'.join(escaped) + r')\b'
-        
-        flags = 0 if self.case_sensitive else re.IGNORECASE
-        self._pattern = re.compile(pattern_str, flags)
+        # Build normal pattern
+        if normal_terms:
+            # Sort by length (longest first)
+            normal_terms.sort(key=len, reverse=True)
+            escaped = [re.escape(term) for term in normal_terms]
+            pattern_str = r'\b(' + '|'.join(escaped) + r')\b'
+            flags = 0 if self.case_sensitive else re.IGNORECASE
+            self._pattern = re.compile(pattern_str, flags)
     
     def protect_terms(self, text: str) -> Tuple[str, Dict[str, str]]:
         """
         Protect glossary terms in text with placeholders.
-        
-        Returns:
-            Tuple of (protected_text, placeholder_map)
         """
-        if not self._pattern or not self.terms:
-            return text, {}
-        
         placeholders: Dict[str, str] = {}
-        counter = [0]  # Use list for mutability in nested function
-        
-        def replacer(match):
-            original = match.group(0)
+        counter = [0]
+        protected_text = text
+
+        def get_placeholder(original, translation):
             key = f"〈TERM_{counter[0]}〉"
-            # Store both original and its translation
-            placeholders[key] = (original, self._get_translation(original))
+            placeholders[key] = (original, translation)
             counter[0] += 1
             return key
-        
-        protected = self._pattern.sub(replacer, text)
-        return protected, placeholders
+
+        # 1. Apply Regex Rules First (Higher priority for patterns like "Potion (S)")
+        for pattern, replacement_template in self._regex_rules:
+            
+            def regex_replacer(match):
+                original = match.group(0)
+                # Apply template substitution (e.g. \1 for groups)
+                try:
+                    translation = match.expand(replacement_template)
+                except Exception:
+                    translation = replacement_template # Fallback
+                return get_placeholder(original, translation)
+            
+            protected_text = pattern.sub(regex_replacer, protected_text)
+
+        # 2. Apply Normal Terms
+        if self._pattern:
+            def normal_replacer(match):
+                original = match.group(0)
+                translation = self._get_translation(original)
+                return get_placeholder(original, translation)
+            
+            protected_text = self._pattern.sub(normal_replacer, protected_text)
+
+        return protected_text, placeholders
     
     def restore_terms(self, text: str, placeholders: Dict[str, Tuple[str, str]], 
                       use_translation: bool = True) -> str:
@@ -154,13 +189,15 @@ class Glossary:
     def _get_translation(self, term: str) -> str:
         """Get translation for a term, handling case sensitivity."""
         if self.case_sensitive:
-            return self.terms.get(term, term)
+            data = self.terms.get(term)
+            return data['translation'] if data else term
         
         # Case-insensitive lookup
         term_lower = term.lower()
-        for key, value in self.terms.items():
+        term_lower = term.lower()
+        for key, val in self.terms.items():
             if key.lower() == term_lower:
-                return value
+                return val['translation']
         return term
     
     def apply_to_text(self, text: str) -> str:

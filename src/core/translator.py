@@ -7,13 +7,29 @@ from __future__ import annotations
 import asyncio
 import aiohttp
 import logging
+import re
+import time
+import random
 import urllib.parse
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional, Tuple, Any
 from abc import ABC, abstractmethod
 
-from src.utils.placeholder import protect_rpgm_syntax, restore_rpgm_syntax
+from src.utils.placeholder import protect_rpgm_syntax, restore_rpgm_syntax, validate_restoration
+from src.core.constants import (
+    TRANSLATOR_MAX_SAFE_CHARS,
+    TRANSLATOR_MAX_SLICE_CHARS,
+    TRANSLATOR_RECURSION_MAX_DEPTH,
+    DEFAULT_USE_MULTI_ENDPOINT,
+    DEFAULT_ENABLE_LINGVA_FALLBACK,
+    DEFAULT_REQUEST_DELAY_MS,
+    DEFAULT_TIMEOUT_SECONDS,
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_MIRROR_MAX_FAILURES,
+    DEFAULT_MIRROR_BAN_TIME,
+    DEFAULT_RACING_ENDPOINTS
+)
 
 class TranslationEngine(Enum):
     GOOGLE = "google"
@@ -37,34 +53,55 @@ class TranslationResult:
     metadata: Dict = field(default_factory=dict)
 
 class BaseTranslator(ABC):
-    def __init__(self):
+    def __init__(self, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS):
         self.logger = logging.getLogger(self.__class__.__name__)
         self._session: Optional[aiohttp.ClientSession] = None
         self._connector: Optional[aiohttp.TCPConnector] = None
+        self.timeout_seconds = timeout_seconds
 
     async def _get_session(self) -> aiohttp.ClientSession:
+        """
+        Get or create an aiohttp ClientSession.
+        Reuses the session if it's already open, creates a new one otherwise.
+        
+        Important: Call close() when done to avoid resource leaks.
+        """
         if self._session is None or self._session.closed:
             self._connector = aiohttp.TCPConnector(limit=256, ttl_dns_cache=300)
-            timeout = aiohttp.ClientTimeout(total=15)
+            timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
             self._session = aiohttp.ClientSession(connector=self._connector, timeout=timeout)
         return self._session
 
     async def close(self):
+        """
+        Close the aiohttp session and connector.
+        Call this when the translator is no longer needed to prevent resource leaks.
+        """
         if self._session:
             try:
                 await self._session.close()
-            except Exception:
-                pass
-            self._session = None
-            self._connector = None
+            except Exception as e:
+                self.logger.warning(f"Error closing session: {e}")
+            finally:
+                self._session = None
+                self._connector = None
+
+    async def __aenter__(self):
+        """Context manager entry."""
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - automatically closes session."""
+        await self.close()
 
     @abstractmethod
-    async def translate_batch(self, requests: List[TranslationRequest], progress_callback=None) -> List[TranslationResult]:
+    async def translate_batch(self, requests: List[Dict[str, Any]], progress_callback=None) -> List[TranslationResult]:
         pass
 
 class GoogleTranslator(BaseTranslator):
     """
     Multi-endpoint Google Translator with Lingva fallback.
+    Uses web-based translation endpoints, not official API.
     """
     
     # 10+ Google mirrors
@@ -90,26 +127,61 @@ class GoogleTranslator(BaseTranslator):
         "https://lingva.garudalinux.org",
     ]
 
-    BATCH_SEPARATOR = " ||| " 
-
-    def __init__(self, concurrency=16, batch_size=50, max_slice_chars=4500):
-        super().__init__()
+    def __init__(
+        self,
+        concurrency: int = 16,
+        batch_size: int = 15,
+        max_slice_chars: Optional[int] = None,
+        use_multi_endpoint: bool = DEFAULT_USE_MULTI_ENDPOINT,
+        enable_lingva_fallback: bool = DEFAULT_ENABLE_LINGVA_FALLBACK,
+        request_delay_ms: int = DEFAULT_REQUEST_DELAY_MS,
+        timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        mirror_max_failures: int = DEFAULT_MIRROR_MAX_FAILURES,
+        mirror_ban_time: int = DEFAULT_MIRROR_BAN_TIME,
+        racing_endpoints: int = DEFAULT_RACING_ENDPOINTS
+    ):
+        super().__init__(timeout_seconds=timeout_seconds)
         self.concurrency = concurrency
         self.batch_size = batch_size
-        self.max_slice_chars = max_slice_chars
-        self._endpoint_failures: Dict[str, int] = {}
+        self._max_chars = TRANSLATOR_MAX_SAFE_CHARS
+        self.max_slice_chars = max_slice_chars or TRANSLATOR_MAX_SLICE_CHARS
+        self.use_multi_endpoint = use_multi_endpoint
+        self.enable_lingva_fallback = enable_lingva_fallback
+        self.request_delay_ms = max(0, request_delay_ms)
+        self.max_retries = max(1, max_retries)
+        self.mirror_max_failures = max(1, mirror_max_failures)
+        self.mirror_ban_time = max(10, mirror_ban_time)
+        self.racing_endpoints = max(1, racing_endpoints)
+        self._endpoint_health: Dict[str, Dict[str, float]] = {}
         self._endpoint_index = 0
         self._lingva_index = 0
+        
+        # Import split pattern from constants for consistency
+        from .constants import REGEX_BATCH_SPLIT
+        self.BATCH_SPLIT_PATTERN = re.compile(REGEX_BATCH_SPLIT, re.IGNORECASE | re.DOTALL)
+
+        for ep in self.google_endpoints:
+            self._endpoint_health[ep] = {"fails": 0, "banned_until": 0.0}
+
+    @property
+    def max_chars(self) -> int:
+        """Returns the safe character limit for a single request batch."""
+        return self._max_chars
 
     def _get_next_endpoint(self) -> str:
-        """Round-robin endpoint selection with failure tracking."""
-        min_failures = min(self._endpoint_failures.get(ep, 0) for ep in self.google_endpoints)
-        available = [ep for ep in self.google_endpoints 
-                     if self._endpoint_failures.get(ep, 0) <= min_failures + 2]
+        """Round-robin endpoint selection with health checks."""
+        now = time.time()
+        available = []
+        for ep in self.google_endpoints:
+            health = self._endpoint_health.get(ep, {"fails": 0, "banned_until": 0.0})
+            if now > health.get("banned_until", 0.0):
+                available.append(ep)
 
         if not available:
-            self._endpoint_failures.clear()
-            available = self.google_endpoints
+            for ep in self.google_endpoints:
+                self._endpoint_health[ep] = {"fails": 0, "banned_until": 0.0}
+            available = self.google_endpoints[:]
 
         self._endpoint_index = (self._endpoint_index + 1) % len(available)
         return available[self._endpoint_index]
@@ -118,116 +190,177 @@ class GoogleTranslator(BaseTranslator):
         self._lingva_index = (self._lingva_index + 1) % len(self.lingva_instances)
         return self.lingva_instances[self._lingva_index]
 
-    async def translate_batch(self, requests: List[TranslationRequest], progress_callback=None) -> List[TranslationResult]:
-        """Translate a list of requests with deduplication and batching."""
-        if not requests: return []
+    async def translate_batch(self, requests: List[Dict[str, Any]], progress_callback=None) -> List['TranslationResult']:
+        """
+        Translates a batch of requests.
+        Each request is a dict with: {'text': str, 'metadata': dict}
+        Returns a list of TranslationResult objects (Success/Failure).
         
-        # 1. Deduplication and indexing
-        indexed = list(enumerate(requests))
-        unique_reqs: Dict[str, int] = {} # text -> first_index
-        dup_links: Dict[int, int] = {} # original_index -> unique_first_index
+        IMPORTANT: All requests in a single call should have the same source/target languages.
+        The caller (TranslationPipeline) is responsible for grouping requests by language pair.
+        """
+        if not requests:
+            return []
+            
+
+        # List to hold final results, initialized with failure state
+        results: List[TranslationResult] = []
+        for req in requests:
+            # Get original unprotected text from metadata if available (set by pipeline for cache consistency)
+            original_text = req.get('metadata', {}).get('original_text', req['text'])
+            results.append(TranslationResult(
+                original_text=original_text,
+                translated_text=req['text'],
+                source_lang=requests[0].get('metadata', {}).get('source_lang', 'auto'),
+                target_lang=requests[0].get('metadata', {}).get('target_lang', 'en'),
+                success=False,
+                metadata=req.get('metadata', {}),
+                error="Processing not started"
+            ))
+
+        # 1. Deduplication: Map unique texts to original request indices
+        unique_map: Dict[str, List[int]] = {}
+        for i, req in enumerate(requests):
+            txt = req['text']
+            if txt not in unique_map:
+                unique_map[txt] = []
+            unique_map[txt].append(i)
+
+        unique_texts = list(unique_map.keys())
         
-        unique_list = []
-        for idx, req in indexed:
-            if req.text not in unique_reqs:
-                unique_reqs[req.text] = idx
-                unique_list.append((idx, req))
-            dup_links[idx] = unique_reqs[req.text]
-
-        # 2. Protection
-        unique_protected = []
-        for u_idx, req in unique_list:
-            p_text, p_map = protect_rpgm_syntax(req.text)
-            unique_protected.append((u_idx, p_text, p_map, req))
-
-        # 3. Create slices based on length and batch size
-        final_slices = []
-        cur_batch = []
-        cur_len = 0
+        # 2. Slice texts based on limits
+        batches_of_text_slices = self._prepare_slices(unique_texts)
         
-        for i, (u_idx, p_text, p_map, req) in enumerate(unique_protected):
-             l = len(p_text)
-             overhead = len(self.BATCH_SEPARATOR) if cur_batch else 0
-             
-             if cur_batch and (cur_len + overhead + l > self.max_slice_chars or len(cur_batch) >= self.batch_size):
-                 final_slices.append(cur_batch)
-                 cur_batch = []
-                 cur_len = 0
-                 overhead = 0
-             
-             cur_batch.append(i) 
-             cur_len += l + overhead
-             
-        if cur_batch:
-            final_slices.append(cur_batch)
-
-        # 3. Process slices
-        unique_results: Dict[int, TranslationResult] = {}
+        # 3. Process batches concurrently
         sem = asyncio.Semaphore(self.concurrency)
-
-        async def process_slice(indices: List[int]):
+        
+        async def process_slice(slice_texts: List[str]):
             async with sem:
-                s_lang = unique_protected[indices[0]][3].source_lang
-                t_lang = unique_protected[indices[0]][3].target_lang
-                
-                # Construct batch text
-                batch_texts = [unique_protected[i][1] for i in indices]
-                joined_text = self.BATCH_SEPARATOR.join(batch_texts)
-                
-                translated_parts = await self._try_translate(joined_text, s_lang, t_lang, len(batch_texts))
-                
-                if not translated_parts:
-                    # Retry items individually without racing to be gentle on Google
-                    for i in indices:
-                        if self._session is None: break # Closed
-                        u_idx = unique_protected[i][0]
-                        p_text, p_map, req = unique_protected[i][1], unique_protected[i][2], unique_protected[i][3]
-                        
-                        single_res = await self._try_translate(p_text, s_lang, t_lang, 1, racing=False)
-                        
-                        if single_res and single_res[0]:
-                            final_val = restore_rpgm_syntax(single_res[0], p_map)
-                            unique_results[u_idx] = TranslationResult(
-                                req.text, final_val, s_lang, t_lang, True, "", metadata=req.metadata
-                            )
-                        else:
-                            unique_results[u_idx] = TranslationResult(
-                                req.text, "", s_lang, t_lang, False, "Translation failed", metadata=req.metadata
-                            )
-                        
-                        # Report progress for each individual item during retry
-                        if progress_callback:
-                            progress_callback(1)
-                    return
-
-                # Map back successful batch
-                for i, t_text in zip(indices, translated_parts):
-                    u_idx = unique_protected[i][0]
-                    p_map = unique_protected[i][2]
-                    req = unique_protected[i][3]
+                try:
+                    # Protection Phase
+                    protected_batch = []
+                    protection_maps = []
                     
-                    final_text = restore_rpgm_syntax(t_text.strip(), p_map)
-                    unique_results[u_idx] = TranslationResult(
-                        req.text, final_text, s_lang, t_lang, True, metadata=req.metadata
-                    )
+                    for txt in slice_texts:
+                        p_txt, p_map = protect_rpgm_syntax(txt)
+                        protected_batch.append(p_txt)
+                        protection_maps.append(p_map)
+                    
+                    # API Call
+                    # JOIN using the special token from constants
+                    from .constants import TOKEN_BATCH_SEPARATOR, REGEX_BATCH_SPLIT
+                    
+                    batch_text = TOKEN_BATCH_SEPARATOR.join(protected_batch)
+                    
+                    # Extract language codes from first request's metadata
+                    # All requests in a batch should have the same source/target languages
+                    first_metadata = requests[0].get('metadata', {}) if requests else {}
+                    s_lang = first_metadata.get('source_lang', 'auto')
+                    t_lang = first_metadata.get('target_lang', 'en')
+                    
+                    # Attempt translation
+                    translated_parts = await self._try_translate(batch_text, s_lang, t_lang, len(protected_batch))
+                    
+                    if not translated_parts:
+                        # Fallback: Parallel Individual Retry
+                        translated_parts = [None] * len(protected_batch)
+                        
+                        async def retry_single(idx):
+                            try:
+                                single_res = await self._try_translate(protected_batch[idx], s_lang, t_lang, 1)
+                                if single_res:
+                                    translated_parts[idx] = single_res[0]
+                            except:
+                                pass
+                        
+                        await asyncio.gather(*(retry_single(i) for i in range(len(protected_batch))))
 
-                # Report progress for the whole batch
-                if progress_callback:
-                    progress_callback(len(indices))
+                    # Re-map results
+                    for original, translated, p_map in zip(slice_texts, translated_parts, protection_maps):
+                        indices = unique_map.get(original, [])
+                        
+                        final_text = original
+                        is_success = False
+                        err_msg = "Translation failed"
+                        
+                        if translated:
+                            # Restoration Phase
+                            restored = restore_rpgm_syntax(translated, p_map)
+                            is_valid, missing = validate_restoration(original, restored, p_map)
+                            
+                            if is_valid:
+                                final_text = restored
+                                is_success = True
+                                err_msg = None
+                            else:
+                                err_msg = f"Validation Failed: Missing {missing}"
+                        
+                        # Update all original requests pointing to this text
+                        for idx in indices:
+                            res = results[idx]
+                            res.translated_text = final_text
+                            res.success = is_success
+                            res.error = err_msg
+                            
+                            if is_success:
+                                if progress_callback:
+                                    try: progress_callback(1)
+                                    except: pass
+                                    
+                except Exception as e:
+                    self.logger.error(f"Batch processing error: {str(e)}")
+                    # Results remain as initialized (False) but update error
+                    for txt in slice_texts:
+                        for idx in unique_map.get(txt, []):
+                            results[idx].error = f"Exception: {str(e)}"
 
-        tasks = [process_slice(sl) for sl in final_slices]
-        await asyncio.gather(*tasks)
-
-        # 4. Reconstruct full list
-        results = []
-        for idx, req in indexed:
-            u_idx = dup_links[idx]
-            if u_idx in unique_results:
-                results.append(unique_results[u_idx])
-            else:
-                 results.append(TranslationResult(req.text, "", req.source_lang, req.target_lang, False, "Missing result", metadata=req.metadata))
-                 
+        tasks = [process_slice(batch) for batch in batches_of_text_slices]
+        if tasks:
+            await asyncio.gather(*tasks)
+            
         return results
+
+    def _prepare_slices(self, texts: List[str]) -> List[List[str]]:
+        """Slice list of texts into batches respecting batch_size and max_chars."""
+        slices = []
+        current_batch = []
+        current_chars = 0
+        from .constants import TOKEN_BATCH_SEPARATOR
+        
+        sep_len = len(TOKEN_BATCH_SEPARATOR)
+        
+        for text in texts:
+            text_len = len(text)
+            # Overhead for separator if not first item
+            overhead = sep_len if current_batch else 0
+            
+            # If adding this text exceeds limits, flush
+            if len(current_batch) >= self.batch_size or \
+               (current_chars + text_len + overhead > self.max_chars and current_batch):
+                slices.append(current_batch)
+                current_batch = []
+                current_chars = 0
+                overhead = 0
+            
+            current_batch.append(text)
+            current_chars += text_len + overhead
+            
+        if current_batch:
+            slices.append(current_batch)
+            
+        return slices
+
+    def _register_failure(self, endpoint: str, count_failure: bool = True) -> None:
+        if not count_failure:
+            return
+        health = self._endpoint_health.setdefault(endpoint, {"fails": 0, "banned_until": 0.0})
+        health["fails"] = health.get("fails", 0) + 1
+        if health["fails"] >= self.mirror_max_failures:
+            health["banned_until"] = time.time() + self.mirror_ban_time
+
+    def _register_success(self, endpoint: str) -> None:
+        health = self._endpoint_health.setdefault(endpoint, {"fails": 0, "banned_until": 0.0})
+        health["fails"] = max(0, health.get("fails", 0) - 1)
 
     async def _try_translate(self, text: str, source: str, target: str, expected_count: int, racing: bool = True) -> Optional[List[str]]:
         """Try with Google endpoints, then Lingva."""
@@ -237,40 +370,70 @@ class GoogleTranslator(BaseTranslator):
             "sl": source,
             "tl": target,
             "dt": "t",
+            "format": "text",  # Use plain text mode
             "q": text
         }
         
         query = urllib.parse.urlencode(params)
         
-        # 1. Google Racing (Parallel) - Use 3 endpoints if racing, else only 1
-        n_endpoints = 3 if racing else 1
+        # 1. Google Racing (Parallel)
+        use_racing = self.use_multi_endpoint and racing
+        n_endpoints = self.racing_endpoints if use_racing else 1
         endpoints = [self._get_next_endpoint() for _ in range(n_endpoints)]
         
         async def call_endpoint(ep):
-            try:
-                url = f"{ep}?{query}"
-                session = await self._get_session()
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                    if resp.status != 200: 
-                        self._endpoint_failures[ep] = self._endpoint_failures.get(ep, 0) + 1
-                        return None
-                    
-                    data = await resp.json(content_type=None)
-                    if not data or not data[0]: return None
-                    
-                    self._endpoint_failures[ep] = max(0, self._endpoint_failures.get(ep, 0) - 1)
-                    
-                    # Join segments
-                    full = ""
-                    for seg in data[0]:
-                        if seg and seg[0]: full += seg[0]
-                    
-                    parts = full.split(self.BATCH_SEPARATOR)
-                    if len(parts) != expected_count: return None 
-                    return parts
-            except Exception:
-                self._endpoint_failures[ep] = self._endpoint_failures.get(ep, 0) + 1
-                return None
+            for attempt in range(1, self.max_retries + 1):
+                try:
+                    if self.request_delay_ms:
+                        await asyncio.sleep(self.request_delay_ms / 1000.0)
+                    url = f"{ep}?{query}"
+                    session = await self._get_session()
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=self.timeout_seconds)) as resp:
+                        if resp.status == 200:
+                            data = await resp.json(content_type=None)
+                            if not data or not data[0]:
+                                self._register_failure(ep)
+                                continue
+
+                            self._register_success(ep)
+
+                            full = ""
+                            if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
+                                for seg in data[0]:
+                                    if isinstance(seg, list) and len(seg) > 0 and seg[0]:
+                                        full += str(seg[0])
+
+                            if not full:
+                                self.logger.warning(f"Empty translation from {ep}")
+                                self._register_failure(ep)
+                                continue
+
+                            parts = self.BATCH_SPLIT_PATTERN.split(full)
+                            parts = [p.strip() for p in parts]
+                            if len(parts) > expected_count and not parts[-1]:
+                                parts = parts[:expected_count]
+
+                            if len(parts) != expected_count:
+                                self.logger.debug(f"Batch mismatch from {ep}: Got {len(parts)}, expected {expected_count}")
+                                snippet = full[:100].replace('\n', ' ')
+                                self.logger.debug(f"Snippet: {snippet}...")
+                                self._register_failure(ep)
+                                continue
+                            return parts
+
+                        if resp.status == 429:
+                            wait_time = (2 ** (attempt - 1)) + random.uniform(0.2, 0.8)
+                            self.logger.warning(f"Google 429 on {ep}. Backing off {wait_time:.2f}s...")
+                            await asyncio.sleep(wait_time)
+                            continue
+
+                        self._register_failure(ep)
+                        await asyncio.sleep(0.2)
+                except Exception:
+                    self._register_failure(ep)
+                    wait_time = (1.5 ** (attempt - 1)) * 0.5 + random.uniform(0.1, 0.4)
+                    await asyncio.sleep(wait_time)
+            return None
 
         # Run multiple requests in parallel and take the first one that succeeds
         pending = [asyncio.create_task(call_endpoint(ep)) for ep in endpoints]
@@ -285,24 +448,23 @@ class GoogleTranslator(BaseTranslator):
                     return res
             
         # 2. Lingva Fallback
-        # lingva format: /api/v1/source/target/text
-        try:
-            instance = self._get_next_lingva()
-            # Lingva usually takes single text, batching might be tricky if separator is not handled.
-            # Lingva might not support " ||| " separator logic same as Google.
-            # So if batching, we might skip Lingva or try unbatched? 
-            # For now, let's try assuming it passes text through Google backend.
-            url = f"{instance}/api/v1/{source}/{target}/{urllib.parse.quote(text)}"
-            session = await self._get_session()
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                 if resp.status == 200:
-                     data = await resp.json()
-                     # {"translation": "..."}
-                     trans = data.get("translation", "")
-                     parts = trans.split(self.BATCH_SEPARATOR)
-                     if len(parts) == expected_count:
-                         return parts
-        except Exception:
-            pass
+        if self.enable_lingva_fallback:
+            for _ in range(2):
+                try:
+                    instance = self._get_next_lingva()
+                    url = f"{instance}/api/v1/{source}/{target}/{urllib.parse.quote(text)}"
+                    session = await self._get_session()
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=self.timeout_seconds)) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            trans = data.get("translation", "")
+                            parts = self.BATCH_SPLIT_PATTERN.split(trans.strip())
+                            parts = [p.strip() for p in parts]
+                            if len(parts) > expected_count and not parts[-1]:
+                                parts = parts[:expected_count]
+                            if len(parts) == expected_count:
+                                return parts
+                except Exception:
+                    await asyncio.sleep(0.3)
             
         return None

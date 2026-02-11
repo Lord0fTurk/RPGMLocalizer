@@ -6,6 +6,9 @@ from .base import BaseParser
 import logging
 import zlib
 import re
+from src.core.constants import (TRANSLATOR_RECURSION_MAX_DEPTH, 
+                                RUBY_ENCODING_FALLBACK_LIST, 
+                                RUBY_KEY_ENCODING_FALLBACK_LIST)
 
 logger = logging.getLogger(__name__)
 
@@ -58,16 +61,16 @@ class RubyParser(BaseParser):
         super().__init__(**kwargs)
         self.translate_notes = translate_notes
         self.translate_comments = translate_comments
-        self.extracted: List[Tuple[str, str]] = []
+        self.extracted: List[Tuple[str, str, str]] = []
         self.visited: Set[int] = set()
-        self.MAX_RECURSION_DEPTH = 100
+        self.MAX_RECURSION_DEPTH = TRANSLATOR_RECURSION_MAX_DEPTH
     
-    def extract_text(self, file_path: str) -> List[Tuple[str, str]]:
+    def extract_text(self, file_path: str) -> List[Tuple[str, str, str]]:
         """
         Extract all translatable text from a Ruby Marshal file.
         
         Returns:
-            List of (path, text) tuples
+            List of (path, text, context_tag) tuples
         """
         with open(file_path, 'rb') as f:
             try:
@@ -96,12 +99,19 @@ class RubyParser(BaseParser):
             pass
         
         elif isinstance(obj, bytes):
-            # Ruby strings might be bytes, try to decode
-            try:
-                text = obj.decode('utf-8')
-                # Will be handled in _check_and_walk
-            except UnicodeDecodeError:
-                pass
+            # Ruby strings might be bytes, try to decode with fallback encodings
+            # XP/VX games often use Shift-JIS or Windows-1252
+            text = None
+            for enc in RUBY_ENCODING_FALLBACK_LIST:
+                try:
+                    text = obj.decode(enc)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            
+            # Not calling _check_and_walk directly for bytes to avoid double processing loop
+            # Check context validity only if decoding succeeded
+            pass
         
         elif isinstance(obj, list):
             # Check if this looks like the Scripts.rvdata2 array
@@ -117,9 +127,20 @@ class RubyParser(BaseParser):
             for k, v in obj.items():
                 key_name = str(k) if not isinstance(k, (str, bytes)) else k
                 if isinstance(key_name, bytes):
-                    key_name = key_name.decode('utf-8', errors='replace')
+                    # Try to decode key name with fallback
+                    for enc in RUBY_KEY_ENCODING_FALLBACK_LIST:
+                        try:
+                            key_name = key_name.decode(enc)
+                            break
+                        except UnicodeDecodeError:
+                            continue
+                    else:
+                        # All encodings failed, use replace mode
+                        key_name = key_name.decode('utf-8', errors='replace')
+                        
                 self._check_and_walk(v, f"{path}.{key_name}" if path else str(key_name), depth + 1, key_name=key_name)
-        
+
+
         elif hasattr(obj, 'attributes'):
             # rubymarshal RubyObject
             attrs = getattr(obj, 'attributes', {})
@@ -162,8 +183,19 @@ class RubyParser(BaseParser):
             try:
                 # 1. Decompress
                 code_bytes = zlib.decompress(compressed_code)
-                # 2. Decode
-                code_text = code_bytes.decode('utf-8', errors='ignore')
+                
+                # 2. Decode - Use robust encoding detection for older RPG Maker versions
+                code_text = None
+                encodings = ['utf-8', 'shift_jis', 'cp1252', 'latin-1']
+                for enc in encodings:
+                    try:
+                        code_text = code_bytes.decode(enc)
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                
+                if code_text is None:
+                    code_text = code_bytes.decode('utf-8', errors='ignore')
                 
                 # 3. Extract strings from code
                 self._extract_from_code(code_text, f"{i}.code")
@@ -172,6 +204,22 @@ class RubyParser(BaseParser):
                 logger.warning(f"Failed to process script {i} ({script_name}): {e}")
 
     def _extract_from_code(self, code: str, path_prefix: str):
+        """Extract valid strings from raw Ruby code using a tokenizer."""
+        # Use valid string tokens
+        tokens = self._tokenize_ruby_script(code)
+        
+        seen_strings = set()
+        
+        for idx, (start, end, text, quote_char) in enumerate(tokens):
+            if text in seen_strings:
+                continue
+            
+            # Use the same validation logic
+            if self._is_valid_script_string(text):
+                self.extracted.append((f"{path_prefix}.string_{idx}", text, "script"))
+                seen_strings.add(text)
+
+    def _extract_from_code_deprecated(self, code: str, path_prefix: str):
         """Extract valid strings from raw Ruby code using heuristics."""
         # Find single or double quoted strings
         # This is a basic regex, could benefit from a proper tokenizer but that's complex
@@ -215,7 +263,7 @@ class RubyParser(BaseParser):
             # 5. Check explicitly for Vocab-like usage or things that look like messages
             # (We accept it if it passed step 4)
             
-            self.extracted.append((f"{path_prefix}.string_{idx}", text))
+            self.extracted.append((f"{path_prefix}.string_{idx}", text, "script"))
             seen_strings.add(text)
 
     def _check_and_walk(self, val: Any, path: str, depth: int, key_name: str = None):
@@ -236,12 +284,15 @@ class RubyParser(BaseParser):
                 if key_name == '@note' and not self.translate_notes:
                     return
                 if self.is_safe_to_translate(text_val, is_dialogue=(key_name != '@note')):
-                    self.extracted.append((path, text_val))
+                    context_tag = "dialogue_block" if key_name in ['@message1', '@message2', '@message3', '@message4', '@description', '@help'] else "name"
+                    if key_name in ['@name', '@nickname', '@title', '@game_title', '@currency_unit']:
+                        context_tag = "name"
+                    self.extracted.append((path, text_val, context_tag))
             
             # Check system keys
             elif key_name and key_name in self.SYSTEM_KEYS:
                 if self.is_safe_to_translate(text_val, is_dialogue=True):
-                    self.extracted.append((path, text_val))
+                    self.extracted.append((path, text_val, "system"))
         
         # Check for EventCommand objects (RPG::EventCommand in Ruby)
         elif hasattr(val, 'attributes'):
@@ -264,7 +315,10 @@ class RubyParser(BaseParser):
             if code is not None and params is not None:
                 self._extract_event_command(code, params, path)
             
-            self._walk(val, path, depth + 1)
+            # CRITICAL: Do NOT recurse into Event Commands.
+            # Only whitelisted codes handled in _extract_event_command should be processed.
+            # Recursing blindly into generic attributes causes over-extraction of technical data.
+            return
         else:
             self._walk(val, path, depth + 1)
 
@@ -281,7 +335,7 @@ class RubyParser(BaseParser):
             if len(params) > 0:
                 text = self._to_string(params[0])
                 if self.is_safe_to_translate(text, is_dialogue=True):
-                    self.extracted.append((f"{path}.@parameters.0", text))
+                    self.extracted.append((f"{path}.@parameters.0", text, "dialogue_block"))
         
         # Show Choices (102)
         elif code == 102:
@@ -289,7 +343,7 @@ class RubyParser(BaseParser):
                 for i, choice in enumerate(params[0]):
                     text = self._to_string(choice)
                     if self.is_safe_to_translate(text, is_dialogue=True):
-                        self.extracted.append((f"{path}.@parameters.0.{i}", text))
+                        self.extracted.append((f"{path}.@parameters.0.{i}", text, "choice"))
         
         # Comment (108/408)
         elif code in [108, 408] and self.translate_comments:
@@ -298,20 +352,20 @@ class RubyParser(BaseParser):
                 if self.is_safe_to_translate(text, is_dialogue=True):
                     # Filter out pure code comments
                     if ' ' in text or len(text) > 15:
-                        self.extracted.append((f"{path}.@parameters.0", text))
+                        self.extracted.append((f"{path}.@parameters.0", text, "comment"))
         
         elif code in [320, 324]:
             if len(params) > 1:
                 text = self._to_string(params[1])
                 if self.is_safe_to_translate(text, is_dialogue=True):
-                    self.extracted.append((f"{path}.@parameters.1", text))
+                    self.extracted.append((f"{path}.@parameters.1", text, "name"))
         
         # Change Profile (325)
         elif code == 325:
             if len(params) > 1:
                 text = self._to_string(params[1])
                 if self.is_safe_to_translate(text, is_dialogue=True):
-                    self.extracted.append((f"{path}.@parameters.1", text))
+                    self.extracted.append((f"{path}.@parameters.1", text, "name"))
         
         # Show Choices (102)
         elif code == 102:
@@ -319,7 +373,7 @@ class RubyParser(BaseParser):
                 for i, choice in enumerate(params[0]):
                     text = self._to_string(choice)
                     if self.is_safe_to_translate(text, is_dialogue=True):
-                        self.extracted.append((f"{path}.@parameters.0.{i}", text))
+                        self.extracted.append((f"{path}.@parameters.0.{i}", text, "choice"))
 
     def _to_string(self, val: Any) -> str:
         """Convert a value to string, handling bytes and common encodings."""
@@ -414,26 +468,23 @@ class RubyParser(BaseParser):
                 # Iterate matches again to find locations, then apply replacements in reverse order
                 # to keep indices valid.
                 
-                # Find all string matches again to locate them
-                matches = list(re.finditer(r'(["\'])(.*?)\1', code_text))
-                
-                # Map extracted path suffix to match index
-                # extracted format: {idx}.code.string_{match_index}
+                # Find all string tokens to locate them
+                tokens = self._tokenize_ruby_script(code_text)
                 
                 replacements = [] # (start, end, new_text)
                 
                 for path, new_text in script_trans[idx]:
                     match_idx = int(path.split('_')[-1])
-                    if match_idx < len(matches):
-                        m = matches[match_idx]
-                        qs = m.group(1) # quote style
+                    if match_idx < len(tokens):
+                        start, end, _content, qs = tokens[match_idx]
+                        
                         # Properly escape for Ruby strings:
                         # 1. Escape existing backslashes first
                         # 2. Then escape the quote character itself
                         escaped_text = new_text.replace('\\', '\\\\')
                         escaped_text = escaped_text.replace(qs, '\\' + qs)
                         replacement = f"{qs}{escaped_text}{qs}"
-                        replacements.append((m.start(), m.end(), replacement))
+                        replacements.append((start, end, replacement))
                 
                 # Apply in reverse order
                 replacements.sort(key=lambda x: x[0], reverse=True)
@@ -540,3 +591,90 @@ class RubyParser(BaseParser):
             attrs[key] = final_value
         else:
             setattr(ref, key, final_value)
+
+    def _tokenize_ruby_script(self, code: str) -> List[Tuple[int, int, str, str]]:
+        """
+        Tokenize Ruby script to find string literals.
+        Returns: List of (start_index, end_index, content, quote_char)
+        """
+        tokens = []
+        
+        # States
+        STATE_NORMAL = 0
+        STATE_SINGLE_QUOTE = 1
+        STATE_DOUBLE_QUOTE = 2
+        STATE_COMMENT = 3
+        
+        state = STATE_NORMAL
+        i = 0
+        length = len(code)
+        start_quote = -1
+        
+        while i < length:
+            char = code[i]
+            
+            if state == STATE_NORMAL:
+                if char == '#':
+                    state = STATE_COMMENT
+                elif char == "'":
+                    state = STATE_SINGLE_QUOTE
+                    start_quote = i
+                elif char == '"':
+                    state = STATE_DOUBLE_QUOTE
+                    start_quote = i
+            
+            elif state == STATE_COMMENT:
+                if char == '\n':
+                    state = STATE_NORMAL
+            
+            elif state == STATE_SINGLE_QUOTE:
+                if char == '\\':
+                    i += 1 # Skip next char (escaped)
+                elif char == "'":
+                    # End of string
+                    content = code[start_quote+1 : i]
+                    tokens.append((start_quote, i+1, content, "'"))
+                    state = STATE_NORMAL
+            
+            elif state == STATE_DOUBLE_QUOTE:
+                if char == '\\':
+                    i += 1 # Skip next char (escaped)
+                elif char == '"':
+                    # End of string
+                    content = code[start_quote+1 : i]
+                    tokens.append((start_quote, i+1, content, '"'))
+                    state = STATE_NORMAL
+            
+            i += 1
+            
+        return tokens
+
+    def _is_valid_script_string(self, text: str) -> bool:
+        """Validate if a script string is worth translating."""
+        # Use the robust base validation first
+        if not self.is_safe_to_translate(text, is_dialogue=True):
+            return False
+            
+        if not text or len(text) < 2:
+            return False
+            
+        # 1. Skip if only ASCII letters/numbers/underscore
+        if re.match(r'^[a-zA-Z0-9_]+$', text):
+            return False
+            
+        # 2. Skip standard file extensions
+        if any(text.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.bmp', '.ogg', '.wav', '.mp3', '.rvdata2']):
+            return False
+            
+        # 3. Skip symbols starting with :
+        if text.startswith(':'):
+            return False
+
+        # 4. Must contain spaces OR non-ascii
+        has_space = ' ' in text
+        has_non_ascii = any(ord(c) > 127 for c in text)
+        
+        if not (has_space or has_non_ascii):
+            return False
+            
+        return True

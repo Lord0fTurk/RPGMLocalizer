@@ -286,3 +286,25 @@ class HomeInterface(QWidget):
         self.btn_stop.setEnabled(running)
         if not running:
             self.progress_bar.hide()
+
+    def apply_settings(self, settings: dict):
+        if not settings:
+            return
+
+        project_path = settings.get("project_path", "")
+        if project_path:
+            self.txt_path.setText(project_path)
+
+        source_code = settings.get("source_lang")
+        if source_code:
+            self._set_combo_by_code(self.cmb_source, self.source_languages, source_code)
+
+        target_code = settings.get("target_lang")
+        if target_code:
+            self._set_combo_by_code(self.cmb_target, self.target_languages, target_code)
+
+    def _set_combo_by_code(self, combo, mapping: dict, code: str):
+        for name, value in mapping.items():
+            if value == code:
+                combo.setCurrentText(name)
+                return

@@ -24,6 +24,16 @@ from .export_import import TranslationExporter, TranslationImporter
 from src.utils.backup import BackupManager, get_backup_manager
 from .enums import PipelineStage
 from src.utils.file_ops import safe_write
+from .text_merger import TextMerger
+from .constants import (
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_CONCURRENCY,
+    DEFAULT_REQUEST_DELAY_MS,
+    DEFAULT_TIMEOUT_SECONDS,
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_USE_MULTI_ENDPOINT,
+    DEFAULT_ENABLE_LINGVA_FALLBACK
+)
 
 
 class TranslationPipeline(QObject):
@@ -54,11 +64,20 @@ class TranslationPipeline(QObject):
         self.settings = settings
         self.should_stop = False
         
-        # Get performance settings (defaults: 20 concurrent, 200 batch)
-        concurrency = self.settings.get("concurrent_requests", 20)
-        batch_size = self.settings.get("batch_size", 200)
+        # Get performance settings (defaults: 20 concurrent, 15 batch for maximum stability)
+        concurrency = self.settings.get("concurrent_requests", DEFAULT_CONCURRENCY)
+        batch_size = self.settings.get("batch_size", DEFAULT_BATCH_SIZE)
         
-        self.translator = GoogleTranslator(concurrency=concurrency, batch_size=batch_size)
+        self.translator = GoogleTranslator(
+            concurrency=concurrency,
+            batch_size=batch_size,
+            use_multi_endpoint=self.settings.get("use_multi_endpoint", DEFAULT_USE_MULTI_ENDPOINT),
+            enable_lingva_fallback=self.settings.get("enable_lingva_fallback", DEFAULT_ENABLE_LINGVA_FALLBACK),
+            request_delay_ms=self.settings.get("request_delay_ms", DEFAULT_REQUEST_DELAY_MS),
+            timeout_seconds=self.settings.get("request_timeout", DEFAULT_TIMEOUT_SECONDS),
+            max_retries=self.settings.get("max_retries", DEFAULT_MAX_RETRIES)
+        )
+        self.merger = TextMerger(batch_size=batch_size)
         self.logger = logging.getLogger("Pipeline")
         
         # Optional components
@@ -259,7 +278,8 @@ class TranslationPipeline(QObject):
                 entries = parser.extract_text(file_path)
                 if entries:
                     # Filter short text here to reduce memory/overhead
-                    filtered = [(p, t) for p, t in entries if len(t.strip()) > 1]
+                    # Entries are (path, text, tag)
+                    filtered = [(p, t, tag) for p, t, tag in entries if len(t.strip()) > 1]
                     return file_path, parser, filtered
                 return None
             except Exception as e:
@@ -273,110 +293,213 @@ class TranslationPipeline(QObject):
             
         for res in results:
             if res:
-                file_path, parser, entries = res
-                parsed_files[file_path] = (parser, entries)
-                for path, text in entries:
-                    all_entries.append((file_path, path, text))
+                f_path, parser, entries = res
+                # Normalize file path for consistent dict keys
+                norm_path = os.path.normpath(f_path)
+                parsed_files[norm_path] = (parser, entries)
+                for path, text, tag in entries:
+                    all_entries.append((norm_path, path, text, tag))
         
         self.log_message.emit("info", f"Extraction completed. Found {len(all_entries)} items across {len(parsed_files)} files.")
         return all_entries, parsed_files
 
     def _translate_entries(self, entries: List[Tuple], source_lang: str, target_lang: str) -> Dict:
-        """Translate all entries using the translation engine."""
+        """Translate all entries using the translation engine with robust error handling."""
         results_map = {}  # (file, path) -> translated_text
         total = len(entries)
+
+        retry_entries: List[Tuple[str, str, str, str]] = []  # (file, path, text, tag)
+        retry_seen = set()
+
+        def _queue_retry(file_path: str, original_entries: List[Tuple[str, str, str]]):
+            for tag, path, text in original_entries:
+                key = (file_path, path)
+                if key in retry_seen:
+                    continue
+                retry_seen.add(key)
+                retry_entries.append((file_path, path, text, tag))
         
-        # Prepare translation requests, checking cache first
-        to_translate = []  # (index, request)
+        # 1. Prepare Request Data (Glossary & Cache Check)
+        # We need to construct the list of dicts expected by TextMerger/Translator
+        # Format: {'text': str, 'metadata': dict}
         
-        for i, (file_path, path, text) in enumerate(entries):
-            # Check cache
+        raw_requests = []
+        
+        # Determine efficient batching strategy via TextMerger
+        # TextMerger.create_merged_requests returns: (requests_list, merged_map)
+        # requests_list is List[Dict] with 'text' and 'metadata'
+        requests_list, merged_map = self.merger.create_merged_requests(entries)
+        
+        final_requests = []
+        
+        for req in requests_list:
+            text = req['text']
+            meta = req['metadata']
+            
+            # Cache Check
             if self.cache:
                 cached = self.cache.get(text, source_lang, target_lang)
                 if cached:
-                    results_map[(file_path, path)] = cached
+                    # Handle Cache Hit
+                    if meta.get('is_merged'):
+                        original_entries = merged_map.get(f"{meta['file']}::{meta['key']}")
+                        if original_entries: # Valid merge data
+                             split_results, mismatch = self.merger.split_merged_result_checked(cached, original_entries)
+                             if mismatch:
+                                 self.logger.warning(
+                                     f"Merged cache mismatch for {meta['file']}::{meta['key']}. Retrying without merge."
+                                 )
+                                 _queue_retry(meta['file'], original_entries)
+                                 continue
+                             for sp_key, sp_text in split_results:
+                                 results_map[(meta['file'], sp_key)] = sp_text
+                    else:
+                        results_map[(meta['file'], meta['key'])] = cached
                     continue
-            
-            # Apply glossary protection
+
+            # Glossary Protection
             protected_text = text
             glossary_map = {}
             if self.glossary:
                 protected_text, glossary_map = self.glossary.protect_terms(text)
             
-            request = TranslationRequest(
-                text=protected_text,
-                source_lang=source_lang,
-                target_lang=target_lang,
-                metadata={
-                    'file': file_path,
-                    'path': path,
-                    'original': text,
-                    'glossary_map': glossary_map
-                }
-            )
-            to_translate.append((i, request))
-        
-        # If all cached, we're done
-        if not to_translate:
+            # Prepare Final Request
+            # Add language codes and glossary_map to metadata
+            # IMPORTANT: Store original unprotected text in metadata so translator can use it for cache consistency
+            meta['glossary_map'] = glossary_map
+            meta['source_lang'] = source_lang
+            meta['target_lang'] = target_lang
+            meta['original_text'] = text  # Store before protection for cache
+            
+            # We strictly use Dict structure as expected by new Translator
+            final_requests.append({
+                'text': protected_text,
+                'metadata': meta
+            })
+
+        if not final_requests:
             self.log_message.emit("info", "All entries found in cache!")
             return results_map
-        
-        self.log_message.emit("info", f"Translating {len(to_translate)} entries ({total - len(to_translate)} from cache)")
-        
-        # Run async translation
+
+        self.log_message.emit("info", f"Sending {len(final_requests)} requests to translation engine...")
+
+        # 2. Async Execution (Result Pattern)
         try:
             loop = asyncio.get_event_loop()
         except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             
-        requests = [req for _, req in to_translate]
-        
         async def process_all():
-            self.log_message.emit("info", f"Sending {len(requests)} requests to translation engine...")
+             # Progress Callback
+            processed_count = 0
+            total_reqs = len(final_requests)
             
-            # Helper for progress
-            done = 0
             def on_progress(count):
-                nonlocal done
-                done += count
-                self.progress_updated.emit(done, len(requests), f"Processed {done}/{len(requests)}")
+                nonlocal processed_count
+                processed_count += count
+                self.progress_updated.emit(processed_count, total_reqs, f"Translating... {processed_count}/{total_reqs}")
 
-            try:
-                results = await self.translator.translate_batch(requests, progress_callback=on_progress)
-                
-                for result in results:
-                    if self.should_stop:
-                        break
-                        
-                    try:
-                        if result.success:
-                            file_path = result.metadata['file']
-                            path = result.metadata['path']
-                            original = result.metadata['original']
-                            glossary_map = result.metadata.get('glossary_map', {})
-                            
-                            translated = result.translated_text
-                            
-                            # Restore glossary terms
-                            if self.glossary and glossary_map:
-                                translated = self.glossary.restore_terms(translated, glossary_map)
-                            
-                            results_map[(file_path, path)] = translated
-                            
-                            # Cache the result
-                            if self.cache:
-                                self.cache.set(original, translated, result.source_lang, result.target_lang)
-                                
-                    except Exception as e:
-                        self.logger.error(f"Error processing translation result: {e}")
-                
-            except Exception as e:
-                self.log_message.emit("error", f"Translation failed: {e}")
+            # Execute Batch Translation
+            # Returns List[TranslationResult]
+            results = await self.translator.translate_batch(final_requests, progress_callback=on_progress)
             
-            # Ensure translator is closed properly
+            success_count = 0
+            fail_count = 0
+            
+            for res in results:
+                if self.should_stop: break
+                
+                meta = res.metadata
+                if not meta: continue
+                
+                if res.success:
+                    translated_text = res.translated_text
+                    
+                    # Restore Glossary
+                    glossary_map = meta.get('glossary_map', {})
+                    if self.glossary and glossary_map:
+                        translated_text = self.glossary.restore_terms(translated_text, glossary_map)
+                    
+                    # Cache Save
+                    if self.cache and res.original_text:
+                        self.cache.set(res.original_text, translated_text, source_lang, target_lang)
+
+                    # Handle Merged vs Single
+                    if meta.get('is_merged'):
+                         # Lookup original entries for splitting from map
+                         lookup_key = f"{meta['file']}::{meta['key']}"
+                         original_entries = merged_map.get(lookup_key)
+                         
+                         if original_entries:
+                             split_pairs, mismatch = self.merger.split_merged_result_checked(translated_text, original_entries)
+                             if mismatch:
+                                 self.logger.warning(
+                                     f"Merged translation mismatch for {lookup_key}. Retrying without merge."
+                                 )
+                                 _queue_retry(meta['file'], original_entries)
+                             else:
+                                 for sp_key, sp_text in split_pairs:
+                                     results_map[(meta['file'], sp_key)] = sp_text
+                                 success_count += 1
+                         else:
+                             self.logger.error(f"Missing merge map for key: {lookup_key}")
+                    else:
+                        results_map[(meta['file'], meta['key'])] = translated_text
+                        success_count += 1
+                else:
+                    fail_count += 1
+                    self.logger.warning(f"Translation Failed: {meta.get('key')} - {res.error}")
+
+            # Retry mismatched merged blocks as single entries
+            if retry_entries:
+                self.logger.info(f"Retrying {len(retry_entries)} entries without merge...")
+
+                retry_requests = []
+                for file_path, path, text, tag in retry_entries:
+                    protected_text = text
+                    glossary_map = {}
+                    if self.glossary:
+                        protected_text, glossary_map = self.glossary.protect_terms(text)
+
+                    retry_requests.append({
+                        'text': protected_text,
+                        'metadata': {
+                            'file': file_path,
+                            'key': path,
+                            'description': tag,
+                            'is_merged': False,
+                            'glossary_map': glossary_map,
+                            'source_lang': source_lang,
+                            'target_lang': target_lang,
+                            'original_text': text
+                        }
+                    })
+
+                retry_results = await self.translator.translate_batch(retry_requests, progress_callback=on_progress)
+
+                for res in retry_results:
+                    meta = res.metadata
+                    if not meta:
+                        continue
+                    if res.success:
+                        translated_text = res.translated_text
+                        glossary_map = meta.get('glossary_map', {})
+                        if self.glossary and glossary_map:
+                            translated_text = self.glossary.restore_terms(translated_text, glossary_map)
+
+                        if self.cache and res.original_text:
+                            self.cache.set(res.original_text, translated_text, source_lang, target_lang)
+
+                        results_map[(meta['file'], meta['key'])] = translated_text
+                    else:
+                        self.logger.warning(f"Retry Translation Failed: {meta.get('key')} - {res.error}")
+            
+            self.log_message.emit("info", f"Batch Completed. Success: {success_count}, Failed: {fail_count}")
+            
+            # Cleanup
             await self.translator.close()
-        
+
         loop.run_until_complete(process_all())
         
         return results_map
@@ -458,7 +581,7 @@ class TranslationPipeline(QObject):
         
         # Group by file
         file_entries = {}
-        for file_path, path, text in entries:
+        for file_path, path, text, tag in entries:
             if file_path not in file_entries:
                 file_entries[file_path] = []
             file_entries[file_path].append((path, text))

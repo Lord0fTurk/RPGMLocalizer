@@ -52,19 +52,19 @@ def safe_write(filepath, mode='w', encoding='utf-8', **kwargs):
         if f:
             try:
                 f.close()
-            except:
-                pass
+            except Exception as close_err:
+                logger.debug(f"Error closing temp file: {close_err}")
         
         if os.path.exists(temp_path):
             try:
                 os.remove(temp_path)
-            except OSError:
-                pass
+            except OSError as os_err:
+                logger.warning(f"Failed to remove temp file {temp_path}: {os_err}")
         raise e
     finally:
         # Ensure file is closed if something went wrong inside yield but wasn't caught
         if f:
             try:
                 f.close()
-            except:
-                pass
+            except Exception as close_err:
+                logger.debug(f"Error closing file in finally: {close_err}")

@@ -25,11 +25,13 @@ class BaseParser(QObject, metaclass=ParserMeta):
                     pass  # Ignore invalid regex
 
     @abstractmethod
-    def extract_text(self, file_path: str) -> List[Tuple[str, str]]:
+    def extract_text(self, file_path: str) -> List[Tuple[str, str, str]]:
         """
         Extracts translatable text.
-        Returns list of (path_key, text).
-        path_key is a string identifier to locate the text later (e.g. "events.1.pages.0.list.5.parameters.0")
+        Returns list of (path_key, text, context_tag).
+        path_key: string identifier to locate the text (e.g. "events.1.pages.0.list.5.parameters.0")
+        text: string to translate
+        context_tag: type of text (e.g. 'dialogue', 'name', 'system', 'other')
         """
         pass
 
@@ -63,28 +65,50 @@ class BaseParser(QObject, metaclass=ParserMeta):
             for pattern in self.blacklist_patterns:
                 if pattern.search(trimmed):
                     return False
-
-        # 1. Ignore common file extensions
-        ignored_extensions = {
-            '.ogg', '.m4a', '.wav', '.mp3', '.mid', # Audio
-            '.png', '.jpg', '.jpeg', '.bmp', '.gif', '.svg', '.tga', # Images
-            '.webm', '.mp4', '.avi', '.mov', # Video
-            '.rpgmvp', '.rpgmvo', '.rpgmvm', '.rpgmvw', # RPG Maker encrypted
-            '.css', '.js', '.json', '.txt', '.map', '.bin', # Scripts/Data
-            '.rvdata2', '.rxdata', '.rvdata' # Ruby Marshal
-        }
+        
         lower_trimmed = trimmed.lower()
+
+        # 1. Ignore common file extensions (Expanded List)
+        ignored_extensions = {
+            # Audio
+            '.ogg', '.m4a', '.wav', '.mp3', '.mid', '.midi', '.wma',
+            # Images
+            '.png', '.jpg', '.jpeg', '.bmp', '.gif', '.svg', '.tga', '.psd',
+            # Video
+            '.webm', '.mp4', '.avi', '.mov', '.ogv', '.mkv',
+            # RPG Maker Data / Script / Encrypted
+            '.rpgmvp', '.rpgmvo', '.rpgmvm', '.rpgmvw', 
+            '.css', '.js', '.json', '.txt', '.map', '.bin', '.dll',
+            '.rvdata2', '.rxdata', '.rvdata', '.rb', '.coffee'
+        }
         if any(lower_trimmed.endswith(ext) for ext in ignored_extensions):
             return False
             
-        # 2. Ignore paths (contain slashes and no spaces)
-        if ('/' in trimmed or '\\' in trimmed) and ' ' not in trimmed:
+        # 2. Ignore pure technical keywords (Plugin settings)
+        technical_keywords = {
+            'true', 'false', 'null', 'undefined', 'nan', 'none',
+            'auto', 'always', 'never', 'default',
+            'top', 'bottom', 'left', 'right', 'center', 'middle',
+            'width', 'height', 'opacity', 'scale', 'blend',
+            'x', 'y', 'z', 'id', 'index', 'code'
+        }
+        if lower_trimmed in technical_keywords:
+            return False
+
+        # 3. Ignore paths (contain slashes and no spaces)
+        # BUT: Allow backslashes if the string contains non-ASCII characters (likely Japanese with control codes like \C[0])
+        has_non_ascii = any(ord(c) > 127 for c in trimmed)
+        if ('/' in trimmed or ('\\' in trimmed and not has_non_ascii)) and ' ' not in trimmed:
             return False
         
-        # 3. Ignore technical identifiers / Asset IDs
+        # 4. Ignore Asset Names and Resource Keys
         if ' ' not in trimmed:
+            # RPG Maker Asset Prefixes: $BigChar, !Door (only if no spaces)
+            if trimmed.startswith(('$', '!')):
+                return False
+                
             # Allow if it contains non-ASCII characters (likely localized text even if single word/no spaces)
-            if any(ord(c) > 127 for c in trimmed):
+            if has_non_ascii:
                 return True
                 
             # If it has underscores or Mixed_Case, likely a key/variable - SKIP
@@ -105,13 +129,28 @@ class BaseParser(QObject, metaclass=ParserMeta):
             if len(trimmed) < 2 and trimmed.isascii():
                 return False
 
-        # 4. Ignore pure numbers or special symbols
-        clean_num = trimmed.replace('.', '').replace('-', '').replace(' ', '')
+        # 5. Ignore pure numbers or special symbols
+        clean_num = trimmed.replace('.', '').replace('-', '').replace(' ', '').replace(',', '')
         if clean_num.isdigit():
             return False
 
-        # 5. Ignore common plugin/engine prefixes
-        prefixes = ('v[', 'n[', 'i[', '<', '::', 'eval(', 'Script:', 'Plugin:')
+        # 6. Ignore common CSS color patterns (rgb, rgba, hex)
+        # hex colors: #abc, #aabbcc, #aabbccff
+        if trimmed.startswith('#') and len(trimmed) in [4, 5, 7, 9]:
+            clean_hex = trimmed[1:].lower()
+            if all(c in '0123456789abcdef' for c in clean_hex):
+                return False
+        
+        # rgb/rgba: rgba(0, 0, 0, 0.5)
+        if lower_trimmed.startswith(('rgb(', 'rgba(')) and lower_trimmed.endswith(')'):
+            return False
+
+        # 7. Ignore common plugin/engine prefixes and Note Tags
+        # Note Tags: <Tag: Value> or <Tag>
+        if trimmed.startswith('<') and trimmed.endswith('>'):
+            return False
+            
+        prefixes = ('v[', 'n[', 'i[', '::', 'eval(', 'Script:', 'Plugin:', 'note:', 'meta:', 'rgba(', 'rgb(')
         if lower_trimmed.startswith(prefixes) and not is_dialogue:
             return False
 

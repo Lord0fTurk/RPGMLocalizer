@@ -81,19 +81,23 @@ jobs:
       - name: Prepare Release Assets
         run: |
           mv ./dist-windows/RPGMLocalizer.exe ./RPGMLocalizer_Windows.exe
+          
           mv ./dist-linux/RPGMLocalizer ./RPGMLocalizer_Linux
           chmod +x ./RPGMLocalizer_Linux
+          zip -j RPGMLocalizer_Linux.zip RPGMLocalizer_Linux
+          
           mv ./dist-macos/RPGMLocalizer ./RPGMLocalizer_MacOS
           chmod +x ./RPGMLocalizer_MacOS
+          zip -j RPGMLocalizer_MacOS.zip RPGMLocalizer_MacOS
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             RPGMLocalizer_Windows.exe
-            RPGMLocalizer_Linux
-            RPGMLocalizer_MacOS
-          body_path: CHANGELOG.md
+            RPGMLocalizer_Linux.zip
+            RPGMLocalizer_MacOS.zip
+          body: ""
           draft: false
           prerelease: false
         env:

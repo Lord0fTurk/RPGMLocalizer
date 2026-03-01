@@ -231,6 +231,10 @@ class TranslationPipeline(QObject):
 
         if os.path.exists(plugin_js):
             files.append(plugin_js)
+            
+            # Note: We previously scanned all .js files here for hardcoded strings, 
+            # but it was disabled because translating raw JS files (like VisuStella) 
+            # breaks obfuscation/checksums and game API logic, causing a Black Screen.
         
         # DKTools Localization / Plugin locale files (locales/*.json)
         # Check both project root and www folder for locales
@@ -248,8 +252,15 @@ class TranslationPipeline(QObject):
                         self.log_message.emit("info", f"Found locale file: {entry.name}")
                 break  # Only use the first found locales dir
             
-        # Sort for consistent ordering
-        files.sort()
+        # Sort files to ensure DB files come first (not strictly necessary but good for logs)
+        def _sort_key(f):
+            name = os.path.basename(f).lower()
+            db_files = ['system.json', 'actors.json', 'classes.json', 'skills.json', 'items.json', 'weapons.json', 'armors.json', 'enemies.json', 'states.json']
+            for i, dbf in enumerate(db_files):
+                if dbf in name: return i
+            return 100
+            
+        files.sort(key=lambda x: (_sort_key(x), x))
         return files
 
     def _extract_all_text(self, files: List[str]) -> Tuple[List[Tuple], Dict]:
@@ -381,7 +392,19 @@ class TranslationPipeline(QObject):
             self.log_message.emit("info", "All entries found in cache!")
             return results_map
 
-        self.log_message.emit("info", f"Sending {len(final_requests)} requests to translation engine...")
+        # PHASE SPLIT (Database first, then Maps/Events)
+        db_files = {'system.json', 'actors.json', 'classes.json', 'skills.json', 'items.json', 'weapons.json', 'armors.json', 'enemies.json', 'states.json'}
+        phase1_requests = []
+        phase2_requests = []
+        
+        for req in final_requests:
+            filename = os.path.basename(req['metadata']['file']).lower()
+            if filename in db_files:
+                phase1_requests.append(req)
+            else:
+                phase2_requests.append(req)
+
+        self.log_message.emit("info", f"Execution Plan: Phase 1 (DB): {len(phase1_requests)} reqs | Phase 2 (Maps/Events): {len(phase2_requests)} reqs")
 
         # 2. Async Execution (Result Pattern)
         try:
@@ -389,9 +412,8 @@ class TranslationPipeline(QObject):
         except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            
+
         async def process_all():
-             # Progress Callback
             processed_count = 0
             total_reqs = len(final_requests)
             
@@ -400,56 +422,78 @@ class TranslationPipeline(QObject):
                 processed_count += count
                 self.progress_updated.emit(processed_count, total_reqs, f"Translating... {processed_count}/{total_reqs}")
 
-            # Execute Batch Translation
-            # Returns List[TranslationResult]
-            results = await self.translator.translate_batch(final_requests, progress_callback=on_progress)
-            
-            success_count = 0
-            fail_count = 0
-            
-            for res in results:
-                if self.should_stop: break
-                
-                meta = res.metadata
-                if not meta: continue
-                
-                if res.success:
-                    translated_text = res.translated_text
-                    
-                    # Restore Glossary
-                    glossary_map = meta.get('glossary_map', {})
-                    if self.glossary and glossary_map:
-                        translated_text = self.glossary.restore_terms(translated_text, glossary_map)
-                    
-                    # Cache Save
-                    if self.cache and res.original_text:
-                        self.cache.set(res.original_text, translated_text, source_lang, target_lang)
+            success_total, fail_total = 0, 0
+            dynamic_glossary = {}
 
-                    # Handle Merged vs Single
-                    if meta.get('is_merged'):
-                         # Lookup original entries for splitting from map
-                         lookup_key = f"{meta['file']}::{meta['key']}"
-                         original_entries = merged_map.get(lookup_key)
-                         
-                         if original_entries:
-                             split_pairs, mismatch = self.merger.split_merged_result_checked(translated_text, original_entries)
-                             if mismatch:
-                                 self.logger.warning(
-                                     f"Merged translation mismatch for {lookup_key}. Retrying without merge."
-                                 )
-                                 _queue_retry(meta['file'], original_entries)
-                             else:
-                                 for sp_key, sp_text in split_pairs:
-                                     results_map[(meta['file'], sp_key)] = sp_text
-                                 success_count += 1
-                         else:
-                             self.logger.error(f"Missing merge map for key: {lookup_key}")
+            async def process_results_batch(batch_results):
+                suc, fal = 0, 0
+                for res in batch_results:
+                    if self.should_stop: break
+                    meta = res.metadata
+                    if not meta: continue
+                    if res.success:
+                        translated_text = res.translated_text
+                        glossary_map = meta.get('glossary_map', {})
+                        if self.glossary and glossary_map:
+                            translated_text = self.glossary.restore_terms(translated_text, glossary_map)
+                        if self.cache and res.original_text:
+                            self.cache.set(res.original_text, translated_text, source_lang, target_lang)
+
+                        if meta.get('is_merged'):
+                            lookup_key = f"{meta['file']}::{meta['key']}"
+                            original_entries = merged_map.get(lookup_key)
+                            if original_entries:
+                                split_pairs, mismatch = self.merger.split_merged_result_checked(translated_text, original_entries)
+                                if mismatch:
+                                    self.logger.warning(f"Merged translation mismatch for {lookup_key}. Retrying without merge.")
+                                    _queue_retry(meta['file'], original_entries)
+                                else:
+                                    for sp_key, sp_text in split_pairs:
+                                        results_map[(meta['file'], sp_key)] = sp_text
+                                    suc += 1
+                            else:
+                                self.logger.error(f"Missing merge map for key: {lookup_key}")
+                        else:
+                            results_map[(meta['file'], meta['key'])] = translated_text
+                            suc += 1
                     else:
-                        results_map[(meta['file'], meta['key'])] = translated_text
-                        success_count += 1
-                else:
-                    fail_count += 1
-                    self.logger.warning(f"Translation Failed: {meta.get('key')} - {res.error}")
+                        fal += 1
+                        self.logger.warning(f"Translation Failed: {meta.get('key')} - {res.error}")
+                return suc, fal
+
+            # Execute Phase 1
+            if phase1_requests:
+                self.log_message.emit("info", "Running Phase 1: Database Lexicon Translation")
+                p1_results = await self.translator.translate_batch(phase1_requests, progress_callback=on_progress)
+                s1, f1 = await process_results_batch(p1_results)
+                success_total += s1
+                fail_total += f1
+                
+                # Build dynamic glossary context from Phase 1 name translations
+                for res in p1_results:
+                    if res.success and res.original_text and res.metadata:
+                        tag = res.metadata.get('description', '')
+                        if 'name' in tag or 'system' in tag:
+                            clean_orig = res.original_text.strip()
+                            clean_trans = res.translated_text.strip()
+                            if len(clean_orig) > 1 and len(clean_trans) > 1:
+                                dynamic_glossary[clean_orig] = clean_trans
+                                
+                if dynamic_glossary:
+                    self.log_message.emit("info", f"Extracted {len(dynamic_glossary)} context terms for Phase 2!")
+
+            # Inject Dynamic Glossary context into Phase 2 metadata
+            if dynamic_glossary and phase2_requests:
+                for req in phase2_requests:
+                    req['metadata']['dynamic_context'] = dynamic_glossary
+
+            # Execute Phase 2
+            if phase2_requests:
+                self.log_message.emit("info", "Running Phase 2: Maps and Events Translation")
+                p2_results = await self.translator.translate_batch(phase2_requests, progress_callback=on_progress)
+                s2, f2 = await process_results_batch(p2_results)
+                success_total += s2
+                fail_total += f2
 
             # Retry mismatched merged blocks as single entries
             if retry_entries:
@@ -494,8 +538,9 @@ class TranslationPipeline(QObject):
                         results_map[(meta['file'], meta['key'])] = translated_text
                     else:
                         self.logger.warning(f"Retry Translation Failed: {meta.get('key')} - {res.error}")
+                        fail_total += 1
             
-            self.log_message.emit("info", f"Batch Completed. Success: {success_count}, Failed: {fail_count}")
+            self.log_message.emit("info", f"Batch Completed. Success: {success_total}, Failed: {fail_total}")
             
             # Cleanup
             await self.translator.close()
@@ -523,8 +568,30 @@ class TranslationPipeline(QObject):
             if not changes or file_path not in parsed_files:
                 return
             
-            parser, _ = parsed_files[file_path]
+            parser, entries = parsed_files[file_path]
             filename = os.path.basename(file_path)
+            
+            # Lookup table for fast tag checking
+            tag_lookup = {path: tag for path, _t, tag in entries}
+            
+            # Formatting Pre-Processing
+            visu_wrap = self.settings.get("visustella_wordwrap", False)
+            auto_wrap = self.settings.get("auto_wordwrap", False)
+            
+            for p, text in changes.items():
+                if tag_lookup.get(p) == "message_dialogue":
+                    if visu_wrap:
+                        if not text.startswith("<WordWrap>"):
+                            changes[p] = "<WordWrap>" + text
+                    elif auto_wrap and "\n" not in text:
+                        if len(text) > 54:
+                            import textwrap
+                            changes[p] = "\n".join(textwrap.wrap(
+                                text, 
+                                width=54, 
+                                break_long_words=False, 
+                                break_on_hyphens=False
+                            ))
             
             try:
                 # Create backup first
@@ -543,12 +610,16 @@ class TranslationPipeline(QObject):
                         json.dump(new_data, f, ensure_ascii=False)
                 
                 elif file_path.endswith('.js'):
-                    prefix = getattr(parser, '_js_prefix', "var $plugins = ")
-                    suffix = getattr(parser, '_js_suffix', ";")
                     with safe_write(file_path, 'w', encoding='utf-8') as f:
-                        f.write(prefix)
-                        json.dump(new_data, f, ensure_ascii=False, indent=0)
-                        f.write(suffix)
+                        if isinstance(new_data, str):
+                            f.write(new_data)
+                        else:
+                            # Fallback if parser somehow returns raw list/dict
+                            prefix = getattr(parser, '_js_prefix', "var $plugins = \n")
+                            suffix = getattr(parser, '_js_suffix', ";\n")
+                            f.write(prefix)
+                            json.dump(new_data, f, ensure_ascii=False, indent=0)
+                            f.write(suffix)
                         
                 elif file_path.endswith(('.rvdata2', '.rxdata', '.rvdata')):
                     import rubymarshal.writer

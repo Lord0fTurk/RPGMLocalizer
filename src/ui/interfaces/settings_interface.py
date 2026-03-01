@@ -110,11 +110,11 @@ class SettingsInterface(ScrollArea):
         self.slider_batch_size = SliderSettingCard(
             icon=FIF.SPEED_HIGH,
             title="Batch Processing Size",
-            content="Number of text entries to merge per request (1=safest, 10=fast, 50+=risky)",
+            content="Number of text entries to merge per request. With Multi-Endpoints enabled, 50-100 is safe.",
             parent=self.performanceGroup
         )
         self.slider_batch_size.setRange(1, 200)
-        self.slider_batch_size.setValue(1)
+        self.slider_batch_size.setValue(50)
         
         self.slider_concurrent = SliderSettingCard(
             icon=FIF.PEOPLE,
@@ -127,6 +127,28 @@ class SettingsInterface(ScrollArea):
         
         self.performanceGroup.addSettingCard(self.slider_batch_size)
         self.performanceGroup.addSettingCard(self.slider_concurrent)
+
+        # Formatting Group
+        self.formattingGroup = SettingCardGroup("Formatting (Word Wrap)", self.scrollWidget)
+        
+        self.chk_visustella_wordwrap = SwitchSettingCard(
+            FIF.ALIGNMENT,
+            "Inject VisuStella <WordWrap>",
+            "Automatically appends <WordWrap> to translated dialogues. WARNING: ONLY enable if game has VisuStella Message Core MZ!",
+            parent=self.formattingGroup
+        )
+        self.chk_visustella_wordwrap.setChecked(False)
+        
+        self.chk_auto_wordwrap = SwitchSettingCard(
+            FIF.ALIGNMENT,
+            "Vanilla Auto Word-Wrap",
+            "Automatically inserts line breaks (\\n) for texts exceeding ~54 chars. Best for games without message plugins.",
+            parent=self.formattingGroup
+        )
+        self.chk_auto_wordwrap.setChecked(False)
+
+        self.formattingGroup.addSettingCard(self.chk_visustella_wordwrap)
+        self.formattingGroup.addSettingCard(self.chk_auto_wordwrap)
 
         # Network Group
         self.networkGroup = SettingCardGroup("Network", self.scrollWidget)
@@ -235,6 +257,7 @@ class SettingsInterface(ScrollArea):
         self.expandLayout.addWidget(self.parserGroup)
         self.expandLayout.addWidget(self.pipelineGroup)
         self.expandLayout.addWidget(self.performanceGroup)
+        self.expandLayout.addWidget(self.formattingGroup)
         self.expandLayout.addWidget(self.networkGroup)
         self.expandLayout.addWidget(self.glossaryGroup)
         self.expandLayout.addWidget(self.filterGroup)
@@ -301,6 +324,9 @@ class SettingsInterface(ScrollArea):
 
         self.chk_translate_comments.setChecked(settings.get("translate_comments", True))
         self.chk_translate_notes.setChecked(settings.get("translate_notes", False))
+
+        self.chk_visustella_wordwrap.setChecked(settings.get("visustella_wordwrap", False))
+        self.chk_auto_wordwrap.setChecked(settings.get("auto_wordwrap", False))
 
         self.chk_backup.setChecked(settings.get("backup_enabled", True))
         self.chk_cache.setChecked(settings.get("use_cache", True))

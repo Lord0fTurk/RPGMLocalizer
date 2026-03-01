@@ -335,7 +335,7 @@ class RubyParser(BaseParser):
             if len(params) > 0:
                 text = self._to_string(params[0])
                 if self.is_safe_to_translate(text, is_dialogue=True):
-                    self.extracted.append((f"{path}.@parameters.0", text, "dialogue_block"))
+                    self.extracted.append((f"{path}.@parameters.0", text, "message_dialogue"))
         
         # Show Choices (102)
         elif code == 102:

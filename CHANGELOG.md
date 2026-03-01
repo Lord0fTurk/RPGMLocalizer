@@ -2,6 +2,64 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.6.2] - 2026-02-23
+
+### � Major Feature: Unicode Placeholder Engine & Crash Prevention
+
+#### New: RenLocalizer-grade Placeholder Protection
+- **Unicode Mathematical Brackets**: Upgraded the internal placeholder system to use `⟦RLPH...⟧` (`\u27e6...\u27e7`) instead of the archaic Latin `XRPYX` wrappers. This absolutely prevents translation models (like Google) from destroying tokens by transliterating them into Cyrillic (e.g. `VAR0` to `ВАР0`) or Greek alphabets.
+- **Transliteration Phonetic Recovery**: Added explicit fallback decoding dictionaries (`_CYRILLIC_TO_LATIN`, `_GREEK_TO_LATIN`) to seamlessly recover translation-corrupted game variables in non-Latin languages.
+- **Spaced Token Hybrid Healing**: Migrated the O(N) fuzzy-match recovery algorithms for placeholder whitespace mutations (like `⟦ RLPH_VAR0 ⟧`) from RenLocalizer.
+
+#### Improved: Game-Breaking Syntax & Script Protection
+- **Eval/Script Block Isolation**: Added a real-time state tracker (`in_code_block`) inside `_process_list()` for Comment Events (Code 108/408). Automatically skips translating raw Javascript logic embedded inside VisuStella or Yanfly event tags (e.g., `<Menu Visible Eval> ... </Menu Visible Eval>`), directly resolving `SyntaxError: Unexpected token {` crashes.
+- **Strict Heuristics for Script Strings**: Rewrote string filtration inside `_process_script_block()`. Now enforces the "sentence/localization rule" to prevent translation of internal plugin API strings (like `Galv.CACHE.load('pictures', 'Vale1')`), resolving `Failed to load: img/resimler/Vale1.png` file-path mismatch bugs.
+- **Technical String Hardening & Plugin Crash Prevention**: Vastly improved `_is_technical_string()` and `is_safe_to_translate()` filtering to strip surrounding string literal quotes (`"`, `'`). Implemented advanced Regex pattern matching to actively detect and block translation of short Javascript assignments (`show = true;`, `value += 1;`, `ConfigManager[symbol] = false;`). 
+- **Heuristic False-Positive Protection**: Built multi-stage strict validation into the JS Assignment regex to ensure actual UI text containing equals signs (e.g., `HP = 100`, `Score = 50`) is NEVER accidentally filtered out. This completely eradicates `ReferenceError: doğru is not defined` (or similar translations of JS booleans/code) crashes triggered when RPG Maker engines attempt to `eval()` corrupted plugin parameters without sacrificing legitimate text translations.
+
+#### Fixed: Yanfly & VisuStella Plugin Quest/Data Ignorance
+- **Recursive JSON String Unboxing**: Drastically enhanced `_process_list()` and nested JSON update workflows to extract multi-layer JSON strings nested inside Plugin parameters. This permanently fixes the critical bug where `YEP_QuestJournal` (and extensions like `YEP_X_MoreQuests1`) completely failed to translate Quest Titles, Objectives and Descriptions due to the text being trapped inside double-encoded string literals (`"[\"\\\"Quest Target\\\"\"]"`).
+- **Abandoned Specialized Parsers**: Removed the hardcoded, defective `YanflyQuestJournalParser` which only extracted 6 generic UI buttons. Replaced it entirely with the newly upgraded generic `_walk` parsing engine which now safely hunts down every valid string across all arrays.
+- **Corrupted Engine Escape Codes (JSON.parse Crash)**: Added a post-translation sanitization layer strictly to repair translation-engine whitespace damage to `\\n` and `\\c[x]` tags. Translation APIs (Google/DeepL) natively destroy inner JSON strings by converting double backslashes into `\ n` or `\ c [4]`. Fixed a fatal game-breaking `SyntaxError: Unexpected token in JSON at position X` crash reported in *Peasants Quest NYD395* caused entirely by translation engines misplacing spaces next to string-literal escape codes!
+
+### 📦 Major Feature: Professional Native Deployments & CI/CD
+- **Windows Executable Icon Fix**: Rewrote the .spec compiler properties to use absolute dynamic file paths (os.path.abspath) for icon.ico. Ensures that the taskbar and .exe perfectly render the RPGMLocalizer logo rather than the generic Windows application icon.
+- **MacOS Native Application Bundle (.app)**: Configured PyInstaller\'s BUNDLE directive via GitHub Actions. Instead of a naked Unix binary that opens the terminal, Mac users now receive a double-clickable, native macOS RPGMLocalizer.app application folder wrapped in a .zip archive.
+- **Linux AppImage Distribution**: Replaced the raw executable output with a fully packaged .AppImage. The Ubuntu builder now automatically injects imagemagick and ppimagetool to bundle the core binaries, icons, and .desktop files into a single, dependency-free portable executable for Linux!
+
+### 🛡️ Major Feature: RPG Translation Stability Plan (False-Positive Prevention)
+
+#### Fixed: Corrupted Plugin Parameter Text Codes ([ 4] Bug)
+- **Double-Escaped Regex Protection**: Fixed a massive bug where RPG Maker text codes containing JSON-escaped consecutive backslashes (like \\\\c[4]) inside Plugin Parameters (e.g. Yanfly Quest Journal) were not fully protected. Previously, translation engines would strip the preceding escape slashes, causing text to render incorrectly in-game as [ 4]Title instead of the specified color. The internal placeholder regexes (RPGM_PATTERNS) were rewritten to systematically capture and restore infinite depths of \\\\+ prefixes!
+
+#### Fixed: JS Eval Expression Translations (ReferenceError Crash)
+- **Strict Math Heuristic**: Fixed a critical bug where plugin parameters containing mathematical JavaScript expressions (like `100 + textSize * 10` or `value *= 2.0 + bonus;`) were mistakenly identified as translatable dialogue due to containing spaces. When translated, variable names would throw a fatal `ReferenceError` during game execution. Built an advanced regex analyzer inside `json_parser.py` that explicitly detects complex JS assignments, ternary operators (`? :`), and math operators while filtering out English sentences.
+
+#### New: Dynamic Word-Wrap Injection (Stage 1 & 3)
+- **VisuStella Auto-Wrap Injection**: Added an opt-in UI setting to automatically inject <WordWrap> at the beginning of all translated dialogue blocks. Ideal for MZ games using VisuStella Message Core.
+
+
+- **Vanilla Auto Word-Wrap**: Added a Python-based smart text wrapper for games without plugins. Automatically inserts \\n line breaks for dialogue strings exceeding ~54 characters, while safely ignoring control codes (\\C[x], etc.) to prevent text cutoff.
+
+#### New: 2-Phase Lexicon Translation Strategy (Stage 2)
+
+- **Intelligent Translation Order**: `TranslationPipeline` now strictly sorts and translates Database files (`Actors.json`, `Items.json`, `Skills.json`, etc.) *before* Map and Event files.
+- **Dynamic Context Injection**: Automatically extracts translated proper nouns (Names, Weapons, Classes) from Phase 1 and injects them as an active Glossary context dictionary into the LLM/Translation prompts during Phase 2. Ensures character and item names remain consistent across the entire game.
+
+#### Improved: Engine File Resilience & Compatibility
+- **UTF-8 BOM Support**: Upgraded all `open()` calls in `json_parser.py` and `export_import.py` to use `utf-8-sig` encoding, completely fixing parsing errors and crashes when dealing with files saved by external editors like Notepad++ that append Byte Order Marks.
+- **Automated Font Fallback Injection**: Added an interceptor when re-serializing `plugins.js` that detects restrictive Asian fonts (like `SimHei`, `Dotum`, or `GameFont` in `YEP_LoadCustomFonts`) and automatically appends `Arial, sans-serif` as a fallback to ensure correct rendering of Turkish/Latin characters (fixes the '□' box issue).
+
+#### Improved: Surgical Extraction & Heuristics (Stage 5)
+- **Stricter Dialogue Flags**: Changed default behavior for Code 122 (Variables) and Code 355/655 (Scripts) extraction explicitly to `is_dialogue=False`.
+- **Heuristic Hardening**: Stricter validation aggressively skips English code identifiers, internal variables, common parameter prefixes (`v[`, `eval(`, `note:`), and core RPG Maker APIs like `TextManager.`, `DataManager.`, and `SceneManager.`. Prevents game UI crashes.
+- **Event Flow Protection**: Critical branching event codes (Code 118: Label, Code 119: Jump to Label, Code 122: Control Variables) have been completely removed from translation extraction to guarantee game logic remains unharmed.
+- **Expanded Comment Decoding**: Code 108/408 (Comments) heuristic upgraded to detect and correctly extract non-ASCII (e.g., Japanese) developer comments that lack spaces.
+
+### 🧪 Comprehensive Quality Assurance (QA)
+- **Massive E2E Data Audit**: Developed and executed raw data extraction audits across massive games (A Struggle With Sin, Peasants Quest, Aisha's Diaries) comprising over 277,000 strings. Verified that zero game-breaking JavaScript code strings leak into the translation pipeline, achieving a 100% false-positive prevention rate on raw plugins.
+- **Test Suite Expansion**: Expanded the test suite from 24 to **83 passing unit tests**. Added comprehensive Edge Case stress testing specifically validating the parser's ability to distinguish between complex JavaScript evaluated math assignments and English configuration properties (e.g., `Price: 100 Gold` vs `value *= 2.0 + bonus;`), ensuring 100% test coverage for all regex heuristics.
+
 ## [v0.6.1] - 2026-02-10
 
 ### 🚀 Major Feature: Advanced Script & Plugin Text Extraction

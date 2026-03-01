@@ -39,6 +39,10 @@ class JsonParser(BaseParser):
         403: 'choice_cancel',       # When Cancel
         105: 'scroll_text_header',  # Scroll Text settings (MZ might have title)
         657: 'plugin_command_mz_cont',  # Plugin Command MZ continuation
+        # Commented out: Labels, Jump to Label, Control Variables can break branching logic when translated
+        # 118: 'label',               
+        # 119: 'jump_to_label',       
+        # 122: 'control_variables',   
     }
     
     # Database fields that are always translatable
@@ -80,7 +84,7 @@ class JsonParser(BaseParser):
         'menu', 'command', 'option', 'button',
         'string', 'content', 'display', 'info',
         'quest', 'journal', 'log', 'story',
-        'victory', 'defeat', 'battle', 'escape',
+        'victory', 'defeat', 'battle', 'escape', 'objective', 'task',
     ]
 
     # Asset-related key hints (likely file names / asset identifiers, not UI text)
@@ -91,6 +95,22 @@ class JsonParser(BaseParser):
         'picture', 'image', 'img', 'icon', 'sprite',
         'filename', 'file',
     ]
+
+    # Explicitly technical keys in plugin configs
+    NON_TRANSLATABLE_KEY_HINTS = [
+        'switch', 'variable', 'symbol', 'condition', 'bind',
+        'sound', 'audio', 'bgm', 'bgs',
+        'icon', 'align', 'width', 'height',
+        'opacity', 'speed', 'interval', 'scale', 'rate',
+        'color', 'margin', 'padding', 'position', 'size',
+        'volume', 'pitch', 'pan', 'duration', 'row', 'column',
+        'precache', 'eval', 'script', 'code', 'regex',
+    ]
+
+    # Exact matches for short technical keys to avoid false positives (like 'me' in 'menu')
+    NON_TRANSLATABLE_EXACT_KEYS = {
+        'id', 'se', 'me', 'x', 'y', 'z'
+    }
 
     PATH_DOT_ESCAPE = "__DOT__"
     PATH_DOT_ESCAPE_ESC = "__DOT_ESC__"
@@ -126,7 +146,7 @@ class JsonParser(BaseParser):
     
     def extract_text(self, file_path: str) -> List[Tuple[str, str]]:
         """Extract translatable text. Handles JSON, MV js/plugins.js, and locale files."""
-        with open(file_path, 'r', encoding='utf-8') as f:
+        with open(file_path, 'r', encoding='utf-8-sig') as f:
             content = f.read().strip()
             
         if not content:
@@ -135,32 +155,38 @@ class JsonParser(BaseParser):
         # Check if this is a locale file (locales/*.json - DKTools Localization etc.)
         is_locale_file = self._is_locale_file(file_path)
         
-        # Handle js/plugins.js (MV)
+        # Handle js/plugins.js
         is_js = file_path.lower().endswith('.js')
+        is_main_plugins_js = is_js and os.path.basename(file_path).lower() == 'plugins.js'
+        
+        self.extracted = []
+        
         if is_js:
-            prefix, json_str, suffix = self._extract_js_json(content)
-            if prefix and json_str:
-                try:
-                    data = json.loads(json_str)
-                except json.JSONDecodeError as e:
-                     logger.error(f"Failed to parse JSON in {file_path}: {e}")
-                     return []
+            if is_main_plugins_js:
+                prefix, json_str, suffix = self._extract_js_json(content)
+                if prefix and json_str:
+                    try:
+                        data = json.loads(json_str)
+                    except json.JSONDecodeError as e:
+                         logger.error(f"Failed to parse JSON in {file_path}: {e}")
+                         return []
+                else:
+                    self.log_message.emit("warning", f"Skipping {os.path.basename(file_path)}: Unknown plugins.js format")
+                    return []
             else:
-                self.log_message.emit("warning", f"Skipping {os.path.basename(file_path)}: Unknown JS format")
-                return []
+                self._extract_from_js_source(content)
+                return self.extracted
         else:
             try:
                 data = json.loads(content)
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse JSON file {file_path}: {e}")
                 return []
-            
-        self.extracted = []
         
         # Handle locale files specially (simple key-value format)
         if is_locale_file:
             self._extract_from_locale(data)
-        elif is_js:
+        elif is_main_plugins_js:
              self._extract_from_plugins_js(data)
         else:
             self._walk(data, "")
@@ -252,6 +278,53 @@ class JsonParser(BaseParser):
     
     # VisuStella MZ suffixes that indicate translatable string values
     TEXT_KEY_SUFFIXES = (':str', ':num')
+    
+    def _extract_tags_from_note(self, note: str, base_path: str) -> List[Tuple[str, str]]:
+        if not isinstance(note, str) or not note.strip(): return []
+        results = []
+        # Pattern 1: Block tags (e.g. <Description>...</Description>)
+        pattern_block = r'<(?P<tag>\w*(?:Description|Text|Message|Desc|Name)\w*)>(?P<content>.*?)</(?P=tag)>'
+        for i, match in enumerate(re.finditer(pattern_block, note, re.IGNORECASE | re.DOTALL)):
+            content = match.group('content').strip()
+            if len(content) > 1 and self.is_safe_to_translate(content, is_dialogue=True):
+                results.append((f"{base_path}.@NOTEBLOCK_{i}", content))
+                
+        # Pattern 2: Inline tags (e.g. <Desc: text>)
+        pattern_inline = r'<(?P<tag>\w*(?:_name|_desc|_text|_msg|Name|Desc|Text|Message)):(?P<content>.*?)>'
+        for i, match in enumerate(re.finditer(pattern_inline, note, re.IGNORECASE)):
+            content = match.group('content').strip()
+            if len(content) > 1 and self.is_safe_to_translate(content, is_dialogue=True):
+                results.append((f"{base_path}.@NOTEINLINE_{i}", content))
+        return results
+
+    def _apply_note_tag_translation(self, data: Any, base_path: str, updates: list, is_block: bool):
+        note = self._get_value_at_path(data, base_path)
+        if not isinstance(note, str): return
+        
+        if is_block:
+            pattern = r'<(?P<tag>\w*(?:Description|Text|Message|Desc|Name)\w*)>(?P<content>.*?)</(?P=tag)>'
+        else:
+            pattern = r'<(?P<tag>\w*(?:_name|_desc|_text|_msg|Name|Desc|Text|Message)):(?P<content>.*?)>'
+        
+        matches = list(re.finditer(pattern, note, re.IGNORECASE | (re.DOTALL if is_block else 0)))
+        updates_sorted = sorted(updates, key=lambda x: x[0], reverse=True)
+        
+        new_note = note
+        for idx, trans_text in updates_sorted:
+            if idx is None or idx >= len(matches) or not trans_text: continue
+            match = matches[idx]
+            content_start = match.start('content')
+            content_end = match.end('content')
+            original_content = new_note[content_start:content_end]
+            
+            leading_len = len(original_content) - len(original_content.lstrip())
+            trailing_len = len(original_content) - len(original_content.rstrip())
+            leading = original_content[:leading_len] if leading_len > 0 else ""
+            trailing = original_content[len(original_content)-trailing_len:] if trailing_len > 0 else ""
+            
+            new_note = new_note[:content_start] + leading + trans_text + trailing + new_note[content_end:]
+            
+        self._set_value_at_path(data, base_path, new_note)
 
     def _process_dict(self, data: dict, current_path: str):
         """Process a dictionary node."""
@@ -285,6 +358,11 @@ class JsonParser(BaseParser):
                 except (json.JSONDecodeError, TypeError):
                     pass 
 
+            if self.translate_notes and key == 'note' and isinstance(value, str) and value.strip():
+                tags = self._extract_tags_from_note(value, new_path)
+                for tag_path, tag_text in tags:
+                    self.extracted.append((tag_path, tag_text, "dialogue_block"))
+
             # Check logic for extraction
             should_extract = False
             is_plugin_param = ".parameters" in new_path or ".@JSON" in new_path or "parameters" in current_path
@@ -294,8 +372,22 @@ class JsonParser(BaseParser):
             elif is_plugin_param and isinstance(value, str):
                  # Skip asset identifiers in plugin params (file names / image lists)
                  key_lower = key.lower()
+                 if 'font' in key_lower:
+                     # Heuristics: if it has 'name', 'face', 'file', or just 'font', it's usually CSS font identifier.
+                     # But some plugins use 'font' in description keys.
+                     if len(value) < 40 and not any(ord(c) > 127 for c in value):
+                         if value.strip().isalpha() or value.replace(' ', '').isalnum() or ',' in value or '.ttf' in value.lower():
+                             continue
+                             
                  if any(hint in key_lower for hint in self.ASSET_KEY_HINTS) and self._looks_like_asset_name(value):
                      continue
+                     
+                 # Skip technical strings defined explicitly (like symbols, audio files, eval code)
+                 if any(hint in key_lower for hint in self.NON_TRANSLATABLE_KEY_HINTS) or key_lower in self.NON_TRANSLATABLE_EXACT_KEYS:
+                     # Exception: If value is long and has spaces, it might genuinely be a text despite key name
+                     # E.g. a key named 'condition text'
+                     if len(value) < 60 and '\n' not in value:
+                         continue
                  # Heuristics for loosely structured plugin parameters
                  if self.is_safe_to_translate(value, is_dialogue=(key != 'note')):
                      if not self._is_technical_string(value):
@@ -303,7 +395,9 @@ class JsonParser(BaseParser):
                         if ' ' in value or any(ord(c) > 127 for c in value):
                              should_extract = True
                         # Relaxed check: keys containing text-related indicators
-                        elif any(k in key.lower() for k in self.TEXT_KEY_INDICATORS):
+                        elif any(k in key_lower for k in self.TEXT_KEY_INDICATORS):
+                             should_extract = True
+                        elif any(key_lower.endswith(s) for s in self.TEXT_KEY_SUFFIXES):
                              should_extract = True
 
             if should_extract:
@@ -323,6 +417,7 @@ class JsonParser(BaseParser):
 
     def _process_list(self, data: list, current_path: str):
         """Process a list node, including event commands with lookahead for multi-line blocks."""
+        in_code_block = False
         i = 0
         while i < len(data):
             item = data[i]
@@ -332,6 +427,26 @@ class JsonParser(BaseParser):
             # Check for event command structure
             if isinstance(item, dict) and "code" in item and "parameters" in item:
                 code = item.get("code")
+                
+                # Protect Code/Script Event Comments from translation
+                if code in (108, 408):
+                    params = item.get("parameters", [])
+                    if params and isinstance(params[0], str):
+                        text_lower = params[0].strip().lower()
+                        if text_lower.startswith('<') and '>' in text_lower:
+                            tag_content = text_lower.split('>', 1)[0]
+                            # Check if the tag indicates a script/eval block (VisuStella / Yanfly patterns)
+                            is_code_tag = any(k in tag_content for k in ['eval', 'code', 'script', 'setup', 'action', 'js '])
+                            if is_code_tag:
+                                if text_lower.startswith('</'):
+                                    in_code_block = False
+                                else:
+                                    in_code_block = True
+                                    
+                        # If we are inside an Eval/Code comment block, skip completely
+                        if in_code_block:
+                            i += 1
+                            continue
                 
                 # Multi-line script merge: code 355 followed by 655 continuations
                 if code == 355:
@@ -378,6 +493,32 @@ class JsonParser(BaseParser):
                         continue
                     except (json.JSONDecodeError, TypeError):
                         pass
+                 elif item.startswith('"') and item.endswith('"') and len(item) >= 2:
+                    try:
+                        nested_str = json.loads(item)
+                        if isinstance(nested_str, str):
+                            is_plugin_param = ".parameters" in new_path or ".@JSON" in new_path or "parameters" in current_path
+                            if is_plugin_param and self.is_safe_to_translate(nested_str, is_dialogue=True) and not self._is_technical_string(nested_str):
+                                if ' ' in nested_str or any(ord(c) > 127 for c in nested_str):
+                                    self.extracted.append((f"{new_path}.@JSON", nested_str, "dialogue_block"))
+                                    i += 1
+                                    continue
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
+                 # Fallback for plain strings in lists (if inside plugin parameters)
+                 is_plugin_param = ".parameters" in new_path or ".@JSON" in new_path or "parameters" in current_path
+                 if is_plugin_param:
+                     should_extract = False
+                     ext_test = item.strip('"\'').lower()
+                     if not ext_test.endswith(('.png', '.jpg', '.ogg', '.m4a', '.webm', '.js')):
+                         if self.is_safe_to_translate(item, is_dialogue=True) and not self._is_technical_string(item):
+                             if ' ' in item or any(ord(c) > 127 for c in item):
+                                 should_extract = True
+                     if should_extract:
+                         self.extracted.append((new_path, item, "dialogue_block"))
+                         i += 1
+                         continue
 
             # Recurse
             self._walk(item, new_path)
@@ -394,7 +535,7 @@ class JsonParser(BaseParser):
         # Show Text (401) / Scroll Text (405) / Show Text Header (101 - MZ Speaker Name)
         if code in [401, 405]:
             if len(params) > 0 and self.is_safe_to_translate(params[0], is_dialogue=True):
-                self.extracted.append((f"{path}.parameters.0", params[0], "dialogue_block"))
+                self.extracted.append((f"{path}.parameters.0", params[0], "message_dialogue"))
 
         elif code == 101:
             # Code 101: Show Text Header.
@@ -419,6 +560,27 @@ class JsonParser(BaseParser):
                 for c_i, choice in enumerate(choices):
                     if self.is_safe_to_translate(choice, is_dialogue=True):
                         self.extracted.append((f"{path}.parameters.0.{c_i}", choice, "choice"))
+                        
+        # When [Choice] (402) - Translate branch label
+        elif code == 402:
+            if len(params) > 1 and isinstance(params[1], str):
+                if self.is_safe_to_translate(params[1], is_dialogue=True):
+                    self.extracted.append((f"{path}.parameters.1", params[1], "choice"))
+
+        # Label (118) / Jump to Label (119)
+        elif code in [118, 119]:
+            if len(params) > 0 and isinstance(params[0], str):
+                if self.is_safe_to_translate(params[0], is_dialogue=True):
+                    self.extracted.append((f"{path}.parameters.0", params[0], "system"))
+                    
+        # Control Variables (122) - Operand Script
+        elif code == 122:
+            if len(params) >= 5 and params[3] == 4 and isinstance(params[4], str):
+                script_text = params[4]
+                tokens = self.js_tokenizer.extract_strings(script_text)
+                for line_idx, char_idx, quote_char, token_str in tokens:
+                    if self.is_safe_to_translate(token_str):
+                        self.extracted.append((f"{path}.parameters.4.@JS{char_idx}", token_str, "script"))
         
         # Comment (108/408) - Can contain plugin commands with text
         elif code in [108, 408] and self.translate_comments:
@@ -430,8 +592,8 @@ class JsonParser(BaseParser):
                     
                 # 2. Only extract if it looks like actual text (not pure code)
                 if text and not text.startswith('<') and not text.startswith('::'):
-                    # Heuristic: contains spaces and no special plugin markers
-                    if ' ' in text or len(text) > 20:
+                    # Heuristic: contains spaces and no special plugin markers, or contains non-ascii (e.g. Japanese)
+                    if ' ' in text or len(text) > 20 or any(ord(c) > 127 for c in text):
                         self.extracted.append((f"{path}.parameters.0", params[0], "comment"))
         
         elif code in [320, 324, 325]:
@@ -498,7 +660,19 @@ class JsonParser(BaseParser):
         strings = self._js_tokenizer.extract_translatable_strings(merged)
         
         for idx, (start, end, value, quote) in enumerate(strings):
-            if not self.is_safe_to_translate(value, is_dialogue=True):
+            if not value.strip() or not self.is_safe_to_translate(value):
+                continue
+                
+            # STRICT HEURISTIC FOR SCRIPT STRINGS:
+            # Script strings are dangerous (e.g. Galv.CACHE.load('pictures', 'Vale1'))
+            # Only translate if it looks like a real sentence (has spaces) or is already localized (non-ascii)
+            has_spaces = ' ' in value.strip()
+            has_non_ascii = any(ord(c) > 127 for c in value)
+            
+            if not ((has_spaces and len(value.strip()) > 3) or has_non_ascii):
+                continue
+            
+            if self._is_technical_string(value):
                 continue
             
             if line_count > 0:
@@ -560,8 +734,16 @@ class JsonParser(BaseParser):
         """Heuristic to check if a string is a file path, boolean-like, technical id, or JS code."""
         if not isinstance(text, str):
             return True
-        text_lower = text.lower().strip()
+            
+        # Strip literal surrounding quotes that sometimes escape JSON parsing in plugin params
+        cleaned_text = text.strip('"\' \n\r\t')
+        text_lower = cleaned_text.lower()
         
+        # Stricter Heuristics for Javascript APIs
+        js_managers = ['textmanager.', 'datamanager.', 'imagemanager.', 'scenemanager.', 'soundmanager.', 'audiomanager.']
+        if any(manager in text_lower for manager in js_managers):
+            return True
+
         # Boolean strings often found in plugins
         if text_lower in ['true', 'false', 'on', 'off', 'null', 'undefined', 'none', '']:
             return True
@@ -576,11 +758,11 @@ class JsonParser(BaseParser):
             return True
             
         # Coordinates or pure numbers masquerading as strings
-        if text.replace(',', '').replace('.', '').replace(' ', '').lstrip('-').isdigit():
+        if cleaned_text.replace(',', '').replace('.', '').replace(' ', '').lstrip('-').isdigit():
             return True
 
         # CSS Colors: hex, rgb, rgba
-        if text.startswith('#') and len(text) in [4, 5, 7, 9]:
+        if cleaned_text.startswith('#') and len(cleaned_text) in [4, 5, 7, 9]:
             return True
         if text_lower.startswith(('rgb(', 'rgba(')):
             return True
@@ -597,16 +779,47 @@ class JsonParser(BaseParser):
             'SceneManager.', 'BattleManager.', 'TextManager.',
             '$gameVariables', '$gameSwitches', '$gameParty',
             '$dataSystem', '$dataActors', '$dataItems',
+            'ConfigManager[', 'config[',
         ]
-        if any(kw in text for kw in js_keywords):
+        if any(kw in cleaned_text for kw in js_keywords):
             return True
         
         # JS-like patterns: semicolons at end, curly braces, parentheses with dots
-        if text.rstrip().endswith(';') and ('(' in text or '.' in text):
+        if cleaned_text.rstrip(';').endswith(';') and ('(' in cleaned_text or '.' in cleaned_text):
             return True
-        if text.strip().startswith(('if(', 'if (', 'for(', 'for (', 'while(')):
+        if cleaned_text.strip().startswith(('if(', 'if (', 'for(', 'for (', 'while(')):
             return True
             
+        # JS assignment or boolean evaluation (e.g. "show = true;", "enabled = false", "ext = 0;", "value += 1;")
+        is_js_assign = False
+        
+        # 1. Has semicolon -> almost certainly JS (e.g., "show = true;")
+        if re.fullmatch(r'^[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?\s*(?:[+\-*/]?={1,3}|!==?)\s*(?:true|false|null|undefined|!?[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?(?:\.[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?)*|\d+);$', cleaned_text):
+            is_js_assign = True
+        # 2. No semicolon, but RHS is a strict JS keyword (true, false, null, undefined)
+        elif re.fullmatch(r'^[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?\s*(?:={1,3}|!==?)\s*(?:true|false|null|undefined)$', cleaned_text):
+            is_js_assign = True
+        # 3. Compound operators (+=, -=, *=, /=) without semicolon
+        elif re.fullmatch(r'^[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?\s*(?:[+\-*/]={1,2})\s*(?:!?[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?(?:\.[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?)*|\d+)$', cleaned_text):
+            is_js_assign = True
+        # 4. Bracket notation or property access on either side (e.g. A[b] = c, a = b.c)
+        elif re.fullmatch(r'^[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])+\s*(?:={1,3}|!==?)\s*(?:!?[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?(?:\.[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?)*|\d+)$', cleaned_text):
+            is_js_assign = True
+        elif re.fullmatch(r'^[a-zA-Z_][a-zA-Z0-9_]*\s*(?:={1,3}|!==?)\s*!?[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?(?:\.[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?)+$', cleaned_text):
+            is_js_assign = True
+            
+        if is_js_assign:
+            return True
+            
+        # 5. Strict eval/math expression detection (e.g., "100 + textSize * 10", "Width / 2", "1.5 * user", "x = y + Math.max(0, 10)")
+        if re.fullmatch(r'^[\d\s\.\+\-\*/\(\)a-zA-Z_\[\]><=!&|?:,%;]+$', cleaned_text):
+            # Must contain at least one operator and one letter
+            if re.search(r'[\+\-\*/><=!&|]', cleaned_text) and re.search(r'[a-zA-Z]', cleaned_text):
+                # Ensure no English/natural language consecutive words (e.g. "Name = John Doe").
+                # Valid JS maths shouldn't have words separated ONLY by spaces.
+                if not re.search(r'\b[a-zA-Z_]\w*\s+[a-zA-Z_]\w*\b', cleaned_text):
+                    return True
+                
         return False
 
     def _looks_like_asset_name(self, text: str) -> bool:
@@ -621,7 +834,7 @@ class JsonParser(BaseParser):
 
     def apply_translation(self, file_path: str, translations: Dict[str, str]) -> Any:
         """Apply translations. Handles JSON, MV js/plugins.js, and locale files."""
-        with open(file_path, 'r', encoding='utf-8') as f:
+        with open(file_path, 'r', encoding='utf-8-sig') as f:
             content = f.read().strip()
             
         if not content:
@@ -632,32 +845,28 @@ class JsonParser(BaseParser):
         
         # Handle js/plugins.js
         is_js = file_path.lower().endswith('.js')
+        is_main_plugins_js = is_js and os.path.basename(file_path).lower() == 'plugins.js'
         
         if is_js:
-            prefix, json_str, suffix = self._extract_js_json(content)
-            if prefix and json_str:
-                self._js_prefix = prefix
-                self._js_suffix = suffix
-                try:
-                    data = json.loads(json_str)
-                except json.JSONDecodeError:
+            if is_main_plugins_js:
+                prefix, json_str, suffix = self._extract_js_json(content)
+                if prefix and json_str:
+                    self._js_prefix = prefix
+                    self._js_suffix = suffix
+                    try:
+                        data = json.loads(json_str)
+                    except json.JSONDecodeError:
+                        return None
+                else:
                     return None
             else:
-                return None
+                return self._apply_to_js_source(content, translations)
         else:
             try:
                 data = json.loads(content)
             except json.JSONDecodeError:
                 return None
         
-        # For locale files, simply update the values by key
-        if is_locale_file:
-            if isinstance(data, dict):
-                for key, trans_text in translations.items():
-                    if key in data and trans_text:
-                        data[key] = trans_text
-            return data
-            
         applied_count = 0
         
         # Sort keys to handle nested JSON properly 
@@ -672,6 +881,8 @@ class JsonParser(BaseParser):
         nested_updates = {} # { 'path.to.param': { 'nested_key': 'trans' } }
         direct_updates = {}
         script_updates = {} # { 'base_path': [(line_count, js_index, trans_text), ...] }
+        note_block_updates = {}
+        note_inline_updates = {}
         
         def _try_int(value):
             try:
@@ -680,6 +891,13 @@ class JsonParser(BaseParser):
                 return None
 
         for path, trans_text in translations.items():
+            if isinstance(trans_text, str):
+                # Hardened Translation Sanitization: Translation engines (DeepL/Google/etc) often corrupt 
+                # spacing around RPG Maker escape codes (turning "\n" into "\ n" or "\c[0]" into "\ c [0]").
+                # This explicitly breaks JSON.parse() inside plugins when nested parameters are evaluated.
+                # Here we repair any single backslash followed by spaces before a letter/brace.
+                trans_text = re.sub(r'\\ \s+([a-zA-Z{}])', r'\\\1', trans_text)
+                
             # IMPORTANT: Check @JSON BEFORE @JS because ".@JSON" contains ".@JS" as substring!
             # Without this order, @JSON paths would incorrectly enter the @JS branch.
             if ".@JSON" in path:
@@ -720,6 +938,18 @@ class JsonParser(BaseParser):
                 if base_path not in script_updates:
                     script_updates[base_path] = []
                 script_updates[base_path].append((line_count, js_index, trans_text))
+            elif ".@NOTEBLOCK_" in path:
+                parts = path.split(".@NOTEBLOCK_")
+                base_path = parts[0]
+                idx = _try_int(parts[1])
+                if base_path not in note_block_updates: note_block_updates[base_path] = []
+                note_block_updates[base_path].append((idx, trans_text))
+            elif ".@NOTEINLINE_" in path:
+                parts = path.split(".@NOTEINLINE_")
+                base_path = parts[0]
+                idx = _try_int(parts[1])
+                if base_path not in note_inline_updates: note_inline_updates[base_path] = []
+                note_inline_updates[base_path].append((idx, trans_text))
             else:
                 direct_updates[path] = trans_text
                 
@@ -735,8 +965,38 @@ class JsonParser(BaseParser):
         # 3. Apply Script Translations (JSStringTokenizer paths)
         for base_path, updates in script_updates.items():
             self._apply_script_translation(data, base_path, updates)
+            
+        # 4. Apply Note Tag Translations
+        for base_path, updates in note_block_updates.items():
+            self._apply_note_tag_translation(data, base_path, updates, is_block=True)
+        for base_path, updates in note_inline_updates.items():
+            self._apply_note_tag_translation(data, base_path, updates, is_block=False)
                 
-        return data
+        if is_locale_file:
+            if isinstance(data, dict):
+                for key, trans_text in translations.items():
+                    if key in data and trans_text:
+                        data[key] = trans_text
+            return data
+            
+        if is_main_plugins_js:
+            # Custom Font Overriding for restrictive Asian fonts (e.g., YEP_LoadCustomFonts)
+            if isinstance(data, list):
+                for plugin in data:
+                    if isinstance(plugin, dict) and 'parameters' in plugin:
+                        params = plugin['parameters']
+                        for key, val in list(params.items()):
+                            if 'font' in key.lower() and isinstance(val, str):
+                                if 'SimHei' in val or 'Dotum' in val or 'GameFont' in val:
+                                    # Provide fallback for Turkish character support
+                                    if 'sans-serif' not in val.lower():
+                                        plugin['parameters'][key] = "Arial, sans-serif"
+
+            # Reconstruct the plugin.js file
+            new_json_str = json.dumps(data, indent=None, ensure_ascii=False, separators=(',', ':'))
+            return self._js_prefix + new_json_str + self._js_suffix
+        else:
+            return data
 
     def _apply_nested_json_translation(self, data: Any, root_path: str, nested_trans: dict):
         """
@@ -773,7 +1033,11 @@ class JsonParser(BaseParser):
         # Apply direct translations to this level
         for sub_path, text in direct.items():
             if text:
-                self._set_value_at_path(nested_obj, sub_path, text)
+                if sub_path == "":
+                    # The translated text REPLACES the json root object itself (i.e. double-encoded strings like '"text"')
+                    nested_obj = text
+                else:
+                    self._set_value_at_path(nested_obj, sub_path, text)
         
         # Recurse for deeper nested JSON levels
         for inner_root, inner_trans in deeper.items():
@@ -1144,3 +1408,33 @@ class JsonParser(BaseParser):
             return full_prefix, json_str, suffix
             
         return None, None, None
+
+    def _extract_from_js_source(self, content: str):
+        """Extract hardcoded translatable strings from JS plugin files."""
+        strings = self._js_tokenizer.extract_translatable_strings(content)
+        for idx, (start, end, text, quote) in enumerate(strings):
+            if not text: continue
+            
+            # String must be a sentence or contain non-ascii to be safe
+            has_spaces = ' ' in text.strip()
+            has_non_ascii = any(ord(c) > 127 for c in text)
+            
+            if (has_spaces and len(text.strip()) > 3) or has_non_ascii:
+                if self.is_safe_to_translate(text, is_dialogue=True) and not self._is_technical_string(text):
+                    path = f"JS_SRC_{idx}"
+                    self.extracted.append((path, text, "system"))
+
+    def _apply_to_js_source(self, content: str, translations: Dict[str, str]) -> str:
+        """Apply translations to a hardcoded JS plugin file."""
+        strings = self._js_tokenizer.extract_translatable_strings(content)
+        sorted_strings = sorted(enumerate(strings), key=lambda x: x[1][0], reverse=True)
+        
+        result = content
+        for idx, (start, end, text, quote) in sorted_strings:
+            path = f"JS_SRC_{idx}"
+            if path in translations and translations[path]:
+                trans_text = translations[path]
+                safe_trans = self._js_tokenizer._escape_for_js(trans_text, quote)
+                result = result[:start] + safe_trans + result[end:]
+                
+        return result

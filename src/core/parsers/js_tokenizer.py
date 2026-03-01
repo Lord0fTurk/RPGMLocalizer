@@ -226,6 +226,10 @@ class JSStringTokenizer:
         """Check if a string value looks technical (not translatable)."""
         v = value.strip()
         v_lower = v.lower()
+
+        js_managers = ['textmanager.', 'datamanager.', 'imagemanager.', 'scenemanager.', 'soundmanager.', 'audiomanager.']
+        if any(manager in v_lower for manager in js_managers):
+            return True
         
         # Boolean-ish
         if v_lower in ('true', 'false', 'null', 'undefined', 'none', 'nan',

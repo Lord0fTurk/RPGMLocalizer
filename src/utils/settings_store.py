@@ -13,10 +13,19 @@ class SettingsStore:
         self.path = self._resolve_settings_path(filename)
 
     def _resolve_settings_path(self, filename: str) -> str:
+        base_dir = os.path.abspath(".")
         if getattr(sys, "frozen", False):
-            base_dir = os.path.dirname(sys.executable)
-        else:
-            base_dir = os.path.abspath(".")
+            if "APPIMAGE" in os.environ:
+                # Running as Linux AppImage, save next to the .AppImage file
+                base_dir = os.path.dirname(os.environ["APPIMAGE"])
+            elif sys.platform == "darwin" and "RPGMLocalizer.app" in sys.executable:
+                # Running as MacOS .app bundle, save next to the .app folder
+                # sys.executable is inside .app/Contents/MacOS/RPGMLocalizer
+                base_dir = os.path.abspath(os.path.join(os.path.dirname(sys.executable), "..", "..", ".."))
+            else:
+                # Windows or standard executable, save next to the .exe
+                base_dir = os.path.dirname(sys.executable)
+                
         os.makedirs(base_dir, exist_ok=True)
         return os.path.join(base_dir, filename)
 

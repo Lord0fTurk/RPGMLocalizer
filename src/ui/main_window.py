@@ -105,6 +105,10 @@ class MainWindow(FluentWindow):
         settings["translate_notes"] = self.settingsInterface.chk_translate_notes.isChecked()
         settings["translate_comments"] = self.settingsInterface.chk_translate_comments.isChecked()
         
+        # Formatting Settings
+        settings["visustella_wordwrap"] = self.settingsInterface.chk_visustella_wordwrap.isChecked()
+        settings["auto_wordwrap"] = self.settingsInterface.chk_auto_wordwrap.isChecked()
+        
         # Pipeline Settings
         settings["backup_enabled"] = self.settingsInterface.chk_backup.isChecked()
         settings["use_cache"] = self.settingsInterface.chk_cache.isChecked()
@@ -194,6 +198,8 @@ class MainWindow(FluentWindow):
 
         data["translate_notes"] = self.settingsInterface.chk_translate_notes.isChecked()
         data["translate_comments"] = self.settingsInterface.chk_translate_comments.isChecked()
+        data["visustella_wordwrap"] = self.settingsInterface.chk_visustella_wordwrap.isChecked()
+        data["auto_wordwrap"] = self.settingsInterface.chk_auto_wordwrap.isChecked()
         data["backup_enabled"] = self.settingsInterface.chk_backup.isChecked()
         data["use_cache"] = self.settingsInterface.chk_cache.isChecked()
 

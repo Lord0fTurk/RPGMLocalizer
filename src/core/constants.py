@@ -24,7 +24,7 @@ REGEX_BATCH_SPLIT = r'\s*\|\|\|XYZ\|\|\|\s*'
 REGEX_LINE_SPLIT = r'\s*\|\|\|XLB\|\|\|\s*'
 
 # Default Configuration
-DEFAULT_BATCH_SIZE = 1  # Disable merge for maximum stability (slower but safer)
+DEFAULT_BATCH_SIZE = 50  # Merge threshold (Multi-Endpoints handle high concurrency natively)
 DEFAULT_CONCURRENCY = 20
 DEFAULT_TIMEOUT = 15
 DEFAULT_MAX_CHARS = 2000

@@ -299,8 +299,9 @@ class TextMerger:
         for entry in entries:
             file_path, key, text, tag = entry
             
-            # If not a dialogue block, force flush and add as single
-            if tag != "dialogue_block":
+            # We only merge dialogue and generic descriptions.
+            # We don't merge 'name' or 'system' or 'choice' tags as they are very context dependent
+            if tag not in ("dialogue_block", "message_dialogue"):
                 _flush_local()
                 requests.append({
                     'text': text,

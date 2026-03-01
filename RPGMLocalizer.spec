@@ -1,14 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+
+project_dir = os.path.abspath(os.getcwd())
+icon_path = os.path.join(project_dir, 'icon.ico')
+
 block_cipher = None
 
 a = Analysis(
     ['main.py'],
-    pathex=[],
+    pathex=[project_dir],
     binaries=[],
     datas=[
-        ('icon.ico', '.'),
-        ('LICENSE', '.'),
+        (icon_path, '.'),
+        (os.path.join(project_dir, 'LICENSE'), '.'),
     ],
     hiddenimports=[
         'src',
@@ -75,5 +80,19 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='icon.ico',
+    icon=icon_path,
 )
+
+import sys
+if sys.platform == 'darwin':
+    app = BUNDLE(
+        exe,
+        name='RPGMLocalizer.app',
+        icon=icon_path,
+        bundle_identifier='com.rpgmlocalizer.app',
+        version='0.6.2',
+        info_plist={
+            'NSHighResolutionCapable': 'True',
+            'LSBackgroundOnly': 'False'
+        }
+    )

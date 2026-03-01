@@ -56,7 +56,8 @@ class BaseParser(QObject, metaclass=ParserMeta):
         if not text or not isinstance(text, str):
             return False
         
-        trimmed = text.strip()
+        # Strip whitespace AND string literal quotes 
+        trimmed = text.strip('"\' \n\r\t')
         if not trimmed:
             return False
 

@@ -1,20 +1,42 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 import os
+import sys
 
-project_dir = os.path.abspath(os.getcwd())
+from PyQt6.QtCore import QLibraryInfo
+
+spec_path = os.path.abspath(globals().get('SPEC', os.path.join(os.getcwd(), 'RPGMLocalizer.spec')))
+project_dir = os.path.dirname(spec_path)
 icon_path = os.path.join(project_dir, 'icon.ico')
+icon_png_path = os.path.join(project_dir, 'icon.png')
+icon_icns_path = os.path.join(project_dir, 'icon.icns')
+qt_bin_dir = QLibraryInfo.path(QLibraryInfo.LibraryPath.BinariesPath)
+software_opengl_dll = os.path.join(qt_bin_dir, 'opengl32sw.dll')
+
+version_ns = {}
+with open(os.path.join(project_dir, 'version.py'), 'r', encoding='utf-8') as f:
+    exec(f.read(), version_ns)
+app_version = version_ns.get('VERSION', '0.6.3')
+
+datas = [
+    (os.path.join(project_dir, 'LICENSE'), '.'),
+]
+if os.path.exists(icon_png_path):
+    datas.append((icon_png_path, '.'))
+if os.path.exists(icon_path):
+    datas.append((icon_path, '.'))
+
+binaries = []
+if sys.platform == 'win32' and os.path.exists(software_opengl_dll):
+    binaries.append((software_opengl_dll, '.'))
 
 block_cipher = None
 
 a = Analysis(
     ['main.py'],
     pathex=[project_dir],
-    binaries=[],
-    datas=[
-        (icon_path, '.'),
-        (os.path.join(project_dir, 'LICENSE'), '.'),
-    ],
+    binaries=binaries,
+    datas=datas,
     hiddenimports=[
         'src',
         'src.core',
@@ -80,7 +102,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=icon_path,
+    icon=icon_path if sys.platform == 'win32' and os.path.exists(icon_path) else None,
 )
 
 import sys
@@ -88,9 +110,9 @@ if sys.platform == 'darwin':
     app = BUNDLE(
         exe,
         name='RPGMLocalizer.app',
-        icon=icon_path,
+        icon=icon_icns_path if os.path.exists(icon_icns_path) else None,
         bundle_identifier='com.rpgmlocalizer.app',
-        version='0.6.2',
+        version=app_version,
         info_plist={
             'NSHighResolutionCapable': 'True',
             'LSBackgroundOnly': 'False'

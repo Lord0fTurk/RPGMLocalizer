@@ -6,11 +6,17 @@ import json
 import hashlib
 import os
 from typing import Dict, Optional, Tuple
-from pathlib import Path
 from datetime import datetime
 import logging
 
+from src.utils.app_paths import get_cache_dir
+
 logger = logging.getLogger(__name__)
+
+
+def _resolve_default_cache_dir() -> str:
+    """Resolve the default cache directory in a deterministic location."""
+    return os.fspath(get_cache_dir())
 
 
 class TranslationCache:
@@ -27,9 +33,11 @@ class TranslationCache:
         
         Args:
             cache_dir: Directory to store cache files. 
-                      If None, uses .rpgm_cache in current directory.
+                      If None, uses a deterministic .rpgm_cache next to the
+                      source workspace or packaged executable.
         """
-        self.cache_dir = cache_dir or ".rpgm_cache"
+        resolved_cache_dir = cache_dir or _resolve_default_cache_dir()
+        self.cache_dir = os.path.abspath(resolved_cache_dir)
         self.cache: Dict[str, Dict] = {}  # text_hash -> {translation, source_lang, target_lang, timestamp}
         self.hits = 0
         self.misses = 0
@@ -221,6 +229,12 @@ def get_cache(cache_dir: Optional[str] = None) -> TranslationCache:
     global _cache
     if _cache is None:
         _cache = TranslationCache(cache_dir)
+    elif cache_dir is not None:
+        requested_dir = os.path.normcase(os.path.abspath(cache_dir))
+        current_dir = os.path.normcase(os.path.abspath(_cache.cache_dir))
+        if requested_dir != current_dir:
+            _cache.save()
+            _cache = TranslationCache(cache_dir)
     return _cache
 
 

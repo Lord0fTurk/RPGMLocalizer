@@ -1,33 +1,18 @@
 import json
 import logging
 import os
-import sys
 from typing import Any, Dict
 
-from PyQt6.QtCore import QStandardPaths
+from src.utils.app_paths import get_settings_path
 
 
 class SettingsStore:
-    def __init__(self, filename: str = "settings.json"):
+    def __init__(self, filename: str = "settings.json") -> None:
         self.logger = logging.getLogger(self.__class__.__name__)
         self.path = self._resolve_settings_path(filename)
 
     def _resolve_settings_path(self, filename: str) -> str:
-        base_dir = os.path.abspath(".")
-        if getattr(sys, "frozen", False):
-            if "APPIMAGE" in os.environ:
-                # Running as Linux AppImage, save next to the .AppImage file
-                base_dir = os.path.dirname(os.environ["APPIMAGE"])
-            elif sys.platform == "darwin" and "RPGMLocalizer.app" in sys.executable:
-                # Running as MacOS .app bundle, save next to the .app folder
-                # sys.executable is inside .app/Contents/MacOS/RPGMLocalizer
-                base_dir = os.path.abspath(os.path.join(os.path.dirname(sys.executable), "..", "..", ".."))
-            else:
-                # Windows or standard executable, save next to the .exe
-                base_dir = os.path.dirname(sys.executable)
-                
-        os.makedirs(base_dir, exist_ok=True)
-        return os.path.join(base_dir, filename)
+        return os.fspath(get_settings_path(filename))
 
     def load(self) -> Dict[str, Any]:
         try:

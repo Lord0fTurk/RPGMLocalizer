@@ -1,4 +1,4 @@
-"""
+﻿"""
 Translation Pipeline for RPGMLocalizer.
 Orchestrates the entire translation workflow including:
 - File discovery and parsing
@@ -11,6 +11,7 @@ import shutil
 import json
 import asyncio
 import logging
+from collections import Counter
 from enum import Enum
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -18,6 +19,8 @@ from PyQt6.QtCore import QObject, pyqtSignal as Signal
 
 from .translator import GoogleTranslator, TranslationRequest
 from .parser_factory import get_parser
+from .parsers.js_ast_extractor import JavaScriptAstAuditExtractor
+from .parsers.plain_text_parser import SUPPORTED_TEXT_FILENAMES
 from .glossary import Glossary
 from .cache import TranslationCache, get_cache
 from .export_import import TranslationExporter, TranslationImporter
@@ -40,6 +43,10 @@ class TranslationPipeline(QObject):
     """
     Main translation pipeline that orchestrates the entire workflow.
     """
+
+    RAW_JS_AUDIT_EXCLUDED_DIRS = {"libs"}
+    RAW_JS_AUDIT_EXCLUDED_FILES = {"plugins.js"}
+    RAW_JS_AUDIT_TOP_SAMPLE_LIMIT = 8
     
     # Signals for UI updates
     stage_changed = Signal(str, str)     # stage_value, message
@@ -79,6 +86,7 @@ class TranslationPipeline(QObject):
         )
         self.merger = TextMerger(batch_size=batch_size)
         self.logger = logging.getLogger("Pipeline")
+        self.js_ast_audit_extractor = JavaScriptAstAuditExtractor()
         
         # Optional components
         self.glossary: Optional[Glossary] = None
@@ -133,6 +141,8 @@ class TranslationPipeline(QObject):
 
         self.stage_changed.emit(PipelineStage.VALIDATING.value, "Scanning project...")
         self.log_message.emit("info", f"Project: {project_path}")
+        if self.cache:
+            self.log_message.emit("info", f"Translation cache directory: {self.cache.cache_dir}")
         
         # Find Data folder
         data_dir = self._find_data_dir(project_path)
@@ -147,6 +157,19 @@ class TranslationPipeline(QObject):
         if not files:
             self.finished.emit(False, "No translatable files found")
             return
+
+        coverage_requested = self.settings.get("coverage_audit", False) or bool(self.settings.get("coverage_report_path"))
+        if coverage_requested:
+            try:
+                coverage_report = self._build_coverage_report(project_path, data_dir, files)
+                self._emit_coverage_audit(coverage_report)
+
+                coverage_report_path = self.settings.get("coverage_report_path")
+                if coverage_report_path:
+                    self._write_coverage_report(coverage_report, coverage_report_path)
+            except Exception as error:
+                self.logger.warning(f"Coverage audit skipped: {error}")
+                self.log_message.emit("warning", f"Coverage audit skipped: {error}")
 
         self.log_message.emit("info", f"Found {len(files)} files to process")
 
@@ -196,6 +219,31 @@ class TranslationPipeline(QObject):
         self.stage_changed.emit(PipelineStage.COMPLETED.value, "Done!")
         self.finished.emit(True, f"Translation completed! Processed {total} entries.")
 
+    def _find_child_case_insensitive(self, parent_dir: str, target_name: str, must_be_dir: bool) -> Optional[str]:
+        """Find a direct child by name, tolerating case differences on case-sensitive filesystems."""
+        if not parent_dir or not os.path.isdir(parent_dir):
+            return None
+
+        target_lower = target_name.lower()
+        try:
+            for entry in os.scandir(parent_dir):
+                if entry.name.lower() != target_lower:
+                    continue
+                if must_be_dir and entry.is_dir():
+                    return entry.path
+                if not must_be_dir and entry.is_file():
+                    return entry.path
+        except OSError:
+            return None
+        return None
+
+    def _find_file_in_subdir_case_insensitive(self, base_dir: str, subdir_name: str, filename: str) -> Optional[str]:
+        """Find `base_dir/subdir_name/filename` using case-insensitive matching for both path segments."""
+        subdir_path = self._find_child_case_insensitive(base_dir, subdir_name, must_be_dir=True)
+        if not subdir_path:
+            return None
+        return self._find_child_case_insensitive(subdir_path, filename, must_be_dir=False)
+
     def _find_data_dir(self, project_path: str) -> Optional[str]:
         """Find the Data directory in an RPG Maker project."""
         # MV/MZ web export structure
@@ -208,6 +256,17 @@ class TranslationPipeline(QObject):
         for path in candidates:
             if os.path.exists(path) and os.path.isdir(path):
                 return path
+
+        # Case-insensitive fallback for Linux/macOS.
+        www_dir = self._find_child_case_insensitive(project_path, "www", must_be_dir=True)
+        if www_dir:
+            www_data = self._find_child_case_insensitive(www_dir, "data", must_be_dir=True)
+            if www_data:
+                return www_data
+
+        root_data = self._find_child_case_insensitive(project_path, "data", must_be_dir=True)
+        if root_data:
+            return root_data
         
         return None
 
@@ -218,18 +277,22 @@ class TranslationPipeline(QObject):
         
         # Standard Data folder
         for entry in os.scandir(data_dir):
-            if entry.is_file() and entry.name.lower().endswith(extensions):
-                files.append(entry.path)
+            if not entry.is_file() or not entry.name.lower().endswith(extensions):
+                continue
+            if entry.name.lower().endswith('.json') and not self._looks_like_json_document(entry.path):
+                self.log_message.emit("info", f"Skipping non-JSON sidecar: {entry.name}")
+                continue
+            files.append(entry.path)
         
         # MV Plugin configuration (js/plugins.js)
         # Search relative to data_dir (e.g. data is www/data, so js is ../js)
         project_root = os.path.dirname(data_dir)
-        plugin_js = os.path.join(project_root, "js", "plugins.js")
-        if not os.path.exists(plugin_js):
+        plugin_js = self._find_file_in_subdir_case_insensitive(project_root, "js", "plugins.js")
+        if not plugin_js:
             # Try sibling of Data
-            plugin_js = os.path.join(os.path.dirname(project_root), "js", "plugins.js")
+            plugin_js = self._find_file_in_subdir_case_insensitive(os.path.dirname(project_root), "js", "plugins.js")
 
-        if os.path.exists(plugin_js):
+        if plugin_js and os.path.exists(plugin_js):
             files.append(plugin_js)
             
             # Note: We previously scanned all .js files here for hardcoded strings, 
@@ -238,19 +301,23 @@ class TranslationPipeline(QObject):
         
         # DKTools Localization / Plugin locale files (locales/*.json)
         # Check both project root and www folder for locales
-        locale_candidates = [
-            os.path.join(project_root, "locales"),
-            os.path.join(os.path.dirname(project_root), "locales"),
-        ]
-        
-        for locales_dir in locale_candidates:
-            if os.path.exists(locales_dir) and os.path.isdir(locales_dir):
+        locale_roots = [project_root, os.path.dirname(project_root)]
+
+        for root in locale_roots:
+            locales_dir = self._find_child_case_insensitive(root, "locales", must_be_dir=True)
+            if locales_dir and os.path.exists(locales_dir) and os.path.isdir(locales_dir):
                 for entry in os.scandir(locales_dir):
                     # Only include JSON files from locales folder (skip .pak files)
-                    if entry.is_file() and entry.name.lower().endswith('.json'):
-                        files.append(entry.path)
-                        self.log_message.emit("info", f"Found locale file: {entry.name}")
+                    if not entry.is_file() or not entry.name.lower().endswith('.json'):
+                        continue
+                    if not self._looks_like_json_document(entry.path):
+                        self.log_message.emit("info", f"Skipping non-JSON locale sidecar: {entry.name}")
+                        continue
+                    files.append(entry.path)
+                    self.log_message.emit("info", f"Found locale file: {entry.name}")
                 break  # Only use the first found locales dir
+
+        files.extend(self._collect_safe_text_files(data_dir))
             
         # Sort files to ensure DB files come first (not strictly necessary but good for logs)
         def _sort_key(f):
@@ -262,6 +329,295 @@ class TranslationPipeline(QObject):
             
         files.sort(key=lambda x: (_sort_key(x), x))
         return files
+
+    def _looks_like_json_document(self, file_path: str) -> bool:
+        """Return True when a `.json` file appears to contain a JSON object/array."""
+        try:
+            with open(file_path, "r", encoding="utf-8-sig") as handle:
+                while True:
+                    chunk = handle.read(256)
+                    if not chunk:
+                        return False
+                    stripped = chunk.lstrip()
+                    if not stripped:
+                        continue
+                    return stripped.startswith(("{", "["))
+        except OSError as error:
+            self.logger.warning(f"Failed to inspect JSON candidate {file_path}: {error}")
+            return False
+
+    def analyze_project_coverage(self, project_path: str) -> Dict[str, Any]:
+        """Analyze which safe and audit-only text surfaces exist in a project."""
+        data_dir = self._find_data_dir(project_path)
+        if not data_dir:
+            raise FileNotFoundError(f"Data folder not found under project path: {project_path}")
+
+        collected_files = self._collect_files(data_dir)
+        coverage_report = self._build_coverage_report(project_path, data_dir, collected_files)
+        self._emit_coverage_audit(coverage_report)
+
+        coverage_report_path = self.settings.get("coverage_report_path")
+        if coverage_report_path:
+            self._write_coverage_report(coverage_report, coverage_report_path)
+
+        return coverage_report
+
+    def _collect_safe_text_files(self, data_dir: str) -> List[str]:
+        """Collect explicitly allowlisted text files from the data directory."""
+        safe_files: List[str] = []
+
+        try:
+            for entry in os.scandir(data_dir):
+                if not entry.is_file():
+                    continue
+                if entry.name.lower() in SUPPORTED_TEXT_FILENAMES:
+                    safe_files.append(entry.path)
+        except OSError as error:
+            self.logger.warning(f"Failed to scan safe text files in {data_dir}: {error}")
+
+        return safe_files
+
+    def _build_coverage_report(self, project_path: str, data_dir: str, collected_files: List[str]) -> Dict[str, Any]:
+        """Build a coverage report for known text surfaces and audit-only JS files."""
+        normalized_project_path = os.path.normpath(project_path)
+        collected_set = {os.path.normpath(path) for path in collected_files}
+
+        collected_by_extension: Dict[str, int] = {}
+        for file_path in collected_files:
+            extension = os.path.splitext(file_path)[1].lower() or "<no_ext>"
+            collected_by_extension[extension] = collected_by_extension.get(extension, 0) + 1
+
+        safe_text_files = self._collect_safe_text_files(data_dir)
+        raw_js_files = self._collect_raw_js_audit_files(data_dir)
+        raw_js_candidates: List[Dict[str, Any]] = []
+        total_raw_js_candidates = 0
+        raw_js_engines: Dict[str, int] = {}
+        raw_js_bucket_totals: Counter[str] = Counter()
+        raw_js_readiness: Counter[str] = Counter()
+        raw_js_promising_files: List[str] = []
+
+        for js_path in raw_js_files:
+            entries, engine, audit_meta = self._extract_entries_for_audit(js_path)
+            raw_js_engines[engine] = raw_js_engines.get(engine, 0) + 1
+            raw_js_bucket_totals.update(audit_meta.get("confidence_buckets", {}))
+            write_readiness = audit_meta.get("write_readiness")
+            if write_readiness:
+                raw_js_readiness.update([write_readiness])
+            if not entries:
+                continue
+
+            relative_path = self._to_relative_project_path(normalized_project_path, js_path)
+            total_raw_js_candidates += len(entries)
+            raw_js_candidates.append({
+                "path": relative_path,
+                "engine": engine,
+                "candidate_entries": len(entries),
+                "confidence_buckets": audit_meta.get("confidence_buckets", {}),
+                "write_readiness": write_readiness,
+                "top_score": audit_meta.get("top_score"),
+                "samples": [text[:120] for _path, text, _tag in entries[:3]],
+            })
+            if write_readiness == "promising":
+                raw_js_promising_files.append(relative_path)
+
+        raw_js_candidates.sort(key=lambda item: (-item["candidate_entries"], item["path"]))
+
+        return {
+            "project_path": normalized_project_path,
+            "data_dir": os.path.normpath(data_dir),
+            "collected": {
+                "total_files": len(collected_files),
+                "by_extension": collected_by_extension,
+                "files": [
+                    self._to_relative_project_path(normalized_project_path, path)
+                    for path in sorted(collected_set)
+                ],
+            },
+            "safe_text_surfaces": {
+                "supported_filenames": sorted(SUPPORTED_TEXT_FILENAMES),
+                "collected": [
+                    self._to_relative_project_path(normalized_project_path, path)
+                    for path in sorted(safe_text_files)
+                    if os.path.normpath(path) in collected_set
+                ],
+                "missed": [
+                    self._to_relative_project_path(normalized_project_path, path)
+                    for path in sorted(safe_text_files)
+                    if os.path.normpath(path) not in collected_set
+                ],
+            },
+            "raw_js_audit": {
+                "total_files": len(raw_js_files),
+                "engines": raw_js_engines,
+                "confidence_buckets": dict(raw_js_bucket_totals),
+                "write_readiness": dict(raw_js_readiness),
+                "promising_files": sorted(raw_js_promising_files),
+                "files_with_candidates": len(raw_js_candidates),
+                "candidate_entries": total_raw_js_candidates,
+                "files": raw_js_candidates,
+            },
+        }
+
+    def _collect_raw_js_audit_files(self, data_dir: str) -> List[str]:
+        """Collect engine/plugin JS files for audit-only coverage checks."""
+        js_dir = self._find_js_dir(data_dir)
+        if not js_dir:
+            return []
+
+        audit_files: List[str] = []
+        for root, dirs, files in os.walk(js_dir):
+            dirs[:] = [name for name in dirs if name.lower() not in self.RAW_JS_AUDIT_EXCLUDED_DIRS]
+            relative_root = os.path.relpath(root, js_dir).replace("\\", "/")
+
+            for filename in files:
+                if not filename.lower().endswith(".js"):
+                    continue
+                if filename.lower() in self.RAW_JS_AUDIT_EXCLUDED_FILES:
+                    continue
+
+                relative_path = filename if relative_root == "." else f"{relative_root}/{filename}"
+                lower_relative_path = relative_path.lower()
+                lower_filename = filename.lower()
+
+                if lower_relative_path.startswith("plugins/") or lower_filename.startswith("rpg_") or lower_filename == "main.js":
+                    audit_files.append(os.path.join(root, filename))
+
+        audit_files.sort()
+        return audit_files
+
+    def _find_js_dir(self, data_dir: str) -> Optional[str]:
+        """Find the JS directory associated with a data directory."""
+        project_root = os.path.dirname(data_dir)
+        js_dir = self._find_child_case_insensitive(project_root, "js", must_be_dir=True)
+        if js_dir:
+            return js_dir
+        return self._find_child_case_insensitive(os.path.dirname(project_root), "js", must_be_dir=True)
+
+    def _extract_entries_for_audit(
+        self,
+        file_path: str,
+    ) -> Tuple[List[Tuple[str, str, str]], str, Dict[str, Any]]:
+        """Extract entries for coverage auditing without affecting the main pipeline."""
+        if file_path.lower().endswith(".js"):
+            candidates, engine = self.js_ast_audit_extractor.extract_audit_candidates(file_path)
+            filtered_candidates = [
+                candidate
+                for candidate in candidates
+                if self._should_keep_extracted_text(candidate.text)
+            ]
+            summary = self.js_ast_audit_extractor.summarize_candidates(filtered_candidates, engine)
+            return (
+                [(item.path, item.text, item.tag) for item in filtered_candidates],
+                engine,
+                summary,
+            )
+
+        parser = get_parser(file_path, self.settings)
+        if not parser:
+            return [], "none", {"confidence_buckets": {}, "write_readiness": "none", "top_score": None}
+
+        try:
+            entries = parser.extract_text(file_path)
+        except Exception as error:
+            self.logger.warning(f"Coverage audit skipped {os.path.basename(file_path)}: {error}")
+            return [], "parser", {"confidence_buckets": {}, "write_readiness": "none", "top_score": None}
+
+        filtered_entries = [
+            (path, text, tag)
+            for path, text, tag in entries
+            if self._should_keep_extracted_text(text)
+        ]
+        return (
+            filtered_entries,
+            "parser",
+            {
+                "confidence_buckets": {"parser": len(filtered_entries)} if filtered_entries else {},
+                "write_readiness": "unsupported" if filtered_entries else "none",
+                "top_score": None,
+            },
+        )
+
+    def _emit_coverage_audit(self, coverage_report: Dict[str, Any]) -> None:
+        """Log a compact coverage summary for visibility."""
+        collected = coverage_report.get("collected", {})
+        safe_text = coverage_report.get("safe_text_surfaces", {})
+        raw_js = coverage_report.get("raw_js_audit", {})
+
+        self.log_message.emit(
+            "info",
+            (
+                "Coverage audit: "
+                f"{collected.get('total_files', 0)} collected surfaces "
+                f"{collected.get('by_extension', {})}"
+            ),
+        )
+
+        if safe_text.get("collected"):
+            self.log_message.emit(
+                "info",
+                f"Coverage audit: safe text files in pipeline -> {', '.join(safe_text['collected'])}"
+            )
+
+        if safe_text.get("missed"):
+            self.log_message.emit(
+                "warning",
+                f"Coverage audit: safe text files still missed -> {', '.join(safe_text['missed'])}"
+            )
+
+        candidate_files = raw_js.get("files", [])
+        raw_js_engines = raw_js.get("engines", {})
+        if raw_js_engines:
+            self.log_message.emit(
+                "info",
+                f"Coverage audit: raw JS engines -> {raw_js_engines}",
+            )
+        raw_js_buckets = raw_js.get("confidence_buckets", {})
+        if raw_js_buckets:
+            self.log_message.emit(
+                "info",
+                f"Coverage audit: raw JS confidence buckets -> {raw_js_buckets}",
+            )
+        raw_js_readiness = raw_js.get("write_readiness", {})
+        if raw_js_readiness:
+            self.log_message.emit(
+                "info",
+                f"Coverage audit: raw JS write readiness -> {raw_js_readiness}",
+            )
+        if candidate_files:
+            top_candidates = candidate_files[:self.RAW_JS_AUDIT_TOP_SAMPLE_LIMIT]
+            formatted = ", ".join(
+                (
+                    f"{item['path']} [{item.get('engine', 'unknown')}/"
+                    f"{item.get('write_readiness', 'unknown')}] ({item['candidate_entries']})"
+                )
+                for item in top_candidates
+            )
+            self.log_message.emit(
+                "info",
+                (
+                    "Coverage audit: raw JS candidate surfaces -> "
+                    f"{raw_js.get('candidate_entries', 0)} entries across "
+                    f"{raw_js.get('files_with_candidates', 0)} files. Top: {formatted}"
+                ),
+            )
+        promising_files = raw_js.get("promising_files", [])
+        if promising_files:
+            formatted_promising = ", ".join(promising_files[:self.RAW_JS_AUDIT_TOP_SAMPLE_LIMIT])
+            self.log_message.emit(
+                "info",
+                f"Coverage audit: promising JS allowlist candidates -> {formatted_promising}",
+            )
+
+    def _write_coverage_report(self, coverage_report: Dict[str, Any], output_path: str) -> None:
+        """Write a JSON coverage report to disk."""
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as handle:
+            json.dump(coverage_report, handle, ensure_ascii=False, indent=2)
+        self.log_message.emit("info", f"Coverage report written to {output_path}")
+
+    def _to_relative_project_path(self, project_path: str, file_path: str) -> str:
+        """Return a stable project-relative path for reports."""
+        return os.path.relpath(file_path, project_path).replace("\\", "/")
 
     def _extract_all_text(self, files: List[str]) -> Tuple[List[Tuple], Dict]:
         """Extract text from all files using parallel processing."""
@@ -288,9 +644,12 @@ class TranslationPipeline(QObject):
             try:
                 entries = parser.extract_text(file_path)
                 if entries:
-                    # Filter short text here to reduce memory/overhead
-                    # Entries are (path, text, tag)
-                    filtered = [(p, t, tag) for p, t, tag in entries if len(t.strip()) > 1]
+                    # Keep valid single-character CJK/localized strings while still skipping blanks.
+                    filtered = [
+                        (path, text, tag)
+                        for path, text, tag in entries
+                        if self._should_keep_extracted_text(text)
+                    ]
                     return file_path, parser, filtered
                 return None
             except Exception as e:
@@ -313,6 +672,15 @@ class TranslationPipeline(QObject):
         
         self.log_message.emit("info", f"Extraction completed. Found {len(all_entries)} items across {len(parsed_files)} files.")
         return all_entries, parsed_files
+
+    def _should_keep_extracted_text(self, text: str) -> bool:
+        """Filter blank entries without dropping valid single-character localized text."""
+        stripped = text.strip()
+        if not stripped:
+            return False
+        if len(stripped) > 1:
+            return True
+        return any(ord(char) > 127 for char in stripped)
 
     def _translate_entries(self, entries: List[Tuple], source_lang: str, target_lang: str) -> Dict:
         """Translate all entries using the translation engine with robust error handling."""
@@ -603,13 +971,22 @@ class TranslationPipeline(QObject):
                 
                 # Apply translations
                 new_data = parser.apply_translation(file_path, changes)
+                if new_data is None:
+                    parser_failure_reason = getattr(parser, "last_apply_error", None)
+                    if parser_failure_reason:
+                        self.log_message.emit("warning", f"{filename}: {parser_failure_reason}")
+                    raise ValueError(
+                        parser_failure_reason or f"Parser returned no writable data for {filename}"
+                    )
                 
                 # Write file
-                if file_path.endswith('.json'):
+                file_ext = os.path.splitext(file_path)[1].lower()
+
+                if file_ext == '.json':
                     with safe_write(file_path, 'w', encoding='utf-8') as f:
                         json.dump(new_data, f, ensure_ascii=False)
                 
-                elif file_path.endswith('.js'):
+                elif file_ext == '.js':
                     with safe_write(file_path, 'w', encoding='utf-8') as f:
                         if isinstance(new_data, str):
                             f.write(new_data)
@@ -620,12 +997,18 @@ class TranslationPipeline(QObject):
                             f.write(prefix)
                             json.dump(new_data, f, ensure_ascii=False, indent=0)
                             f.write(suffix)
+
+                elif file_ext == '.txt':
+                    if not isinstance(new_data, str):
+                        raise ValueError(f"Expected text output for {filename}, got {type(new_data).__name__}")
+                    # Preserve parser-provided newline sequences exactly.
+                    with safe_write(file_path, 'w', encoding='utf-8', newline='') as f:
+                        f.write(new_data)
                         
-                elif file_path.endswith(('.rvdata2', '.rxdata', '.rvdata')):
+                elif file_ext in ('.rvdata2', '.rxdata', '.rvdata'):
                     import rubymarshal.writer
                     with safe_write(file_path, 'wb') as f:
                         rubymarshal.writer.write(f, new_data)
-                
                 return filename
                 
             except Exception as e:

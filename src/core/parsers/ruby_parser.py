@@ -1,16 +1,21 @@
 import rubymarshal.reader
 import rubymarshal.writer
 import rubymarshal.classes
-from typing import List, Tuple, Dict, Any, Set
+from typing import List, Tuple, Dict, Any, Set, Optional
 from .base import BaseParser
 import logging
 import zlib
 import re
+import os
+import threading
 from src.core.constants import (TRANSLATOR_RECURSION_MAX_DEPTH, 
                                 RUBY_ENCODING_FALLBACK_LIST, 
                                 RUBY_KEY_ENCODING_FALLBACK_LIST)
 
 logger = logging.getLogger(__name__)
+
+_RUBY_ASSET_REGISTRY_CACHE: Dict[str, Set[str]] = {}
+_RUBY_ASSET_REGISTRY_LOCK = threading.Lock()
 
 
 class RubyParser(BaseParser):
@@ -56,14 +61,23 @@ class RubyParser(BaseParser):
         r'^Basic \d+$',  # Internal basic labels
         r'^[A-Z][A-Z0-9_]*$',  # CONSTANTS
     ]
+    ASSET_FILE_EXTENSIONS = (
+        '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.webp',
+        '.ogg', '.wav', '.m4a', '.mp3', '.mid', '.midi',
+        '.webm', '.mp4', '.avi', '.mov', '.ogv', '.mkv',
+        '.rpgmvp', '.rpgmvo', '.rpgmvm', '.rvdata2', '.rvdata', '.rxdata'
+    )
+    ASSET_SCAN_DIRS = ("audio", "img", "movies", "fonts")
     
-    def __init__(self, translate_notes: bool = False, translate_comments: bool = True, **kwargs):
+    def __init__(self, translate_notes: bool = False, translate_comments: bool = False, **kwargs):
         super().__init__(**kwargs)
         self.translate_notes = translate_notes
         self.translate_comments = translate_comments
         self.extracted: List[Tuple[str, str, str]] = []
         self.visited: Set[int] = set()
         self.MAX_RECURSION_DEPTH = TRANSLATOR_RECURSION_MAX_DEPTH
+        self._known_asset_identifiers: Set[str] = set()
+        self.last_apply_error: str | None = None
     
     def extract_text(self, file_path: str) -> List[Tuple[str, str, str]]:
         """
@@ -72,6 +86,7 @@ class RubyParser(BaseParser):
         Returns:
             List of (path, text, context_tag) tuples
         """
+        self._known_asset_identifiers = self._get_known_asset_identifiers(file_path)
         with open(file_path, 'rb') as f:
             try:
                 data = rubymarshal.reader.load(f)
@@ -283,7 +298,7 @@ class RubyParser(BaseParser):
             if key_name and (key_name in self.TRANSLATABLE_ATTRS or key_name == '@name'):
                 if key_name == '@note' and not self.translate_notes:
                     return
-                if self.is_safe_to_translate(text_val, is_dialogue=(key_name != '@note')):
+                if self._is_extractable_runtime_text(text_val, is_dialogue=(key_name != '@note')):
                     context_tag = "dialogue_block" if key_name in ['@message1', '@message2', '@message3', '@message4', '@description', '@help'] else "name"
                     if key_name in ['@name', '@nickname', '@title', '@game_title', '@currency_unit']:
                         context_tag = "name"
@@ -291,7 +306,7 @@ class RubyParser(BaseParser):
             
             # Check system keys
             elif key_name and key_name in self.SYSTEM_KEYS:
-                if self.is_safe_to_translate(text_val, is_dialogue=True):
+                if self._is_extractable_runtime_text(text_val, is_dialogue=True):
                     self.extracted.append((path, text_val, "system"))
         
         # Check for EventCommand objects (RPG::EventCommand in Ruby)
@@ -334,7 +349,7 @@ class RubyParser(BaseParser):
         if code in [401, 405]:
             if len(params) > 0:
                 text = self._to_string(params[0])
-                if self.is_safe_to_translate(text, is_dialogue=True):
+                if self._is_extractable_runtime_text(text, is_dialogue=True):
                     self.extracted.append((f"{path}.@parameters.0", text, "message_dialogue"))
         
         # Show Choices (102)
@@ -342,29 +357,27 @@ class RubyParser(BaseParser):
             if len(params) > 0 and isinstance(params[0], list):
                 for i, choice in enumerate(params[0]):
                     text = self._to_string(choice)
-                    if self.is_safe_to_translate(text, is_dialogue=True):
+                    if self._is_extractable_runtime_text(text, is_dialogue=True):
                         self.extracted.append((f"{path}.@parameters.0.{i}", text, "choice"))
         
         # Comment (108/408)
         elif code in [108, 408] and self.translate_comments:
             if len(params) > 0:
                 text = self._to_string(params[0])
-                if self.is_safe_to_translate(text, is_dialogue=True):
-                    # Filter out pure code comments
-                    if ' ' in text or len(text) > 15:
-                        self.extracted.append((f"{path}.@parameters.0", text, "comment"))
+                if self.looks_like_translatable_comment(text) and self._is_extractable_runtime_text(text, is_dialogue=True):
+                    self.extracted.append((f"{path}.@parameters.0", text, "comment"))
         
         elif code in [320, 324]:
             if len(params) > 1:
                 text = self._to_string(params[1])
-                if self.is_safe_to_translate(text, is_dialogue=True):
+                if self._is_extractable_runtime_text(text, is_dialogue=True):
                     self.extracted.append((f"{path}.@parameters.1", text, "name"))
         
         # Change Profile (325)
         elif code == 325:
             if len(params) > 1:
                 text = self._to_string(params[1])
-                if self.is_safe_to_translate(text, is_dialogue=True):
+                if self._is_extractable_runtime_text(text, is_dialogue=True):
                     self.extracted.append((f"{path}.@parameters.1", text, "name"))
         
         # Show Choices (102)
@@ -372,10 +385,10 @@ class RubyParser(BaseParser):
             if len(params) > 0 and isinstance(params[0], (list, tuple)):
                 for i, choice in enumerate(params[0]):
                     text = self._to_string(choice)
-                    if self.is_safe_to_translate(text, is_dialogue=True):
+                    if self._is_extractable_runtime_text(text, is_dialogue=True):
                         self.extracted.append((f"{path}.@parameters.0.{i}", text, "choice"))
 
-    def _to_string(self, val: Any) -> str:
+    def _to_string(self, val: Any) -> Optional[str]:
         """Convert a value to string, handling bytes and common encodings."""
         if isinstance(val, str):
             return val
@@ -394,6 +407,10 @@ class RubyParser(BaseParser):
         """
         Apply translations back to the Ruby Marshal file.
         """
+        self.last_apply_error = None
+        self._known_asset_identifiers = self._get_known_asset_identifiers(file_path)
+        with open(file_path, 'rb') as f:
+            original_data = rubymarshal.reader.load(f)
         with open(file_path, 'rb') as f:
             data = rubymarshal.reader.load(f)
         
@@ -406,6 +423,12 @@ class RubyParser(BaseParser):
         if is_scripts:
             # We need to perform a different application strategy for scripts
             data = self._apply_scripts_translation(data, translations)
+            asset_violations = self._find_asset_mutations(original_data, data)
+            if asset_violations:
+                joined = ", ".join(asset_violations[:5])
+                self.last_apply_error = f"Asset invariant violation: {joined}"
+                logger.error("Asset invariant violation while applying %s: %s", os.path.basename(file_path), joined)
+                return None
             return data
             
         for path, text in translations.items():
@@ -429,6 +452,13 @@ class RubyParser(BaseParser):
         
         if failed_paths:
             logger.warning(f"Failed to apply {len(failed_paths)} translations")
+
+        asset_violations = self._find_asset_mutations(original_data, data)
+        if asset_violations:
+            joined = ", ".join(asset_violations[:5])
+            self.last_apply_error = f"Asset invariant violation: {joined}"
+            logger.error("Asset invariant violation while applying %s: %s", os.path.basename(file_path), joined)
+            return None
         
         return data
 
@@ -652,7 +682,7 @@ class RubyParser(BaseParser):
     def _is_valid_script_string(self, text: str) -> bool:
         """Validate if a script string is worth translating."""
         # Use the robust base validation first
-        if not self.is_safe_to_translate(text, is_dialogue=True):
+        if not self._is_extractable_runtime_text(text, is_dialogue=True):
             return False
             
         if not text or len(text) < 2:
@@ -678,3 +708,177 @@ class RubyParser(BaseParser):
             return False
             
         return True
+
+    def _is_extractable_runtime_text(self, text: Optional[str], *, is_dialogue: bool = False) -> bool:
+        """Central safety gate for Ruby extraction paths."""
+        if not isinstance(text, str):
+            return False
+        if not self.is_safe_to_translate(text, is_dialogue=is_dialogue):
+            return False
+        if self._contains_asset_reference(text):
+            return False
+        if self._matches_known_asset_identifier(text):
+            return False
+        return True
+
+    def _contains_asset_reference(self, text: str) -> bool:
+        """Detect file path or asset reference patterns in Ruby strings."""
+        if not isinstance(text, str):
+            return False
+        cleaned_text = text.strip().strip('"\'')
+        if not cleaned_text:
+            return False
+        lower_text = cleaned_text.lower()
+        if any(lower_text.endswith(ext) for ext in self.ASSET_FILE_EXTENSIONS):
+            return True
+        if re.search(r"(?i)(?:^|[\s\\\"'`(=,:])(?:img|audio|movies|fonts|graphics)[/\\\\]", cleaned_text):
+            return True
+        return False
+
+    def _matches_known_asset_identifier(self, text: str) -> bool:
+        """Return True when text matches a real asset basename/path from the current project."""
+        if not isinstance(text, str) or not text.strip():
+            return False
+        if not self._known_asset_identifiers:
+            return False
+
+        normalized = text.strip().strip('"\'').replace('\\', '/').lower()
+        if not normalized:
+            return False
+
+        candidates = {normalized, os.path.basename(normalized)}
+        stem, _ext = os.path.splitext(os.path.basename(normalized))
+        if stem:
+            candidates.add(stem)
+        if '/' in normalized:
+            rel_stem, _ = os.path.splitext(normalized)
+            if rel_stem:
+                candidates.add(rel_stem)
+
+        return any(candidate in self._known_asset_identifiers for candidate in candidates)
+
+    def _get_known_asset_identifiers(self, file_path: str) -> Set[str]:
+        """Build or reuse a cached set of actual asset identifiers for the current project."""
+        asset_root = self._find_asset_root(file_path)
+        if not asset_root:
+            return set()
+
+        normalized_root = os.path.normpath(asset_root)
+        with _RUBY_ASSET_REGISTRY_LOCK:
+            cached = _RUBY_ASSET_REGISTRY_CACHE.get(normalized_root)
+            if cached is not None:
+                return cached
+
+        identifiers: Set[str] = set()
+        for directory_name in self.ASSET_SCAN_DIRS:
+            directory_path = os.path.join(asset_root, directory_name)
+            if not os.path.isdir(directory_path):
+                continue
+
+            for root, _dirs, files in os.walk(directory_path):
+                for filename in files:
+                    relative_path = os.path.relpath(os.path.join(root, filename), asset_root).replace("\\", "/").lower()
+                    basename = os.path.basename(relative_path)
+                    stem, _ext = os.path.splitext(basename)
+                    rel_stem, _ = os.path.splitext(relative_path)
+                    identifiers.add(relative_path)
+                    identifiers.add(basename)
+                    if stem:
+                        identifiers.add(stem)
+                    if rel_stem:
+                        identifiers.add(rel_stem)
+
+        with _RUBY_ASSET_REGISTRY_LOCK:
+            _RUBY_ASSET_REGISTRY_CACHE[normalized_root] = identifiers
+        return identifiers
+
+    def _find_asset_root(self, file_path: str) -> Optional[str]:
+        """Locate the asset root for RPG Maker projects."""
+        current_dir = os.path.dirname(os.path.abspath(file_path))
+
+        for _ in range(6):
+            if self._looks_like_asset_root(current_dir):
+                return current_dir
+
+            www_dir = os.path.join(current_dir, "www")
+            if self._looks_like_asset_root(www_dir):
+                return www_dir
+
+            parent_dir = os.path.dirname(current_dir)
+            if parent_dir == current_dir:
+                break
+            current_dir = parent_dir
+
+        return None
+
+    def _looks_like_asset_root(self, directory: str) -> bool:
+        """Return True when a directory resembles an RPG Maker asset root."""
+        if not directory or not os.path.isdir(directory):
+            return False
+        return any(os.path.isdir(os.path.join(directory, child)) for child in self.ASSET_SCAN_DIRS)
+
+    def _find_asset_mutations(self, original: Any, updated: Any) -> List[str]:
+        """Return paths whose original asset text was changed during apply."""
+        violations: List[str] = []
+        visited: Set[tuple[int, int]] = set()
+        self._walk_asset_differences(original, updated, "", visited, violations)
+        return violations
+
+    def _walk_asset_differences(
+        self,
+        original: Any,
+        updated: Any,
+        current_path: str,
+        visited: Set[tuple[int, int]],
+        violations: List[str],
+    ) -> None:
+        pair_id = (id(original), id(updated))
+        if pair_id in visited:
+            return
+        visited.add(pair_id)
+
+        original_text = self._to_string(original)
+        updated_text = self._to_string(updated)
+        if original_text is not None and updated_text is not None:
+            if (self._contains_asset_reference(original_text) or self._matches_known_asset_identifier(original_text)) and original_text != updated_text:
+                violations.append(current_path or "<root>")
+            return
+
+        if type(original) is not type(updated):
+            return
+
+        if isinstance(original, list):
+            for index, (left, right) in enumerate(zip(original, updated)):
+                child_path = f"{current_path}.{index}" if current_path else str(index)
+                self._walk_asset_differences(left, right, child_path, visited, violations)
+            return
+
+        if isinstance(original, dict):
+            for key in original.keys() & updated.keys():
+                child_key = self._path_key(key)
+                child_path = f"{current_path}.{child_key}" if current_path else child_key
+                self._walk_asset_differences(original[key], updated[key], child_path, visited, violations)
+            return
+
+        if hasattr(original, 'attributes') and hasattr(updated, 'attributes'):
+            original_attrs = getattr(original, 'attributes', {})
+            updated_attrs = getattr(updated, 'attributes', {})
+            for key in original_attrs.keys() & updated_attrs.keys():
+                child_key = self._path_key(key)
+                child_path = f"{current_path}.{child_key}" if current_path else child_key
+                self._walk_asset_differences(original_attrs[key], updated_attrs[key], child_path, visited, violations)
+            return
+
+        if hasattr(original, '__dict__') and hasattr(updated, '__dict__'):
+            original_items = {k: v for k, v in original.__dict__.items() if not k.startswith('_')}
+            updated_items = {k: v for k, v in updated.__dict__.items() if not k.startswith('_')}
+            for key in original_items.keys() & updated_items.keys():
+                child_path = f"{current_path}.{key}" if current_path else key
+                self._walk_asset_differences(original_items[key], updated_items[key], child_path, visited, violations)
+
+    def _path_key(self, key: Any) -> str:
+        """Normalize dict/attribute keys for diagnostic paths."""
+        text = self._to_string(key)
+        if text is not None:
+            return text
+        return str(key)

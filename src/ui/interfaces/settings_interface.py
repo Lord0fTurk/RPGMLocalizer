@@ -57,10 +57,10 @@ class SettingsInterface(ScrollArea):
         self.chk_translate_comments = SwitchSettingCard(
             FIF.CHAT,
             "Translate comments",
-            "Identify and translate comments marked as event commands (Code 108/408)",
+            "Identify and translate event comments (Code 108/408). Disabled by default because plugin tags often live here.",
             parent=self.parserGroup
         )
-        self.chk_translate_comments.setChecked(True)
+        self.chk_translate_comments.setChecked(False)
         
         self.chk_translate_notes = SwitchSettingCard(
             FIF.EDIT,
@@ -322,7 +322,7 @@ class SettingsInterface(ScrollArea):
         if not settings:
             return
 
-        self.chk_translate_comments.setChecked(settings.get("translate_comments", True))
+        self.chk_translate_comments.setChecked(settings.get("translate_comments", False))
         self.chk_translate_notes.setChecked(settings.get("translate_notes", False))
 
         self.chk_visustella_wordwrap.setChecked(settings.get("visustella_wordwrap", False))

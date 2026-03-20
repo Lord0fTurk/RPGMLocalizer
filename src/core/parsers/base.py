@@ -44,6 +44,57 @@ class BaseParser(QObject, metaclass=ParserMeta):
         """
         pass
 
+    def contains_only_control_codes(self, text: str) -> bool:
+        """Return True when text is composed only of RPG Maker control codes."""
+        if not isinstance(text, str):
+            return False
+
+        stripped = text.strip()
+        if not stripped:
+            return False
+
+        import re
+
+        pattern = (
+            r"(?:\s*"
+            r"(?:\\[A-Za-z]+(?:\[[^\]\r\n]*\])?"
+            r"|\\[!><\^.$|{}_])"
+            r")+"
+            r"\s*"
+        )
+        return re.fullmatch(pattern, stripped) is not None
+
+    def looks_like_translatable_comment(self, text: str) -> bool:
+        """Heuristic gate for event comments, which often contain plugin logic."""
+        if not isinstance(text, str):
+            return False
+
+        stripped = text.strip()
+        if not stripped or self.contains_only_control_codes(stripped):
+            return False
+
+        import re
+
+        if stripped.startswith(("<", "::", "//", "/*", "*/", "@")):
+            return False
+
+        has_non_ascii = any(ord(char) > 127 for char in stripped)
+        has_sentence_punctuation = any(mark in stripped for mark in ".!?;:。！？")
+        word_count = len(stripped.split())
+
+        if not has_non_ascii and not has_sentence_punctuation:
+            command_like_pattern = (
+                r"[A-Za-z0-9_./\\:=<>\-\[\],]+"
+                r"(?:\s+[A-Za-z0-9_./\\:=<>\-\[\],]+)*"
+            )
+            if re.fullmatch(command_like_pattern, stripped):
+                return False
+
+        if has_non_ascii:
+            return has_sentence_punctuation or word_count >= 2 or len(stripped) >= 10
+
+        return has_sentence_punctuation or word_count >= 3
+
     def is_safe_to_translate(self, text: str, is_dialogue: bool = False) -> bool:
         """
         Heuristic to determine if a string is safe to translate.
@@ -59,6 +110,9 @@ class BaseParser(QObject, metaclass=ParserMeta):
         # Strip whitespace AND string literal quotes 
         trimmed = text.strip('"\' \n\r\t')
         if not trimmed:
+            return False
+
+        if self.contains_only_control_codes(trimmed):
             return False
 
         # 0. Check User Blacklist
@@ -99,7 +153,13 @@ class BaseParser(QObject, metaclass=ParserMeta):
         # 3. Ignore paths (contain slashes and no spaces)
         # BUT: Allow backslashes if the string contains non-ASCII characters (likely Japanese with control codes like \C[0])
         has_non_ascii = any(ord(c) > 127 for c in trimmed)
-        if ('/' in trimmed or ('\\' in trimmed and not has_non_ascii)) and ' ' not in trimmed:
+        # Forward slashes: always indicate paths
+        if '/' in trimmed and ' ' not in trimmed:
+            return False
+        # Backslashes in non-dialogue mode: likely Windows paths
+        # In dialogue mode: RPG Maker escape codes (\^, \C[N], \V[N]) use backslashes,
+        # so we must not reject dialogue just because it contains backslashes.
+        if '\\' in trimmed and not has_non_ascii and ' ' not in trimmed and not is_dialogue:
             return False
         
         # 4. Ignore Asset Names and Resource Keys

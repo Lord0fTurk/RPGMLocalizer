@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Optional, List
 import logging
 
+from src.utils.app_paths import get_data_dir
+
 logger = logging.getLogger(__name__)
 
 
@@ -25,8 +27,16 @@ class BackupManager:
             backup_dir: Directory to store backups. If None, uses .rpgm_backup
                        in the same directory as the original file.
         """
-        self.backup_dir = backup_dir
+        self.backup_dir = self._resolve_backup_dir(backup_dir)
         self.backup_log: List[tuple] = []  # (original, backup_path, timestamp)
+
+    def _resolve_backup_dir(self, backup_dir: Optional[str]) -> Optional[str]:
+        """Resolve explicit backup directories in a cross-platform-safe way."""
+        if not backup_dir:
+            return None
+        if os.path.isabs(backup_dir):
+            return backup_dir
+        return os.path.join(os.fspath(get_data_dir()), backup_dir)
     
     def create_backup(self, file_path: str, use_timestamp: bool = True) -> Optional[str]:
         """
@@ -209,7 +219,22 @@ def get_backup_manager(backup_dir: Optional[str] = None) -> BackupManager:
     global _backup_manager
     if _backup_manager is None:
         _backup_manager = BackupManager(backup_dir)
+    elif backup_dir is not None:
+        requested_dir = os.path.normcase(os.path.abspath(backup_dir))
+        current_dir = (
+            os.path.normcase(os.path.abspath(_backup_manager.backup_dir))
+            if _backup_manager.backup_dir
+            else None
+        )
+        if requested_dir != current_dir:
+            _backup_manager = BackupManager(backup_dir)
     return _backup_manager
+
+
+def reset_backup_manager() -> None:
+    """Reset the global backup manager singleton."""
+    global _backup_manager
+    _backup_manager = None
 
 
 def backup_file(file_path: str) -> Optional[str]:

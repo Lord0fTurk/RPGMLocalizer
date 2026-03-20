@@ -1,4 +1,5 @@
-import os
+﻿import os
+from typing import Optional
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QFileDialog, QLabel
 from PyQt6.QtCore import Qt, pyqtSignal as Signal
 from qfluentwidgets import (LineEdit, PrimaryPushButton, PushButton, ComboBox, 
@@ -10,6 +11,8 @@ class HomeInterface(QWidget):
     """
     Main interface for selecting game and starting translation.
     """
+    ENCRYPTED_ARCHIVE_EXTENSIONS = ('.rgss3a', '.rpgmvp', '.rpgmvo', '.rpgmvm')
+
     start_requested = Signal(dict)
     stop_requested = Signal()
     
@@ -26,11 +29,11 @@ class HomeInterface(QWidget):
         self.l_project = QVBoxLayout(self.card_project)
         
         self.lbl_project_title = StrongBodyLabel("Game Project", self.card_project)
-        self.lbl_project_desc = CaptionLabel("Select the RPG Maker game executable (Game.exe)", self.card_project)
+        self.lbl_project_desc = CaptionLabel("Select the RPG Maker game project folder", self.card_project)
         
         self.h_project_input = QHBoxLayout()
         self.txt_path = LineEdit(self.card_project)
-        self.txt_path.setPlaceholderText("C:/Games/MyGame/Game.exe")
+        self.txt_path.setPlaceholderText("C:/Games/MyGame")
         self.btn_browse = PushButton("Browse", self.card_project, FIF.FOLDER)
         self.btn_browse.clicked.connect(self._browse_folder)
         
@@ -198,19 +201,41 @@ class HomeInterface(QWidget):
         self.vBoxLayout.addStretch(1)
 
     def _browse_folder(self):
-        file_path, _ = QFileDialog.getOpenFileName(
+        directory = QFileDialog.getExistingDirectory(
             self, 
-            "Select Game Executable", 
-            "", 
-            "Game Executable (*.exe);;All Files (*.*)"
+            "Select Game Project Folder",
+            self.txt_path.text().strip() or "",
         )
-        if file_path:
-            # We save the directory containing the exe as the project path
-            directory = os.path.dirname(file_path)
-            self.txt_path.setText(directory)
-            self._check_encrypted_game(directory)
+        normalized_path = self._normalize_project_path(directory)
+        if normalized_path:
+            self.txt_path.setText(normalized_path)
+            self._check_encrypted_game(normalized_path)
+
+    @staticmethod
+    def _normalize_project_path(path: str) -> str:
+        """Normalize user-selected project input into a project directory path."""
+        if not isinstance(path, str):
+            return ""
+        normalized = path.strip().strip('"')
+        if not normalized:
+            return ""
+        if os.path.isfile(normalized):
+            return os.path.dirname(normalized)
+        return normalized
             
-    def _check_encrypted_game(self, path):
+    def _find_child_case_insensitive(self, parent_dir: str, target_name: str) -> Optional[str]:
+        if not parent_dir or not os.path.isdir(parent_dir):
+            return None
+        target_lower = target_name.lower()
+        try:
+            for entry in os.scandir(parent_dir):
+                if entry.is_dir() and entry.name.lower() == target_lower:
+                    return entry.path
+        except OSError:
+            return None
+        return None
+
+    def _check_encrypted_game(self, path: str) -> None:
         """Check for potentially encrypted game files and warn user."""
         try:
             # Common encrypted archive extensions
@@ -219,19 +244,27 @@ class HomeInterface(QWidget):
             
             # Check root and standard subfolders
             to_check = [path]
-            if os.path.isdir(os.path.join(path, "www")):
-                to_check.append(os.path.join(path, "www"))
+            www_dir = self._find_child_case_insensitive(path, "www")
+            if www_dir:
+                to_check.append(www_dir)
                 
             for p in to_check:
                 if not os.path.exists(p): continue
-                found = [f for f in os.listdir(p) if f.lower().endswith(('.rgss3a', '.rpgmvp', '.rpgmwo', '.rpgmvm'))]
+                found = [f for f in os.listdir(p) if f.lower().endswith(self.ENCRYPTED_ARCHIVE_EXTENSIONS)]
                 if found:
                     encrypted = True
                     enc_files.extend(found)
             
             # If encrypted files exist, check if we can find open Data files
             has_data = False
-            data_dirs = [os.path.join(path, "Data"), os.path.join(path, "data"), os.path.join(path, "www", "data")]
+            data_dirs = []
+            root_data_dir = self._find_child_case_insensitive(path, "data")
+            if root_data_dir:
+                data_dirs.append(root_data_dir)
+            if www_dir:
+                www_data_dir = self._find_child_case_insensitive(www_dir, "data")
+                if www_data_dir:
+                    data_dirs.append(www_data_dir)
             
             for d in data_dirs:
                 if os.path.exists(d) and os.path.isdir(d):
@@ -243,9 +276,9 @@ class HomeInterface(QWidget):
             
             if encrypted and not has_data:
                 InfoBar.warning(
-                    title="Şifreli Oyun Tespit Edildi",
-                    content=f"Bu oyun şifreli dosyalara ({enc_files[0]} vb.) sahip ve açık 'Data' klasörü bulunamadı.\n"
-                            "Lütfen önce bir 'RPG Maker Decrypter' aracı ile oyun dosyalarını açınız, aksi halde çeviri yapılamaz.",
+                    title="Åifreli Oyun Tespit Edildi",
+                    content=f"Bu oyun ÅŸifreli dosyalara ({enc_files[0]} vb.) sahip ve aÃ§Ä±k 'Data' klasÃ¶rÃ¼ bulunamadÄ±.\n"
+                            "LÃ¼tfen Ã¶nce bir 'RPG Maker Decrypter' aracÄ± ile oyun dosyalarÄ±nÄ± aÃ§Ä±nÄ±z, aksi halde Ã§eviri yapÄ±lamaz.",
                     orient=Qt.Orientation.Horizontal,
                     isClosable=True,
                     position=InfoBarPosition.TOP_RIGHT,
@@ -257,7 +290,9 @@ class HomeInterface(QWidget):
             print(f"Error checking encryption: {e}")
             
     def _on_start(self):
-        path = self.txt_path.text().strip()
+        path = self._normalize_project_path(self.txt_path.text())
+        if path:
+            self.txt_path.setText(path)
         
         # Convert display names to language codes
         source_name = self.cmb_source.currentText()
@@ -293,7 +328,7 @@ class HomeInterface(QWidget):
 
         project_path = settings.get("project_path", "")
         if project_path:
-            self.txt_path.setText(project_path)
+            self.txt_path.setText(self._normalize_project_path(project_path))
 
         source_code = settings.get("source_lang")
         if source_code:

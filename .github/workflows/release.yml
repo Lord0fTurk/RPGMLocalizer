@@ -38,7 +38,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller
+          pip install pyinstaller pillow
+
+      - name: Generate Build Icons
+        run: |
+          python scripts/generate_icons.py
 
       - name: Build with PyInstaller
         run: |
@@ -47,15 +51,13 @@ jobs:
       - name: Package Linux (AppImage)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          sudo apt-get update && sudo apt-get install -y imagemagick
-          
           # Create AppDir structure
           mkdir -p AppDir/usr/bin
           cp dist/RPGMLocalizer AppDir/usr/bin/RPGMLocalizer
           chmod +x AppDir/usr/bin/RPGMLocalizer
           
-          # Convert icon
-          convert icon.ico[0] -resize 256x256 AppDir/icon.png
+          # Copy source icon
+          cp icon.png AppDir/icon.png
           
           # Create .desktop file
           cat <<EOF > AppDir/rpgmlocalizer.desktop

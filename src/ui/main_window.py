@@ -1,6 +1,3 @@
-import os
-os.environ['QT_API'] = 'pyqt6'
-import sys
 from PyQt6.QtCore import Qt, QSize, QThread
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
@@ -18,6 +15,7 @@ from src.ui.interfaces.export_interface import ExportInterface
 from src.ui.interfaces.about_interface import AboutInterface
 from src.ui.interfaces.glossary_interface import GlossaryInterface
 from src.ui.components.console_log import ConsoleLog
+from src.utils.paths import existing_resource_path
 
 class MainWindow(FluentWindow):
     def __init__(self):
@@ -69,17 +67,10 @@ class MainWindow(FluentWindow):
     def initWindow(self):
         self.resize(900, 700)
         self.setWindowTitle("RPGMLocalizer")
-        
-        # Set window icon (scale from 2048x2048 to 64x64)
-        from PyQt6.QtGui import QPixmap
-        from PyQt6.QtCore import Qt as QtCore_Qt
-        from src.utils.paths import resource_path
-        
-        icon_path = resource_path("icon.ico")
-        if os.path.exists(icon_path):
-            pixmap = QPixmap(icon_path)
-            scaled_pixmap = pixmap.scaled(64, 64, QtCore_Qt.AspectRatioMode.KeepAspectRatio, QtCore_Qt.TransformationMode.SmoothTransformation)
-            self.setWindowIcon(QIcon(scaled_pixmap))
+
+        icon_path = existing_resource_path("icon.png", "icon.ico")
+        if icon_path:
+            self.setWindowIcon(QIcon(icon_path))
         
         # Center on screen
         desktop = QApplication.screens()[0].availableGeometry()
@@ -265,7 +256,7 @@ class MainWindow(FluentWindow):
             cache = get_cache()
             cache.clear()
             cache.save()
-            msg = "Translation cache has been cleared."
+            msg = f"Translation cache has been cleared: {cache.cache_dir}"
             self.on_log_message("success", msg)
             
             InfoBar.success(

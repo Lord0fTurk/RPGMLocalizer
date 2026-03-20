@@ -134,6 +134,23 @@ class TranslationImporter:
     def __init__(self):
         self.translations: Dict[str, Dict[str, str]] = {}  # file_path -> {json_path: translated}
         self.stats = {'imported': 0, 'skipped': 0, 'errors': 0}
+
+    def _normalize_status(self, status: object) -> str:
+        """Normalize incoming status values from CSV/JSON imports."""
+        if isinstance(status, str):
+            return status.strip().lower()
+        if status is None:
+            return "translated"
+        return str(status).strip().lower()
+
+    def _normalize_translation_text(self, translated: object) -> Optional[str]:
+        """Return a usable translation string or None when the imported value is invalid."""
+        if not isinstance(translated, str):
+            return None
+        cleaned = translated.strip()
+        if not cleaned:
+            return None
+        return translated
     
     def import_csv(self, input_path: str, has_header: bool = True) -> bool:
         """
@@ -162,7 +179,9 @@ class TranslationImporter:
                     status = row[4] if len(row) > 4 else 'translated'
                     
                     # Skip entries marked as skipped or without translation
-                    if status == 'skipped' or not translated.strip():
+                    normalized_status = self._normalize_status(status)
+                    normalized_translation = self._normalize_translation_text(translated)
+                    if normalized_status == 'skipped' or normalized_translation is None:
                         self.stats['skipped'] += 1
                         continue
                     
@@ -170,7 +189,7 @@ class TranslationImporter:
                     if file_path not in self.translations:
                         self.translations[file_path] = {}
                     
-                    self.translations[file_path][json_path] = translated
+                    self.translations[file_path][json_path] = normalized_translation
                     self.stats['imported'] += 1
             
             logger.info(f"Imported {self.stats['imported']} translations from {input_path}")
@@ -196,14 +215,16 @@ class TranslationImporter:
                 translated = entry.get('translated', '')
                 status = entry.get('status', 'translated')
                 
-                if status == 'skipped' or not translated.strip():
+                normalized_status = self._normalize_status(status)
+                normalized_translation = self._normalize_translation_text(translated)
+                if normalized_status == 'skipped' or normalized_translation is None:
                     self.stats['skipped'] += 1
                     continue
                 
                 if file_path not in self.translations:
                     self.translations[file_path] = {}
                 
-                self.translations[file_path][json_path] = translated
+                self.translations[file_path][json_path] = normalized_translation
                 self.stats['imported'] += 1
             
             logger.info(f"Imported {self.stats['imported']} translations from {input_path}")

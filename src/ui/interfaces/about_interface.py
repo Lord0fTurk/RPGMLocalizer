@@ -27,11 +27,10 @@ class AboutInterface(ScrollArea):
         # Icon
         self.lbl_icon = QLabel()
         # Ensure we have an icon, otherwise fallback
-        from src.utils.paths import resource_path
-        import os
+        from src.utils.paths import existing_resource_path
         
-        icon_path = resource_path("icon.ico")
-        if os.path.exists(icon_path):
+        icon_path = existing_resource_path("icon.png", "icon.ico")
+        if icon_path:
             pixmap = QPixmap(icon_path)
             self.lbl_icon.setPixmap(pixmap.scaled(96, 96, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
         else:

@@ -12,3 +12,7 @@ aiohttp>=3.8.0
 
 # Optional: YAML export support
 pyyaml>=6.0
+
+# Audit-only JS AST analysis
+tree-sitter>=0.25.0
+tree-sitter-javascript>=0.25.0

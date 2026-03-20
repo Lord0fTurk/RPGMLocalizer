@@ -6,12 +6,21 @@ import json
 import os
 import re
 import logging
+import copy
+import threading
 from typing import List, Dict, Any, Tuple, Set
 from .base import BaseParser
 from .specialized_plugins import get_specialized_parser
 from .js_tokenizer import JSStringTokenizer
+from .plugin_metadata import PluginMetadataStore, PluginFileMetadata, PluginParameterMetadata
+from .json_field_rules import is_protected_structured_noop_file
+from .structured_json_extractor import StructuredJsonExtractor
+from .technical_invariants import JsonAssetInvariantVerifier, JsonTechnicalInvariantVerifier
 
 logger = logging.getLogger(__name__)
+
+_ASSET_REGISTRY_CACHE: Dict[str, Set[str]] = {}
+_ASSET_REGISTRY_LOCK = threading.Lock()
 
 class JsonParser(BaseParser):
     """
@@ -53,7 +62,6 @@ class JsonParser(BaseParser):
         'label', 'format', 'string', 'prefix', 'suffix', 'commandName',
         'displayName',  # Map display names
         'currencyUnit',  # Currency unit in System.json
-        'locale',  # Locale identifier
         'battleName',  # Battle background name (sometimes text)
     }
     
@@ -70,10 +78,21 @@ class JsonParser(BaseParser):
     SKIP_FIELDS = {
         'id', 'animationId', 'characterIndex', 'characterName',
         'faceName', 'faceIndex', 'tilesetId', 'battleback1Name',
-        'battleback2Name', 'bgm', 'bgs', 'parallaxName',
+        'battleback2Name', 'bgm', 'bgs', 'se', 'me', 'parallaxName',
         'title1Name', 'title2Name',
+        'locale',  # Technical locale identifier such as en_US / tr_TR
         'note',  # Skip note by default (often contains plugin data)
     }
+
+    # Keys whose presence (alongside 'name') signals an audio/sound spec object.
+    _SOUND_SPEC_AUDIO_KEYS = frozenset({'volume', 'pitch', 'pan'})
+    _ASSET_CONTEXT_PATH_HINTS = frozenset({
+        'audio', 'sound', 'voice', 'bgm', 'bgs', 'se', 'me',
+        'movie', 'movies', 'video',
+        'img', 'image', 'picture', 'face', 'character', 'battler',
+        'tileset', 'parallax', 'battleback', 'title1', 'title2',
+        'icon', 'filename', 'file',
+    })
     
     # Expanded key patterns that commonly indicate translatable text in plugin parameters
     TEXT_KEY_INDICATORS = [
@@ -96,11 +115,36 @@ class JsonParser(BaseParser):
         'filename', 'file',
     ]
 
+    PLUGIN_METADATA_TECHNICAL_TYPES = {
+        'actor', 'animation', 'armor', 'boolean', 'class', 'combo',
+        'common_event', 'enemy', 'file', 'icon', 'item', 'location',
+        'map', 'number', 'select', 'skill', 'state',
+        'switch', 'tileset', 'troop', 'variable', 'weapon',
+    }
+    PLUGIN_METADATA_TEXT_HINTS = (
+        'text', 'message', 'name', 'label', 'caption', 'title',
+        'format', 'button', 'command', 'tooltip', 'help', 'unit',
+    )
+    PLUGIN_METADATA_ASSET_CONTEXT_HINTS = (
+        'audio', 'bgm', 'bgs', 'me', 'se', 'sound',
+        'image', 'img', 'picture', 'face', 'character', 'enemy',
+        'actor', 'battler', 'system', 'animation', 'battleback',
+        'tileset', 'parallax', 'title', 'font', 'movie', 'video',
+        'icon', 'iconset', 'window',
+    )
+    PLUGIN_METADATA_ASSET_LIST_HINTS = (
+        'preload', 'cache', 'custom files', 'file name', 'filename',
+        'filepath', 'file path', 'folder', 'directory', 'without extension',
+        'select a picture', 'ignore list',
+    )
+
     # Explicitly technical keys in plugin configs
     NON_TRANSLATABLE_KEY_HINTS = [
         'switch', 'variable', 'symbol', 'condition', 'bind',
+        'groupname',
         'sound', 'audio', 'bgm', 'bgs',
         'icon', 'align', 'width', 'height',
+        'orientation',
         'opacity', 'speed', 'interval', 'scale', 'rate',
         'color', 'margin', 'padding', 'position', 'size',
         'volume', 'pitch', 'pan', 'duration', 'row', 'column',
@@ -111,11 +155,51 @@ class JsonParser(BaseParser):
     NON_TRANSLATABLE_EXACT_KEYS = {
         'id', 'se', 'me', 'x', 'y', 'z'
     }
+    INPUT_BINDING_TOKENS = {
+        'ok', 'cancel', 'menu', 'shift', 'control', 'tab',
+        'pageup', 'pagedown', 'up', 'down', 'left', 'right',
+        'escape', 'none',
+    }
+
+    # Plugins whose parameters are entirely non-translatable (particle effects, etc.)
+    # These plugins' args dicts are technical configuration, not player-visible text.
+    NON_TRANSLATABLE_PLUGINS: Set[str] = {
+        'TRP_ParticleMZ',
+        'TRP_ParticleMZ_Preset',
+        'TRP_ParticleMZ_ExRegion',
+        'TRP_ParticleMZ_ExScreen',
+        'TRP_ParticleMZ_Group',
+        'TRP_ParticleMZ_List',
+    }
+    NON_TRANSLATABLE_PLUGIN_PATTERNS = [
+        re.compile(r'^TRP_Particle', re.IGNORECASE),
+    ]
+
+    ASSET_FILE_EXTENSIONS = (
+        '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tga', '.svg', '.webp',
+        '.ogg', '.wav', '.m4a', '.mp3', '.mid', '.midi',
+        '.webm', '.mp4', '.avi', '.mov', '.ogv', '.mkv',
+        '.rpgmvp', '.rpgmvo', '.rpgmvm', '.rpgmvw'
+    )
 
     PATH_DOT_ESCAPE = "__DOT__"
     PATH_DOT_ESCAPE_ESC = "__DOT_ESC__"
+    LOCALE_LIKE_FILENAMES = {
+        "translations.json",
+    }
+    ASSET_SCAN_DIRS = ("audio", "img", "movies", "fonts")
+    LEGACY_DATABASE_NAME_FILES = {
+        "actors.json",
+        "armors.json",
+        "classes.json",
+        "enemies.json",
+        "items.json",
+        "skills.json",
+        "states.json",
+        "weapons.json",
+    }
     
-    def __init__(self, translate_notes: bool = False, translate_comments: bool = True, **kwargs):
+    def __init__(self, translate_notes: bool = False, translate_comments: bool = False, **kwargs):
         """
         Args:
             translate_notes: If True, includes 'note' fields for translation.
@@ -124,9 +208,24 @@ class JsonParser(BaseParser):
         super().__init__(**kwargs)
         self.translate_notes = translate_notes
         self.translate_comments = translate_comments
-        self.extracted: List[Tuple[str, str]] = []
+        self.extracted: List[Tuple[str, str, str]] = []
         self._js_tokenizer = JSStringTokenizer()
         self._skip_fields = self.SKIP_FIELDS.copy()
+        self._plugin_metadata_store: PluginMetadataStore | None = None
+        self.last_apply_error: str | None = None
+        self._known_asset_identifiers: Set[str] = set()
+        self._structured_extractor = StructuredJsonExtractor(
+            escape_path_key=self._escape_path_key,
+            is_safe_to_translate=self.is_safe_to_translate,
+            legacy_event_extractor=self._extract_legacy_event_entries,
+            legacy_script_extractor=self._extract_legacy_script_entries,
+            legacy_mz_plugin_extractor=self._extract_legacy_mz_plugin_entries,
+        )
+        self._invariant_verifier = JsonTechnicalInvariantVerifier(self._escape_path_key)
+        self._asset_invariant_verifier = JsonAssetInvariantVerifier(
+            self._escape_path_key,
+            self._is_known_asset_text,
+        )
         if translate_notes:
             self._skip_fields.discard('note')
 
@@ -144,8 +243,9 @@ class JsonParser(BaseParser):
         unescaped = key.replace(self.PATH_DOT_ESCAPE_ESC, self.PATH_DOT_ESCAPE)
         return unescaped.replace(self.PATH_DOT_ESCAPE, '.')
     
-    def extract_text(self, file_path: str) -> List[Tuple[str, str]]:
+    def extract_text(self, file_path: str) -> List[Tuple[str, str, str]]:
         """Extract translatable text. Handles JSON, MV js/plugins.js, and locale files."""
+        self._known_asset_identifiers = self._get_known_asset_identifiers(file_path)
         with open(file_path, 'r', encoding='utf-8-sig') as f:
             content = f.read().strip()
             
@@ -158,8 +258,10 @@ class JsonParser(BaseParser):
         # Handle js/plugins.js
         is_js = file_path.lower().endswith('.js')
         is_main_plugins_js = is_js and os.path.basename(file_path).lower() == 'plugins.js'
+        self._plugin_metadata_store = self._build_plugin_metadata_store(file_path) if is_main_plugins_js else None
         
         self.extracted = []
+        self._current_file_basename = os.path.basename(file_path).lower()
         
         if is_js:
             if is_main_plugins_js:
@@ -177,6 +279,12 @@ class JsonParser(BaseParser):
                 self._extract_from_js_source(content)
                 return self.extracted
         else:
+            if not self._looks_like_json_document(content):
+                logger.info(
+                    "Skipping non-JSON sidecar file %s: content does not start with '{' or '['",
+                    file_path,
+                )
+                return []
             try:
                 data = json.loads(content)
             except json.JSONDecodeError as e:
@@ -188,6 +296,10 @@ class JsonParser(BaseParser):
             self._extract_from_locale(data)
         elif is_main_plugins_js:
              self._extract_from_plugins_js(data)
+        elif self._structured_extractor.supports_file(file_path):
+            self._structured_extractor.extract(file_path, data, self.extracted)
+            if self.translate_notes and not is_protected_structured_noop_file(file_path):
+                self._extract_structured_note_entries(data, "", self.extracted)
         else:
             self._walk(data, "")
         
@@ -197,32 +309,52 @@ class JsonParser(BaseParser):
         """Check if this is a locale file from DKTools or similar plugins."""
         # Normalize path separators and check if 'locales' folder is in path
         normalized = file_path.replace('\\', '/').lower()
-        return '/locales/' in normalized and file_path.lower().endswith('.json')
-    
-    def _extract_from_locale(self, data: dict):
-        """Extract text from locale files (key-value format)."""
-        if not isinstance(data, dict):
+        if '/locales/' in normalized and file_path.lower().endswith('.json'):
+            return True
+        return os.path.basename(file_path).lower() in self.LOCALE_LIKE_FILENAMES
+
+    def _extract_from_locale(self, data: Any, current_path: str = "") -> None:
+        """Extract text from locale-like files, supporting nested dict/list structures."""
+        if isinstance(data, dict):
+            for key, value in data.items():
+                safe_key = self._escape_path_key(str(key))
+                next_path = f"{current_path}.{safe_key}" if current_path else safe_key
+                self._extract_from_locale(value, next_path)
             return
-        
-        for key, value in data.items():
-            if not isinstance(value, str):
-                continue
-                
-            # Skip empty or whitespace-only values
-            text = value.strip()
-            if not text:
-                continue
-            
-            # Skip very short values (likely just symbols or single chars)
-            if len(text) <= 1:
-                continue
-                
-            # Skip technical strings (file paths, etc.)
-            if self._is_technical_string(text):
-                continue
-            
-            # The key is the path for locale files
-            self.extracted.append((key, value, "system"))
+
+        if isinstance(data, list):
+            for index, value in enumerate(data):
+                next_path = f"{current_path}.{index}" if current_path else str(index)
+                self._extract_from_locale(value, next_path)
+            return
+
+        if not isinstance(data, str):
+            return
+
+        text = data.strip()
+        if not text:
+            return
+
+        # Skip very short ASCII values (likely just symbols), but keep valid
+        # single-character localized entries such as CJK locale labels.
+        if len(text) <= 1 and text.isascii():
+            return
+
+        if self._contains_asset_reference(text):
+            return
+        if self._matches_known_asset_identifier(text):
+            return
+        if self._is_technical_string(text):
+            return
+
+        self.extracted.append((current_path, data, "system"))
+
+    def _looks_like_json_document(self, content: str) -> bool:
+        """Return True when a .json file appears to contain an object/array document."""
+        if not isinstance(content, str):
+            return False
+        stripped = content.lstrip("\ufeff \t\r\n")
+        return stripped.startswith(("{", "["))
 
     def _extract_from_plugins_js(self, data: List[Dict]):
         """Extract text from plugins.js using specialized parsers where available."""
@@ -237,8 +369,9 @@ class JsonParser(BaseParser):
             status = plugin.get('status', False)
             parameters = plugin.get('parameters', {})
             
-            # Skip disabled plugins? Ideally yes, but users might enable them later.
-            # Let's parse all.
+            # Skip known non-translatable plugins entirely
+            if self._is_non_translatable_plugin(name):
+                continue
             
             # Check for specialized parser
             specialized_parser = get_specialized_parser(name)
@@ -248,8 +381,473 @@ class JsonParser(BaseParser):
                 extracted_params = specialized_parser.extract_parameters(parameters, f"{i}.parameters")
                 self.extracted.extend(extracted_params)
             else:
-                # Fallback to generic walk for parameters
-                self._walk(parameters, f"{i}.parameters")
+                metadata = self._plugin_metadata_store.get(name) if self._plugin_metadata_store else None
+                if metadata:
+                    self._extract_plugin_parameters(parameters, f"{i}.parameters", metadata)
+                else:
+                    # Fallback to generic walk for parameters
+                    self._walk(parameters, f"{i}.parameters")
+
+    def _build_plugin_metadata_store(self, file_path: str) -> PluginMetadataStore | None:
+        """Create a metadata store for sibling js/plugins sources."""
+        plugins_dir = os.path.join(os.path.dirname(file_path), "plugins")
+        if not os.path.isdir(plugins_dir):
+            return None
+        return PluginMetadataStore(plugins_dir)
+
+    def _extract_plugin_parameters(
+        self,
+        parameters: Any,
+        base_path: str,
+        plugin_metadata: PluginFileMetadata,
+    ) -> None:
+        """Extract plugin parameters using plugin header metadata when available."""
+        if not isinstance(parameters, dict):
+            self._walk(parameters, base_path)
+            return
+
+        for key, value in parameters.items():
+            safe_key = self._escape_path_key(key)
+            param_path = f"{base_path}.{safe_key}"
+            param_metadata = plugin_metadata.get_param(key)
+            self._extract_plugin_parameter_value(value, param_path, key, param_metadata, plugin_metadata)
+
+    def _extract_plugin_parameter_value(
+        self,
+        value: Any,
+        current_path: str,
+        key: str,
+        param_metadata: PluginParameterMetadata | None,
+        plugin_metadata: PluginFileMetadata,
+    ) -> None:
+        """Recursively extract a plugin parameter value using optional metadata."""
+        parsed_json = self._parse_plugin_parameter_json(value)
+        if parsed_json is not None:
+            self._extract_plugin_parameter_container(parsed_json, f"{current_path}.@JSON", param_metadata, plugin_metadata)
+            return
+
+        if isinstance(value, str):
+            if self._should_extract_plugin_parameter_value(key, value, param_metadata, plugin_metadata):
+                self.extracted.append((current_path, value, "dialogue_block"))
+            return
+
+        if isinstance(value, (dict, list)):
+            self._extract_plugin_parameter_container(value, current_path, param_metadata, plugin_metadata)
+
+    def _extract_plugin_parameter_container(
+        self,
+        container: Any,
+        current_path: str,
+        container_metadata: PluginParameterMetadata | None,
+        plugin_metadata: PluginFileMetadata,
+    ) -> None:
+        """Recurse into parsed plugin parameter JSON containers."""
+        if isinstance(container, dict):
+            # Sound spec guard: skip dicts that look like audio objects ({name, volume/pitch/pan})
+            if self._is_sound_like_object(container):
+                return
+            struct_fields = plugin_metadata.get_struct_fields(container_metadata.struct_name() if container_metadata else None)
+            for key, value in container.items():
+                safe_key = self._escape_path_key(key)
+                nested_path = f"{current_path}.{safe_key}" if current_path else safe_key
+                nested_metadata = struct_fields.get(key) if struct_fields else None
+                self._extract_plugin_parameter_value(value, nested_path, key, nested_metadata, plugin_metadata)
+            return
+
+        if isinstance(container, list):
+            item_metadata = container_metadata.array_item_metadata() if container_metadata else None
+            for index, item in enumerate(container):
+                nested_path = f"{current_path}.{index}" if current_path else str(index)
+                if isinstance(item, str):
+                    parsed_item = self._parse_plugin_parameter_json(item)
+                    if parsed_item is not None:
+                        self._extract_plugin_parameter_container(parsed_item, f"{nested_path}.@JSON", item_metadata, plugin_metadata)
+                        continue
+                    item_key = item_metadata.name if item_metadata else str(index)
+                    if self._should_extract_plugin_parameter_value(item_key, item, item_metadata, plugin_metadata):
+                        self.extracted.append((nested_path, item, "dialogue_block"))
+                    continue
+                self._extract_plugin_parameter_container(item, nested_path, item_metadata, plugin_metadata)
+
+    def _parse_plugin_parameter_json(self, value: Any) -> Any | None:
+        """Parse nested JSON stored as a plugin parameter string."""
+        if not isinstance(value, str):
+            return None
+
+        stripped = value.strip()
+        if not stripped or len(stripped) <= 2:
+            return None
+
+        if stripped.startswith(("{", "[")):
+            try:
+                return json.loads(stripped)
+            except (json.JSONDecodeError, TypeError):
+                return None
+
+        if stripped.startswith('"') and stripped.endswith('"'):
+            try:
+                nested = json.loads(stripped)
+            except (json.JSONDecodeError, TypeError):
+                return None
+            if isinstance(nested, str) and nested.strip().startswith(("{", "[")):
+                try:
+                    return json.loads(nested)
+                except (json.JSONDecodeError, TypeError):
+                    return None
+        return None
+
+    def _should_extract_plugin_parameter_value(
+        self,
+        key: str,
+        value: str,
+        param_metadata: PluginParameterMetadata | None,
+        plugin_metadata: PluginFileMetadata | None = None,
+    ) -> bool:
+        """Decide whether a plugin parameter string is safe and useful to translate."""
+        if not isinstance(value, str) or not value.strip():
+            return False
+
+        if self._matches_known_asset_identifier(value):
+            return False
+
+        if param_metadata and self._is_metadata_defined_technical_param(param_metadata, key, value, plugin_metadata):
+            return False
+
+        if param_metadata and self._has_metadata_defined_text_intent(param_metadata):
+            hints = param_metadata.combined_hints()
+            if (
+                self._metadata_hints_include_asset_context(hints)
+                and self._looks_like_asset_name(value)
+            ):
+                return False
+            if self._contains_asset_reference(value) or self._is_technical_string(value):
+                return False
+            if not self.is_safe_to_translate(value, is_dialogue=True):
+                return False
+            if ' ' in value or any(ord(char) > 127 for char in value):
+                return True
+            hints = param_metadata.combined_hints()
+            return any(marker in hints for marker in self.PLUGIN_METADATA_TEXT_HINTS) or '%' in value
+
+        return self._should_extract_generic_plugin_parameter(key, value)
+
+    def _should_extract_generic_plugin_parameter(self, key: str, value: str) -> bool:
+        """Fallback heuristic for plugin parameters when source metadata is unavailable."""
+        key_lower = key.lower()
+        if self._contains_asset_reference(value):
+            return False
+        if self._matches_known_asset_identifier(value):
+            return False
+
+        if self._is_audio_key_context(key) and self._looks_like_audio_parameter_value(value):
+            return False
+
+        if self._is_input_binding_key_context(key) and self._are_input_binding_tokens(value):
+            return False
+
+        if 'font' in key_lower:
+            if len(value) < 40 and not any(ord(c) > 127 for c in value):
+                if value.strip().isalpha() or value.replace(' ', '').isalnum() or ',' in value or '.ttf' in value.lower():
+                    return False
+
+        if any(hint in key_lower for hint in self.ASSET_KEY_HINTS) and self._looks_like_asset_name(value):
+            return False
+
+        if any(hint in key_lower for hint in self.NON_TRANSLATABLE_KEY_HINTS) or key_lower in self.NON_TRANSLATABLE_EXACT_KEYS:
+            if len(value) < 60 and '\n' not in value:
+                return False
+
+        audio_key_patterns = [
+            r'(?i)^(?:se|me|bgm|bgs|sound|audio)_?name$',
+            r'(?i)^(?:se|me|bgm|bgs|sound|audio)$',
+            r'[a-z](?:Se|Me|Bgm|Bgs|Sound|Audio)(?:Name)?$',
+            r'_(?:se|me|bgm|bgs|sound|audio)(?:_name)?$',
+        ]
+        if any(re.search(pat, key) for pat in audio_key_patterns):
+            if len(value) < 60 and '\n' not in value:
+                return False
+
+
+        if not self.is_safe_to_translate(value, is_dialogue=(key != 'note')):
+            return False
+        if self._is_technical_string(value):
+            return False
+        if ' ' in value or any(ord(c) > 127 for c in value):
+            return True
+        if any(marker in key_lower for marker in self.TEXT_KEY_INDICATORS):
+            return True
+        return any(key_lower.endswith(suffix) for suffix in self.TEXT_KEY_SUFFIXES)
+
+    def _has_metadata_defined_text_intent(self, param_metadata: PluginParameterMetadata) -> bool:
+        """Return True when plugin metadata strongly suggests player-visible text."""
+        hints = param_metadata.combined_hints()
+        if param_metadata.base_type() not in ("", "multiline_string", "note", "string"):
+            return False
+        return any(marker in hints for marker in self.PLUGIN_METADATA_TEXT_HINTS)
+
+    def _is_metadata_defined_technical_param(
+        self,
+        param_metadata: PluginParameterMetadata,
+        key: str,
+        value: str,
+        plugin_metadata: PluginFileMetadata | None = None,
+    ) -> bool:
+        """Return True when plugin metadata indicates this value is technical."""
+        if self._has_technical_key_hint(key):
+            return True
+
+        if self._looks_like_input_binding_param(key, value, param_metadata):
+            return True
+
+        if plugin_metadata and self._looks_like_metadata_defined_registry_label(key, value, plugin_metadata):
+            return True
+
+        base_type = param_metadata.base_type()
+        if base_type == "note":
+            return not self._has_metadata_defined_text_intent(param_metadata)
+        if base_type in self.PLUGIN_METADATA_TECHNICAL_TYPES:
+            return True
+        if param_metadata.dir_path or param_metadata.require:
+            return True
+        if self._looks_like_metadata_defined_asset_registry(value, param_metadata):
+            return True
+
+        if self._is_audio_key_context(key) and self._looks_like_audio_parameter_value(value):
+            return True
+
+        hints = param_metadata.combined_hints()
+        key_lower = key.lower()
+        if self._has_metadata_defined_text_intent(param_metadata):
+            return False
+
+        if (
+            base_type in ("", "multiline_string", "string")
+            and (
+                self._metadata_hints_include_asset_context(hints)
+                or any(marker in key_lower for marker in self.ASSET_KEY_HINTS)
+            )
+            and self._looks_like_asset_name(value)
+        ):
+            return True
+        return False
+
+    def _looks_like_metadata_defined_registry_label(
+        self,
+        key: str,
+        value: str,
+        plugin_metadata: PluginFileMetadata,
+    ) -> bool:
+        """Return True when a plugin string acts as an option-registry label."""
+        key_tokens = self._tokenize_key_hints(key)
+        if "order" not in key_tokens:
+            return False
+
+        stripped = self._strip_rpgm_text_codes(value).strip()
+        if not stripped or "\n" in stripped:
+            return False
+
+        if "category" in key_tokens:
+            return re.fullmatch(r"[A-Za-z_][A-Za-z0-9_ ]*", stripped) is not None
+
+        option_sets = self._collect_plugin_option_sets(plugin_metadata, key_tokens)
+        if not option_sets:
+            return False
+
+        normalized = stripped.lower()
+        return any(normalized in option_set for option_set in option_sets)
+
+    def _collect_plugin_option_sets(
+        self,
+        plugin_metadata: PluginFileMetadata,
+        key_tokens: Set[str],
+    ) -> list[Set[str]]:
+        """Collect option sets from related plugin metadata fields."""
+        option_sets: list[Set[str]] = []
+
+        def maybe_add_options(param: PluginParameterMetadata) -> None:
+            if not param.options:
+                return
+            name_tokens = self._tokenize_key_hints(param.name)
+            if not name_tokens or not (name_tokens & key_tokens):
+                return
+            normalized_options = {option.strip().lower() for option in param.options if option.strip()}
+            if normalized_options:
+                option_sets.append(normalized_options)
+
+        for param in plugin_metadata.params.values():
+            maybe_add_options(param)
+        for fields in plugin_metadata.structs.values():
+            for param in fields.values():
+                maybe_add_options(param)
+        return option_sets
+
+    def _strip_rpgm_text_codes(self, text: str) -> str:
+        """Remove common RPG Maker text codes for technical comparisons."""
+        if not isinstance(text, str):
+            return ""
+        stripped = re.sub(r"\\[A-Za-z]+\[[^\]]*\]", "", text)
+        stripped = re.sub(r"\\[{}]", "", stripped)
+        return stripped
+
+    def _is_input_binding_key_context(self, key: str) -> bool:
+        """Return True when key tokens suggest an input binding, not UI text."""
+        tokens = self._tokenize_key_hints(key)
+        if not tokens:
+            return False
+        if not ({"button", "key", "input", "trigger", "hotkey"} & tokens):
+            return False
+        if {"text", "label", "name", "title", "caption"} & tokens:
+            return False
+        return True
+
+    def _are_input_binding_tokens(self, value: str) -> bool:
+        """Return True when a value is a key-binding token or token list."""
+        if not isinstance(value, str):
+            return False
+        cleaned = value.strip().strip('"\'')
+        if not cleaned or '\n' in cleaned:
+            return False
+        parts = [part for part in cleaned.lower().split() if part]
+        if not parts:
+            return False
+        for part in parts:
+            if part in self.INPUT_BINDING_TOKENS:
+                continue
+            if len(part) == 1 and part.isalpha():
+                continue
+            return False
+        return True
+
+    def _looks_like_input_binding_param(
+        self,
+        key: str,
+        value: str,
+        param_metadata: PluginParameterMetadata | None,
+    ) -> bool:
+        """Return True when plugin metadata indicates an input-binding value."""
+        if not self._is_input_binding_key_context(key):
+            return False
+        if self._are_input_binding_tokens(value):
+            return True
+        if not param_metadata:
+            return False
+
+        default_value = param_metadata.default_value.strip().strip('"\'')
+        if not self._are_input_binding_tokens(default_value):
+            return False
+
+        combined = " ".join(
+            part for part in [param_metadata.name, param_metadata.text, param_metadata.description] if part
+        ).lower()
+        return 'button' in combined or 'key' in combined or 'input' in combined
+
+    def _metadata_hints_include_asset_context(self, hints: str) -> bool:
+        """Return True when metadata hints clearly indicate asset/file context."""
+        if not isinstance(hints, str) or not hints:
+            return False
+
+        normalized_hints = hints.lower()
+        hint_tokens = {token for token in re.split(r"[^a-z0-9]+", normalized_hints) if token}
+
+        for marker in self.PLUGIN_METADATA_ASSET_CONTEXT_HINTS:
+            marker_lower = marker.lower()
+            if not marker_lower:
+                continue
+            if " " in marker_lower:
+                if marker_lower in normalized_hints:
+                    return True
+                continue
+            if len(marker_lower) <= 2:
+                if marker_lower in hint_tokens:
+                    return True
+                continue
+            if marker_lower in hint_tokens or marker_lower in normalized_hints:
+                return True
+        return False
+
+    def _tokenize_key_hints(self, key: str) -> Set[str]:
+        """Tokenize plugin keys to robustly detect technical hint words."""
+        if not isinstance(key, str) or not key:
+            return set()
+        normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", key)
+        tokens = [token for token in re.split(r"[^A-Za-z0-9]+", normalized.lower()) if token]
+        return set(tokens)
+
+    def _has_technical_key_hint(self, key: str) -> bool:
+        """Return True when key tokens include explicit technical markers."""
+        tokens = self._tokenize_key_hints(key)
+        if not tokens:
+            return False
+
+        exact_hints = {hint.lower() for hint in self.NON_TRANSLATABLE_EXACT_KEYS}
+        tech_hints = {hint.lower() for hint in self.NON_TRANSLATABLE_KEY_HINTS}
+
+        if tokens & exact_hints:
+            return True
+        if tokens & tech_hints:
+            return True
+        return False
+
+    def _is_audio_key_context(self, key: str) -> bool:
+        """Return True when key tokens indicate audio/SE style parameters."""
+        tokens = self._tokenize_key_hints(key)
+        if not tokens:
+            return False
+        audio_tokens = {"audio", "sound", "voice", "se", "me", "bgm", "bgs"}
+        if tokens & audio_tokens:
+            return True
+        joined = "_".join(sorted(tokens))
+        return "soundeffect" in joined or "sound_effect" in joined
+
+    def _looks_like_audio_parameter_value(self, value: str) -> bool:
+        """Return True when value matches common RPG Maker audio parameter forms."""
+        if not isinstance(value, str):
+            return False
+        cleaned = value.strip().strip('"\'')
+        if not cleaned or '\n' in cleaned:
+            return False
+
+        # Common plugin SE format: "Name,volume,pitch" or "Name,volume,pitch,pan"
+        if re.fullmatch(r"[^,\n\r]{1,80},\s*-?\d{1,3},\s*-?\d{1,3}(?:,\s*-?\d{1,3})?", cleaned):
+            return True
+
+        if self._looks_like_asset_name(cleaned):
+            return True
+        if self._contains_asset_reference(cleaned):
+            return True
+        return self._matches_known_asset_identifier(cleaned)
+
+    def _looks_like_metadata_defined_asset_registry(
+        self,
+        value: str,
+        param_metadata: PluginParameterMetadata,
+    ) -> bool:
+        """Detect combo/string parameters that actually contain asset registries."""
+        hints = param_metadata.combined_hints()
+        if not hints or self._has_metadata_defined_text_intent(param_metadata):
+            return False
+
+        has_asset_context = self._metadata_hints_include_asset_context(hints)
+        has_asset_list_context = any(marker in hints for marker in self.PLUGIN_METADATA_ASSET_LIST_HINTS)
+        if not has_asset_context and not has_asset_list_context:
+            return False
+
+        cleaned_value = value.strip()
+        lower_value = cleaned_value.lower()
+        if param_metadata.base_type() in {"combo", "select"}:
+            return True
+        if lower_value.startswith("custom:"):
+            return True
+        if cleaned_value in {"all", "important", "none"}:
+            return True
+        if "," in cleaned_value:
+            parts = [part.strip() for part in cleaned_value.split(",") if part.strip()]
+            if parts and all(
+                self._looks_like_asset_name(part) or part.lower() in {"bgm", "bgs", "me", "se"}
+                for part in parts
+            ):
+                return True
+        return False
 
     def _walk(self, data: Any, current_path: str):
         """Recursively walk JSON structure to find translatable text."""
@@ -286,14 +884,14 @@ class JsonParser(BaseParser):
         pattern_block = r'<(?P<tag>\w*(?:Description|Text|Message|Desc|Name)\w*)>(?P<content>.*?)</(?P=tag)>'
         for i, match in enumerate(re.finditer(pattern_block, note, re.IGNORECASE | re.DOTALL)):
             content = match.group('content').strip()
-            if len(content) > 1 and self.is_safe_to_translate(content, is_dialogue=True):
+            if len(content) > 1 and self._is_extractable_runtime_text(content, is_dialogue=True):
                 results.append((f"{base_path}.@NOTEBLOCK_{i}", content))
                 
         # Pattern 2: Inline tags (e.g. <Desc: text>)
         pattern_inline = r'<(?P<tag>\w*(?:_name|_desc|_text|_msg|Name|Desc|Text|Message)):(?P<content>.*?)>'
         for i, match in enumerate(re.finditer(pattern_inline, note, re.IGNORECASE)):
             content = match.group('content').strip()
-            if len(content) > 1 and self.is_safe_to_translate(content, is_dialogue=True):
+            if len(content) > 1 and self._is_extractable_runtime_text(content, is_dialogue=True):
                 results.append((f"{base_path}.@NOTEINLINE_{i}", content))
         return results
 
@@ -326,10 +924,120 @@ class JsonParser(BaseParser):
             
         self._set_value_at_path(data, base_path, new_note)
 
+    def _is_non_translatable_plugin(self, plugin_name: str) -> bool:
+        """Check if a plugin is known to have entirely non-translatable parameters."""
+        if not plugin_name:
+            return False
+        if plugin_name in self.NON_TRANSLATABLE_PLUGINS:
+            return True
+        return any(p.search(plugin_name) for p in self.NON_TRANSLATABLE_PLUGIN_PATTERNS)
+
+    def _should_skip_name_field(self, current_path: str) -> bool:
+        """Check if a 'name' field should be skipped based on file type and path context.
+        
+        Event names in Maps, CommonEvents, and Troops are editor-only labels
+        that should NOT be translated. Plugins reference events by name,
+        so translating these causes fatal game errors.
+        """
+        basename = getattr(self, '_current_file_basename', '')
+        
+        # Map files: skip event names (path pattern: events.N)
+        if basename.startswith('map') and basename.endswith('.json'):
+            if re.match(r'^events\.\d+$', current_path):
+                return True
+        
+        # CommonEvents and Troops: skip top-level item names (path pattern: N)
+        if basename in ('commonevents.json', 'troops.json'):
+            if re.match(r'^\d+$', current_path):
+                return True
+        
+        return False
+
+    def _is_asset_context_path(self, path: str) -> bool:
+        """Return True when a JSON path strongly suggests asset/file-name context."""
+        if not isinstance(path, str) or not path:
+            return False
+
+        normalized = path.replace(self.PATH_DOT_ESCAPE_ESC, self.PATH_DOT_ESCAPE)
+        normalized = normalized.replace(self.PATH_DOT_ESCAPE, '.')
+        normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1.\2", normalized)
+        tokens = [token for token in re.split(r"[^a-zA-Z0-9]+", normalized.lower()) if token]
+        if not tokens:
+            return False
+
+        for token in tokens:
+            if token in self._ASSET_CONTEXT_PATH_HINTS:
+                return True
+            if len(token) <= 2:
+                continue
+            for hint in self._ASSET_CONTEXT_PATH_HINTS:
+                if len(hint) <= 2:
+                    continue
+                if hint in token:
+                    return True
+        return False
+
+    def _should_extract_name(self, current_path: str, value: Any, is_plugin_param: bool) -> bool:
+        """Determine if a 'name' field value should be extracted for translation.
+        
+        Context-aware filtering:
+        - Maps/CommonEvents/Troops event names: SKIP (editor-only)
+        - Plugin parameter 'name': strict heuristics (usually identifiers)
+        - Database file 'name' (Actors, Items, etc.): EXTRACT (player-visible)
+        """
+        # 1. Skip event-level names in Maps/CommonEvents/Troops
+        if self._should_skip_name_field(current_path):
+            return False
+
+        # 1.5. Never translate name-like values inside asset/audio contexts.
+        # This blocks extensionless identifiers such as Battle1, Town Theme, etc.
+        if self._is_asset_context_path(current_path):
+            return False
+        
+        # 2. In plugin parameter context, 'name' is usually an identifier (fog_shadow_w, NEXT)
+        #    Only extract if value clearly looks like display text
+        if is_plugin_param:
+            if not isinstance(value, str) or not value.strip():
+                return False
+            v = value.strip()
+            if self._matches_known_asset_identifier(v):
+                return False
+            # Require spaces (sentence-like) or non-ASCII (localized text) for extraction
+            if not ((' ' in v and len(v) > 5) or any(ord(c) > 127 for c in v)):
+                return False
+            return (self.is_safe_to_translate(v, is_dialogue=True)
+                    and not self._is_technical_string(v)
+                    and not self._contains_asset_reference(v))
+
+        if getattr(self, '_current_file_basename', '') in self.LEGACY_DATABASE_NAME_FILES:
+            if not isinstance(value, str) or not value.strip():
+                return False
+            v = value.strip()
+            if self._contains_asset_reference(v):
+                return False
+            if self._matches_known_asset_identifier(v):
+                return False
+            if self._is_technical_string(v):
+                return False
+            return True
+        
+        if not isinstance(value, str) or not value.strip():
+            return False
+
+        v = value.strip()
+        if self._matches_known_asset_identifier(v):
+            return False
+        if self._contains_asset_reference(v) or self._is_technical_string(v):
+            return False
+
+        has_non_ascii = any(ord(char) > 127 for char in v)
+        has_sentence_punctuation = any(mark in v for mark in ".!?;:ã€‚ï¼ï¼Ÿ")
+        return has_non_ascii or has_sentence_punctuation or (' ' in v and len(v) > 2)
+
     def _process_dict(self, data: dict, current_path: str):
         """Process a dictionary node."""
         # Heuristic: If this dict looks like a BGM/SE/Sound object, skip its 'name'
-        is_sound_obj = all(k in data for k in ['name', 'volume', 'pitch', 'pan'])
+        is_sound_obj = self._is_sound_like_object(data) or self._is_asset_context_path(current_path)
         
         for key, value in data.items():
             safe_key = self._escape_path_key(key)
@@ -347,7 +1055,7 @@ class JsonParser(BaseParser):
             # Keys like "drawGameTitle:func", "BattleSystem:eval" contain JS code
             key_lower = key.lower()
             if any(key_lower.endswith(suffix) for suffix in self.CODE_KEY_SUFFIXES):
-                continue  # JavaScript code — NEVER translate
+                continue  # JavaScript code â€” NEVER translate
             
             # 1. RECURSIVE JSON CHECK
             if isinstance(value, str) and (value.startswith('{') or value.startswith('[')) and len(value) > 2:
@@ -368,40 +1076,36 @@ class JsonParser(BaseParser):
             is_plugin_param = ".parameters" in new_path or ".@JSON" in new_path or "parameters" in current_path
             
             if key in self.DATABASE_FIELDS or (key == 'name' and not is_sound_obj):
-                should_extract = True
+                if key == 'name':
+                    # Context-aware name filtering: skip event names, apply heuristics for plugins
+                    if self._should_extract_name(current_path, value, is_plugin_param):
+                        should_extract = True
+                    else:
+                        # Not extracting this name, but still recurse into nested structures
+                        if not isinstance(value, str):
+                            self._walk(value, new_path)
+                        continue
+                elif isinstance(value, str):
+                    should_extract = True
+                else:
+                    self._walk(value, new_path)
+                    continue
             elif is_plugin_param and isinstance(value, str):
-                 # Skip asset identifiers in plugin params (file names / image lists)
-                 key_lower = key.lower()
-                 if 'font' in key_lower:
-                     # Heuristics: if it has 'name', 'face', 'file', or just 'font', it's usually CSS font identifier.
-                     # But some plugins use 'font' in description keys.
-                     if len(value) < 40 and not any(ord(c) > 127 for c in value):
-                         if value.strip().isalpha() or value.replace(' ', '').isalnum() or ',' in value or '.ttf' in value.lower():
-                             continue
-                             
-                 if any(hint in key_lower for hint in self.ASSET_KEY_HINTS) and self._looks_like_asset_name(value):
-                     continue
-                     
-                 # Skip technical strings defined explicitly (like symbols, audio files, eval code)
-                 if any(hint in key_lower for hint in self.NON_TRANSLATABLE_KEY_HINTS) or key_lower in self.NON_TRANSLATABLE_EXACT_KEYS:
-                     # Exception: If value is long and has spaces, it might genuinely be a text despite key name
-                     # E.g. a key named 'condition text'
-                     if len(value) < 60 and '\n' not in value:
-                         continue
-                 # Heuristics for loosely structured plugin parameters
-                 if self.is_safe_to_translate(value, is_dialogue=(key != 'note')):
-                     if not self._is_technical_string(value):
-                        # Extract if it contains spaces (likely sentence) or non-ascii (likely localized)
-                        if ' ' in value or any(ord(c) > 127 for c in value):
-                             should_extract = True
-                        # Relaxed check: keys containing text-related indicators
-                        elif any(k in key_lower for k in self.TEXT_KEY_INDICATORS):
-                             should_extract = True
-                        elif any(key_lower.endswith(s) for s in self.TEXT_KEY_SUFFIXES):
-                             should_extract = True
+                 if self._should_extract_generic_plugin_parameter(key, value):
+                     should_extract = True
 
             if should_extract:
+                if not isinstance(value, str):
+                    self._walk(value, new_path)
+                    continue
+
                 context_tag = "dialogue_block" if is_plugin_param or (key in ['message1', 'message2', 'message3', 'message4', 'help', 'description']) else "name"
+                if self._contains_asset_reference(value) or self._is_technical_string(value):
+                    continue
+                if self._matches_known_asset_identifier(value):
+                    continue
+                if not self.is_safe_to_translate(value, is_dialogue=(context_tag != "name")):
+                    continue
                 if key in ['name', 'nickname', 'gameTitle', 'title', 'currencyUnit']:
                     context_tag = "name"
                 self.extracted.append((new_path, value, context_tag))
@@ -498,7 +1202,7 @@ class JsonParser(BaseParser):
                         nested_str = json.loads(item)
                         if isinstance(nested_str, str):
                             is_plugin_param = ".parameters" in new_path or ".@JSON" in new_path or "parameters" in current_path
-                            if is_plugin_param and self.is_safe_to_translate(nested_str, is_dialogue=True) and not self._is_technical_string(nested_str):
+                            if is_plugin_param and self._is_extractable_runtime_text(nested_str, is_dialogue=True):
                                 if ' ' in nested_str or any(ord(c) > 127 for c in nested_str):
                                     self.extracted.append((f"{new_path}.@JSON", nested_str, "dialogue_block"))
                                     i += 1
@@ -510,11 +1214,9 @@ class JsonParser(BaseParser):
                  is_plugin_param = ".parameters" in new_path or ".@JSON" in new_path or "parameters" in current_path
                  if is_plugin_param:
                      should_extract = False
-                     ext_test = item.strip('"\'').lower()
-                     if not ext_test.endswith(('.png', '.jpg', '.ogg', '.m4a', '.webm', '.js')):
-                         if self.is_safe_to_translate(item, is_dialogue=True) and not self._is_technical_string(item):
-                             if ' ' in item or any(ord(c) > 127 for c in item):
-                                 should_extract = True
+                     if self._is_extractable_runtime_text(item, is_dialogue=True):
+                         if ' ' in item or any(ord(c) > 127 for c in item):
+                             should_extract = True
                      if should_extract:
                          self.extracted.append((new_path, item, "dialogue_block"))
                          i += 1
@@ -526,52 +1228,62 @@ class JsonParser(BaseParser):
 
     def _process_event_command(self, cmd: dict, path: str):
         """Process an RPG Maker event command for translatable text."""
+        self._process_event_command_into(cmd, path, None)
+
+    def _process_event_command_into(
+        self,
+        cmd: dict,
+        path: str,
+        sink: List[Tuple[str, str, str]] | None,
+    ) -> None:
+        """Process an RPG Maker event command into either the parser sink or a custom sink."""
         code = cmd.get("code")
         params = cmd.get("parameters", [])
+        target = sink if sink is not None else self.extracted
         
         if code not in self.TEXT_EVENT_CODES:
             return
         
         # Show Text (401) / Scroll Text (405) / Show Text Header (101 - MZ Speaker Name)
         if code in [401, 405]:
-            if len(params) > 0 and self.is_safe_to_translate(params[0], is_dialogue=True):
-                self.extracted.append((f"{path}.parameters.0", params[0], "message_dialogue"))
+            if len(params) > 0 and self._is_extractable_runtime_text(params[0], is_dialogue=True):
+                target.append((f"{path}.parameters.0", params[0], "message_dialogue"))
 
         elif code == 101:
             # Code 101: Show Text Header.
             # in MZ: [faceName, faceIndex, background, positionType, speakerName]
             if len(params) >= 5:
                 speaker_name = params[4]
-                if self.is_safe_to_translate(speaker_name, is_dialogue=True):
-                    self.extracted.append((f"{path}.parameters.4", speaker_name, "name"))
+                if self._is_extractable_runtime_text(speaker_name, is_dialogue=True):
+                    target.append((f"{path}.parameters.4", speaker_name, "name"))
         
         # Show Scrolling Text Header (105)
         # Format: [speed, noFastForward] - no text here, but some plugins add title
         elif code == 105:
             # Standard code 105 doesn't have text, but check for extended params
             if len(params) >= 3 and isinstance(params[2], str):
-                if self.is_safe_to_translate(params[2], is_dialogue=True):
-                    self.extracted.append((f"{path}.parameters.2", params[2], "system"))
+                if self._is_extractable_runtime_text(params[2], is_dialogue=True):
+                    target.append((f"{path}.parameters.2", params[2], "system"))
         
         # Show Choices (102)
         elif code == 102:
             choices = params[0] if len(params) > 0 else []
             if isinstance(choices, list):
                 for c_i, choice in enumerate(choices):
-                    if self.is_safe_to_translate(choice, is_dialogue=True):
-                        self.extracted.append((f"{path}.parameters.0.{c_i}", choice, "choice"))
+                    if self._is_extractable_runtime_text(choice, is_dialogue=True):
+                        target.append((f"{path}.parameters.0.{c_i}", choice, "choice"))
                         
         # When [Choice] (402) - Translate branch label
         elif code == 402:
             if len(params) > 1 and isinstance(params[1], str):
-                if self.is_safe_to_translate(params[1], is_dialogue=True):
-                    self.extracted.append((f"{path}.parameters.1", params[1], "choice"))
+                if self._is_extractable_runtime_text(params[1], is_dialogue=True):
+                    target.append((f"{path}.parameters.1", params[1], "choice"))
 
         # Label (118) / Jump to Label (119)
         elif code in [118, 119]:
             if len(params) > 0 and isinstance(params[0], str):
-                if self.is_safe_to_translate(params[0], is_dialogue=True):
-                    self.extracted.append((f"{path}.parameters.0", params[0], "system"))
+                if self._is_extractable_runtime_text(params[0], is_dialogue=True):
+                    target.append((f"{path}.parameters.0", params[0], "system"))
                     
         # Control Variables (122) - Operand Script
         elif code == 122:
@@ -579,48 +1291,42 @@ class JsonParser(BaseParser):
                 script_text = params[4]
                 tokens = self.js_tokenizer.extract_strings(script_text)
                 for line_idx, char_idx, quote_char, token_str in tokens:
-                    if self.is_safe_to_translate(token_str):
-                        self.extracted.append((f"{path}.parameters.4.@JS{char_idx}", token_str, "script"))
+                    if self._is_extractable_runtime_text(token_str, is_dialogue=True):
+                        target.append((f"{path}.parameters.4.@JS{char_idx}", token_str, "script"))
         
         # Comment (108/408) - Can contain plugin commands with text
         elif code in [108, 408] and self.translate_comments:
             if len(params) > 0 and isinstance(params[0], str):
                 text = params[0].strip()
-                # 1. Must be safe to translate
-                if not self.is_safe_to_translate(text):
+                if not self.looks_like_translatable_comment(text):
                     return
-                    
-                # 2. Only extract if it looks like actual text (not pure code)
-                if text and not text.startswith('<') and not text.startswith('::'):
-                    # Heuristic: contains spaces and no special plugin markers, or contains non-ascii (e.g. Japanese)
-                    if ' ' in text or len(text) > 20 or any(ord(c) > 127 for c in text):
-                        self.extracted.append((f"{path}.parameters.0", params[0], "comment"))
+                if not self._is_extractable_runtime_text(text, is_dialogue=True):
+                    return
+                target.append((f"{path}.parameters.0", params[0], "comment"))
         
         elif code in [320, 324, 325]:
-            if len(params) > 1 and self.is_safe_to_translate(params[1]):
-                self.extracted.append((f"{path}.parameters.1", params[1], "name"))
+            if len(params) > 1 and self._is_extractable_runtime_text(params[1], is_dialogue=True):
+                target.append((f"{path}.parameters.1", params[1], "name"))
         
         # Plugin Command MV (356) - params[0] is command string
         elif code == 356:
             if len(params) > 0 and isinstance(params[0], str):
-                cmd_text = params[0]
-                # Plugin commands often have embedded filenames. 
-                # IF it looks like a path/filename, skip it entirely.
-                if not self.is_safe_to_translate(cmd_text):
-                    return
-
-                # Extract if it seems to contain dialogue (quotes, long text)
-                if '"' in cmd_text or len(cmd_text) > 50:
-                    self.extracted.append((f"{path}.parameters.0", cmd_text, "dialogue_block"))
+                self._extract_mv_plugin_command_text(params[0], path, target)
         
         # Plugin Command MZ (357) - structured differently
         elif code == 357:
             # MZ plugin commands have structured params, look for 'text' fields
             if len(params) >= 4:
                 # params format: [pluginName, commandName, commandText, {args}]
+                plugin_name = params[0] if isinstance(params[0], str) else ""
+
+                # Skip known non-translatable plugins (particle effects, etc.)
+                if self._is_non_translatable_plugin(plugin_name):
+                    return
+
                 # Check commandText
-                if self.is_safe_to_translate(params[2]):
-                    self.extracted.append((f"{path}.parameters.2", params[2], "dialogue_block"))
+                if isinstance(params[2], str) and self._is_extractable_runtime_text(params[2], is_dialogue=True):
+                    target.append((f"{path}.parameters.2", params[2], "dialogue_block"))
                     
                 # Also check args dict for common text fields
                 if len(params) > 3 and isinstance(params[3], dict):
@@ -639,6 +1345,16 @@ class JsonParser(BaseParser):
         Uses JSStringTokenizer to extract individual translatable string literals
         from the merged JavaScript code, instead of fragile regex patterns.
         """
+        self._process_script_block_into(commands, list_path, start_index, None)
+
+    def _process_script_block_into(
+        self,
+        commands: list,
+        list_path: str,
+        start_index: int,
+        sink: List[Tuple[str, str, str]] | None,
+    ) -> None:
+        """Process a merged script block into either the parser sink or a custom sink."""
         # Merge all script lines
         lines = []
         for cmd in commands:
@@ -654,13 +1370,14 @@ class JsonParser(BaseParser):
             return
         
         line_count = len(commands) - 1  # number of 655 continuation lines
-        base_path = f"{list_path}.{start_index}"
+        base_path = f"{list_path}.{start_index}" if list_path else str(start_index)
+        target = sink if sink is not None else self.extracted
         
         # Use JSStringTokenizer to find all translatable strings
         strings = self._js_tokenizer.extract_translatable_strings(merged)
         
         for idx, (start, end, value, quote) in enumerate(strings):
-            if not value.strip() or not self.is_safe_to_translate(value):
+            if not value.strip() or not self._is_extractable_runtime_text(value, is_dialogue=True):
                 continue
                 
             # STRICT HEURISTIC FOR SCRIPT STRINGS:
@@ -672,15 +1389,12 @@ class JsonParser(BaseParser):
             if not ((has_spaces and len(value.strip()) > 3) or has_non_ascii):
                 continue
             
-            if self._is_technical_string(value):
-                continue
-            
             if line_count > 0:
                 path = f"{base_path}.@SCRIPTMERGE{line_count}.@JS{idx}"
             else:
                 path = f"{base_path}.parameters.0.@JS{idx}"
             
-            self.extracted.append((path, value, "dialogue_block"))
+            target.append((path, value, "dialogue_block"))
 
     def _process_mz_plugin_block(self, commands: list, list_path: str, start_index: int):
         """
@@ -689,15 +1403,32 @@ class JsonParser(BaseParser):
         The first command (357) is processed normally. Continuation lines (657)
         may contain additional text parameters.
         """
+        self._process_mz_plugin_block_into(commands, list_path, start_index, None)
+
+    def _process_mz_plugin_block_into(
+        self,
+        commands: list,
+        list_path: str,
+        start_index: int,
+        sink: List[Tuple[str, str, str]] | None,
+    ) -> None:
+        """Process an MZ plugin command block into either the parser sink or a custom sink."""
         first = commands[0]
-        base_path = f"{list_path}.{start_index}"
+        base_path = f"{list_path}.{start_index}" if list_path else str(start_index)
+        target = sink if sink is not None else self.extracted
+        
+        # Skip known non-translatable plugins (particle effects, etc.)
+        first_params = first.get("parameters", [])
+        plugin_name = first_params[0] if first_params and isinstance(first_params[0], str) else ""
+        if self._is_non_translatable_plugin(plugin_name):
+            return
         
         # Process the first 357 command normally
-        self._process_event_command(first, base_path)
+        self._process_event_command_into(first, base_path, target)
         
         # Process 657 continuation lines
         for j, cmd in enumerate(commands[1:], 1):
-            cmd_path = f"{list_path}.{start_index + j}"
+            cmd_path = f"{list_path}.{start_index + j}" if list_path else str(start_index + j)
             params = cmd.get("parameters", [])
             
             # 657 can carry additional text args or structured data
@@ -706,29 +1437,154 @@ class JsonParser(BaseParser):
             
             # If first param is a string, check if translatable
             if isinstance(params[0], str):
-                if self.is_safe_to_translate(params[0], is_dialogue=True):
-                    self.extracted.append((f"{cmd_path}.parameters.0", params[0], "dialogue_block"))
+                if self._is_extractable_runtime_text(params[0], is_dialogue=True):
+                    target.append((f"{cmd_path}.parameters.0", params[0], "dialogue_block"))
             
             # If there's a dict arg (like 357's structured params), walk it
             for p_idx, param in enumerate(params):
                 if isinstance(param, dict):
                     self._walk(param, f"{cmd_path}.parameters.{p_idx}")
 
+    def _extract_mv_plugin_command_text(
+        self,
+        command_text: str,
+        path: str,
+        sink: List[Tuple[str, str, str]] | None = None,
+    ) -> None:
+        """
+        Extract only quoted text payloads from MV plugin commands.
+
+        Translating a full code-356 command string is unsafe because translation
+        engines can mutate command names, asset identifiers, and key=value
+        bindings. Quoted payloads can be translated without touching the
+        technical command envelope.
+        """
+        if not isinstance(command_text, str):
+            return
+        target = sink if sink is not None else self.extracted
+
+        for quote_index, (_start, _end, _quote_char, segment_text) in enumerate(self._extract_quoted_segments(command_text)):
+            cleaned_segment = segment_text.strip()
+            if not cleaned_segment:
+                continue
+            if not self._is_extractable_runtime_text(cleaned_segment, is_dialogue=True):
+                continue
+            if self._looks_like_asset_name(cleaned_segment):
+                continue
+            target.append((f"{path}.parameters.0.@MVCMD{quote_index}", segment_text, "dialogue_block"))
+
+    def _extract_quoted_segments(self, text: str) -> List[Tuple[int, int, str, str]]:
+        """Return quoted segments as `(start, end, quote_char, inner_text)` tuples."""
+        if not isinstance(text, str) or not text:
+            return []
+
+        segments: List[Tuple[int, int, str, str]] = []
+        active_quote = ""
+        segment_start = -1
+        escaped = False
+
+        for index, char in enumerate(text):
+            if active_quote:
+                if escaped:
+                    escaped = False
+                    continue
+                if char == "\\":
+                    escaped = True
+                    continue
+                if char == active_quote:
+                    inner_text = text[segment_start + 1:index]
+                    segments.append((segment_start, index, active_quote, inner_text))
+                    active_quote = ""
+                    segment_start = -1
+                continue
+
+            if char in {'"', "'"}:
+                active_quote = char
+                segment_start = index
+
+        return segments
+
+    def _extract_legacy_event_entries(
+        self,
+        command: dict[str, Any],
+        path: str,
+        sink: List[Tuple[str, str, str]],
+    ) -> None:
+        """Bridge legacy event extraction into the structured extractor."""
+        self._process_event_command_into(command, path, sink)
+
+    def _extract_legacy_script_entries(
+        self,
+        commands: list[dict[str, Any]],
+        list_path: str,
+        start_index: int,
+        sink: List[Tuple[str, str, str]],
+    ) -> None:
+        """Bridge legacy merged-script extraction into the structured extractor."""
+        self._process_script_block_into(commands, list_path, start_index, sink)
+
+    def _extract_legacy_mz_plugin_entries(
+        self,
+        commands: list[dict[str, Any]],
+        list_path: str,
+        start_index: int,
+        sink: List[Tuple[str, str, str]],
+    ) -> None:
+        """Bridge legacy MZ plugin-block extraction into the structured extractor."""
+        self._process_mz_plugin_block_into(commands, list_path, start_index, sink)
+
+    def _extract_structured_note_entries(
+        self,
+        data: Any,
+        current_path: str,
+        sink: List[Tuple[str, str, str]],
+    ) -> None:
+        """Extract note-tag translations for structured files without reopening generic walking."""
+        if isinstance(data, dict):
+            for key, value in data.items():
+                safe_key = self._escape_path_key(key)
+                new_path = f"{current_path}.{safe_key}" if current_path else safe_key
+                if key == "note" and isinstance(value, str) and value.strip():
+                    for tag_path, tag_text in self._extract_tags_from_note(value, new_path):
+                        sink.append((tag_path, tag_text, "dialogue_block"))
+                    continue
+                self._extract_structured_note_entries(value, new_path, sink)
+            return
+
+        if isinstance(data, list):
+            for index, item in enumerate(data):
+                new_path = f"{current_path}.{index}" if current_path else str(index)
+                self._extract_structured_note_entries(item, new_path, sink)
+
     def _extract_system_terms(self, data: Any, path: str):
         """Extract system terms (basic, commands, params, messages)."""
         if isinstance(data, list):
             for i, item in enumerate(data):
-                if self.is_safe_to_translate(item, is_dialogue=True):
+                if self._is_extractable_runtime_text(item, is_dialogue=True):
                     self.extracted.append((f"{path}.{i}", item, "system"))
         elif isinstance(data, dict):
             for key, value in data.items():
                 safe_key = self._escape_path_key(key)
-                if self.is_safe_to_translate(value, is_dialogue=True):
+                if self._is_extractable_runtime_text(value, is_dialogue=True):
                     self.extracted.append((f"{path}.{safe_key}", value, "system"))
                 elif isinstance(value, list):
                     for i, item in enumerate(value):
-                        if self.is_safe_to_translate(item, is_dialogue=True):
+                        if self._is_extractable_runtime_text(item, is_dialogue=True):
                             self.extracted.append((f"{path}.{safe_key}.{i}", item, "system"))
+
+    @staticmethod
+    def _is_sound_like_object(data: dict) -> bool:
+        """Return True when a dict resembles an RPG Maker audio/sound spec.
+
+        RPG Maker sound objects use {name, volume, pitch, pan}, but some
+        plugins may omit keys.  Requiring 'name' plus at least one of the
+        audio-specific keys (volume/pitch/pan) is enough to identify them.
+        """
+        if not isinstance(data, dict):
+            return False
+        if 'name' not in data:
+            return False
+        return bool(JsonParser._SOUND_SPEC_AUDIO_KEYS & data.keys())
 
     def _is_technical_string(self, text: str) -> bool:
         """Heuristic to check if a string is a file path, boolean-like, technical id, or JS code."""
@@ -740,7 +1596,7 @@ class JsonParser(BaseParser):
         text_lower = cleaned_text.lower()
         
         # Stricter Heuristics for Javascript APIs
-        js_managers = ['textmanager.', 'datamanager.', 'imagemanager.', 'scenemanager.', 'soundmanager.', 'audiomanager.']
+        js_managers = ['textmanager.', 'datamanager.', 'imagemanager.', 'scenemanager.', 'soundmanager.', 'audiomanager.', 'console.']
         if any(manager in text_lower for manager in js_managers):
             return True
 
@@ -748,13 +1604,8 @@ class JsonParser(BaseParser):
         if text_lower in ['true', 'false', 'on', 'off', 'null', 'undefined', 'none', '']:
             return True
             
-        # File paths
-        if any(text_lower.endswith(ext) for ext in [
-            '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tga', '.svg',  # Images
-            '.ogg', '.wav', '.m4a', '.mp3', '.mid',  # Audio
-            '.webm', '.mp4', '.avi',  # Video
-            '.rpgmvp', '.rpgmvo', '.rpgmvm', '.rpgmvw'  # RPG Maker encrypted
-        ]):
+        # File paths / embedded asset references
+        if self._contains_asset_reference(cleaned_text):
             return True
             
         # Coordinates or pure numbers masquerading as strings
@@ -767,7 +1618,7 @@ class JsonParser(BaseParser):
         if text_lower.startswith(('rgb(', 'rgba(')):
             return True
         
-        # JavaScript code detection — NEVER translate JS code
+        # JavaScript code detection â€” NEVER translate JS code
         # Common JS patterns: return statements, function calls, variable declarations
         js_keywords = [
             'return ', 'return;', 'function(', 'function (',
@@ -822,18 +1673,165 @@ class JsonParser(BaseParser):
                 
         return False
 
+    def _contains_asset_reference(self, text: str) -> bool:
+        """Detect embedded asset/path references, even inside longer command strings."""
+        if not isinstance(text, str):
+            return False
+
+        cleaned_text = text.strip().strip('"\'')
+        if not cleaned_text:
+            return False
+
+        lower_text = cleaned_text.lower()
+        if any(lower_text.endswith(ext) for ext in self.ASSET_FILE_EXTENSIONS):
+            return True
+
+        # NOTE: Use \s (not \\s) in raw strings to match whitespace correctly.
+        # \\s in a raw string becomes regex [\s] = literal backslash + 's', NOT whitespace!
+        if re.search(r"(?i)(?:^|[\s\\\"'`(=,:])(?:img|audio|movies|fonts|js|data|pictures|faces|characters|battlers|tilesets|parallaxes|sv_actors|sv_enemies|battlebacks[12]?)[/\\\\]", cleaned_text):
+            return True
+
+        ext_pattern = '|'.join(ext.lstrip('.') for ext in self.ASSET_FILE_EXTENSIONS)
+        embedded_pattern = (
+            r"(?i)(?:^|[\s\\\"'`(=,:])"
+            r"(?:[a-z]:[/\\\\])?"
+            r"(?:[^/\\\\\r\n\"'`]+[/\\\\])*"
+            r"[^/\\\\\r\n\"'`]+\.(?:" + ext_pattern + r")(?=$|[^a-zA-Z0-9_])"
+        )
+        return re.search(embedded_pattern, cleaned_text) is not None
+
+
     def _looks_like_asset_name(self, text: str) -> bool:
-        """Detect asset-like identifiers (no spaces, simple chars, often file base names)."""
+        """Detect asset-like identifiers (supports embedded paths and spaced file names)."""
         if not isinstance(text, str):
             return False
         stripped = text.strip()
-        if not stripped or ' ' in stripped or '\n' in stripped or '\t' in stripped:
+        if not stripped or '\n' in stripped or '\t' in stripped:
             return False
-        # Allow letters, numbers, underscore, dash, slash, and dot
-        return re.fullmatch(r"[A-Za-z0-9_./\-]+", stripped) is not None
+        if self._contains_asset_reference(stripped):
+            return True
+        if '/' in stripped or '\\' in stripped:
+            return re.fullmatch(r'[A-Za-z0-9_ ./\\\-]+', stripped) is not None
+        # Support spaced asset names (e.g. "Hero Face", "Actor1 Face") when word count is small.
+        # Short spaced names (1-2 words) with only alphanumeric/underscore/hyphen chars are likely asset IDs.
+        # Limit to 2 words to avoid false positives on sentence-like text (e.g. "The hero appears").
+        if ' ' in stripped:
+            words = stripped.split()
+            if len(words) <= 2 and re.fullmatch(r'[A-Za-z0-9_ \-]+', stripped):
+                return True
+            return False
+        return re.fullmatch(r'[A-Za-z0-9_\-]+', stripped) is not None
+
+    def _is_extractable_runtime_text(self, text: Any, *, is_dialogue: bool = False) -> bool:
+        """Central safety gate for extracted runtime text across JSON surfaces."""
+        if not isinstance(text, str):
+            return False
+        if not self.is_safe_to_translate(text, is_dialogue=is_dialogue):
+            return False
+        if self._contains_asset_reference(text):
+            return False
+        if self._matches_known_asset_identifier(text):
+            return False
+        if self._is_technical_string(text):
+            return False
+        return True
+
+    def _matches_known_asset_identifier(self, text: str) -> bool:
+        """Return True when text matches a real asset basename/path from the current project."""
+        if not isinstance(text, str) or not text.strip():
+            return False
+        if not self._known_asset_identifiers:
+            return False
+
+        normalized = text.strip().strip('"\'').replace('\\', '/').lower()
+        if not normalized:
+            return False
+
+        candidates = {normalized}
+        candidates.add(os.path.basename(normalized))
+        stem, _ext = os.path.splitext(os.path.basename(normalized))
+        if stem:
+            candidates.add(stem)
+        if '/' in normalized:
+            rel_stem, _ = os.path.splitext(normalized)
+            if rel_stem:
+                candidates.add(rel_stem)
+
+        return any(candidate in self._known_asset_identifiers for candidate in candidates)
+
+    def _is_known_asset_text(self, text: str) -> bool:
+        """Return True when text contains an explicit asset reference."""
+        if not isinstance(text, str):
+            return False
+        # Do not use _matches_known_asset_identifier here.
+        # It causes massive false positives during save (e.g. blocking the translation 
+        # of "Wolf" because "Wolf.png" exists, or "Save" because "Save.ogg" exists).
+        return self._contains_asset_reference(text)
+
+    def _get_known_asset_identifiers(self, file_path: str) -> Set[str]:
+        """Build or reuse a cached set of actual asset identifiers for the current project."""
+        asset_root = self._find_asset_root(file_path)
+        if not asset_root:
+            return set()
+
+        normalized_root = os.path.normpath(asset_root)
+        with _ASSET_REGISTRY_LOCK:
+            cached = _ASSET_REGISTRY_CACHE.get(normalized_root)
+            if cached is not None:
+                return cached
+
+        identifiers: Set[str] = set()
+        for directory_name in self.ASSET_SCAN_DIRS:
+            directory_path = os.path.join(asset_root, directory_name)
+            if not os.path.isdir(directory_path):
+                continue
+
+            for root, _dirs, files in os.walk(directory_path):
+                for filename in files:
+                    relative_path = os.path.relpath(os.path.join(root, filename), asset_root).replace("\\", "/").lower()
+                    basename = os.path.basename(relative_path)
+                    stem, _ext = os.path.splitext(basename)
+                    rel_stem, _ = os.path.splitext(relative_path)
+                    identifiers.add(relative_path)
+                    identifiers.add(basename)
+                    if stem:
+                        identifiers.add(stem)
+                    if rel_stem:
+                        identifiers.add(rel_stem)
+
+        with _ASSET_REGISTRY_LOCK:
+            _ASSET_REGISTRY_CACHE[normalized_root] = identifiers
+        return identifiers
+
+    def _find_asset_root(self, file_path: str) -> str | None:
+        """Locate the asset root (`www` for exports or project root otherwise)."""
+        current_dir = os.path.dirname(os.path.abspath(file_path))
+
+        for _ in range(6):
+            if self._looks_like_asset_root(current_dir):
+                return current_dir
+
+            www_dir = os.path.join(current_dir, "www")
+            if self._looks_like_asset_root(www_dir):
+                return www_dir
+
+            parent_dir = os.path.dirname(current_dir)
+            if parent_dir == current_dir:
+                break
+            current_dir = parent_dir
+
+        return None
+
+    def _looks_like_asset_root(self, directory: str) -> bool:
+        """Return True when a directory resembles an RPG Maker asset root."""
+        if not directory or not os.path.isdir(directory):
+            return False
+        return any(os.path.isdir(os.path.join(directory, child)) for child in self.ASSET_SCAN_DIRS)
 
     def apply_translation(self, file_path: str, translations: Dict[str, str]) -> Any:
         """Apply translations. Handles JSON, MV js/plugins.js, and locale files."""
+        self.last_apply_error = None
+        self._known_asset_identifiers = self._get_known_asset_identifiers(file_path)
         with open(file_path, 'r', encoding='utf-8-sig') as f:
             content = f.read().strip()
             
@@ -856,15 +1854,33 @@ class JsonParser(BaseParser):
                     try:
                         data = json.loads(json_str)
                     except json.JSONDecodeError:
+                        self.last_apply_error = f"Could not parse JSON payload from {os.path.basename(file_path)}"
                         return None
                 else:
+                    self.last_apply_error = f"Unknown plugins.js wrapper format in {os.path.basename(file_path)}"
                     return None
             else:
                 return self._apply_to_js_source(content, translations)
         else:
+            if not self._looks_like_json_document(content):
+                self.last_apply_error = f"Unsupported non-JSON sidecar in {os.path.basename(file_path)}"
+                return None
             try:
                 data = json.loads(content)
             except json.JSONDecodeError:
+                self.last_apply_error = f"Could not parse JSON from {os.path.basename(file_path)}"
+                return None
+        original_data = copy.deepcopy(data) if isinstance(data, (dict, list)) else None
+        if original_data is not None and (not is_js and not is_locale_file and self._structured_extractor.supports_file(file_path)):
+            invalid_keys = self._find_invalid_structured_translation_keys(file_path, original_data, translations)
+            if invalid_keys:
+                joined = ", ".join(sorted(invalid_keys)[:5])
+                self.last_apply_error = f"Structured surface rejected unsupported translation keys: {joined}"
+                logger.error(
+                    "Structured surface rejected unsupported keys in %s: %s",
+                    os.path.basename(file_path),
+                    joined,
+                )
                 return None
         
         applied_count = 0
@@ -881,6 +1897,7 @@ class JsonParser(BaseParser):
         nested_updates = {} # { 'path.to.param': { 'nested_key': 'trans' } }
         direct_updates = {}
         script_updates = {} # { 'base_path': [(line_count, js_index, trans_text), ...] }
+        mv_plugin_updates = {} # { 'command_path': [(segment_index, trans_text), ...] }
         note_block_updates = {}
         note_inline_updates = {}
         
@@ -895,8 +1912,16 @@ class JsonParser(BaseParser):
                 # Hardened Translation Sanitization: Translation engines (DeepL/Google/etc) often corrupt 
                 # spacing around RPG Maker escape codes (turning "\n" into "\ n" or "\c[0]" into "\ c [0]").
                 # This explicitly breaks JSON.parse() inside plugins when nested parameters are evaluated.
-                # Here we repair any single backslash followed by spaces before a letter/brace.
-                trans_text = re.sub(r'\\ \s+([a-zA-Z{}])', r'\\\1', trans_text)
+                # Here we repair one-or-more backslashes followed by spaces before a letter/brace.
+                trans_text = re.sub(r'(\\+)\s+([a-zA-Z{}])', r'\1\2', trans_text)
+
+            if self._should_block_asset_like_translation_update(original_data, path, trans_text):
+                logger.warning(
+                    "Skipping risky asset-like translation update in %s at %s",
+                    os.path.basename(file_path),
+                    path,
+                )
+                continue
                 
             # IMPORTANT: Check @JSON BEFORE @JS because ".@JSON" contains ".@JS" as substring!
             # Without this order, @JSON paths would incorrectly enter the @JS branch.
@@ -912,6 +1937,18 @@ class JsonParser(BaseParser):
                 if root_part not in nested_updates:
                     nested_updates[root_part] = {}
                 nested_updates[root_part][nested_part] = trans_text
+            elif ".@MVCMD" in path:
+                mv_cmd_split = path.split(".@MVCMD", 1)
+                base_part = mv_cmd_split[0]
+                segment_index = _try_int(mv_cmd_split[1])
+                if segment_index is None or not base_part.endswith(".parameters.0"):
+                    logger.warning(f"Skipping malformed MV plugin command path: {path}")
+                    continue
+
+                command_path = base_part.rsplit(".parameters.0", 1)[0]
+                if command_path not in mv_plugin_updates:
+                    mv_plugin_updates[command_path] = []
+                mv_plugin_updates[command_path].append((segment_index, trans_text))
             elif ".@JS" in path:
                 # Script string replacement (JSStringTokenizer paths)
                 if ".@SCRIPTMERGE" in path:
@@ -965,38 +2002,188 @@ class JsonParser(BaseParser):
         # 3. Apply Script Translations (JSStringTokenizer paths)
         for base_path, updates in script_updates.items():
             self._apply_script_translation(data, base_path, updates)
-            
-        # 4. Apply Note Tag Translations
+
+        # 4. Apply MV Plugin Command Translations
+        for command_path, updates in mv_plugin_updates.items():
+            self._apply_mv_plugin_command_translation(data, command_path, updates)
+
+        # 5. Apply Note Tag Translations
         for base_path, updates in note_block_updates.items():
             self._apply_note_tag_translation(data, base_path, updates, is_block=True)
         for base_path, updates in note_inline_updates.items():
             self._apply_note_tag_translation(data, base_path, updates, is_block=False)
                 
         if is_locale_file:
-            if isinstance(data, dict):
-                for key, trans_text in translations.items():
-                    if key in data and trans_text:
-                        data[key] = trans_text
+            for key, trans_text in translations.items():
+                if not isinstance(trans_text, str) or not trans_text:
+                    continue
+                self._set_value_at_path(data, key, trans_text)
+            if original_data is not None:
+                asset_violations = self._asset_invariant_verifier.find_mutated_assets(original_data, data)
+                if asset_violations:
+                    joined = ", ".join(item.path for item in asset_violations[:5])
+                    self.last_apply_error = f"Asset invariant violation: {joined}"
+                    logger.error("Asset invariant violation while applying %s: %s", os.path.basename(file_path), joined)
+                    return None
             return data
-            
-        if is_main_plugins_js:
-            # Custom Font Overriding for restrictive Asian fonts (e.g., YEP_LoadCustomFonts)
-            if isinstance(data, list):
-                for plugin in data:
-                    if isinstance(plugin, dict) and 'parameters' in plugin:
-                        params = plugin['parameters']
-                        for key, val in list(params.items()):
-                            if 'font' in key.lower() and isinstance(val, str):
-                                if 'SimHei' in val or 'Dotum' in val or 'GameFont' in val:
-                                    # Provide fallback for Turkish character support
-                                    if 'sans-serif' not in val.lower():
-                                        plugin['parameters'][key] = "Arial, sans-serif"
 
+        if is_main_plugins_js:
+            if original_data is not None:
+                asset_violations = self._asset_invariant_verifier.find_mutated_assets(original_data, data)
+                if asset_violations:
+                    joined = ", ".join(item.path for item in asset_violations[:5])
+                    self.last_apply_error = f"Asset invariant violation: {joined}"
+                    logger.error("Asset invariant violation while applying %s: %s", os.path.basename(file_path), joined)
+                    return None
+            # Preserve plugin parameters exactly unless the user explicitly translated them.
             # Reconstruct the plugin.js file
             new_json_str = json.dumps(data, indent=None, ensure_ascii=False, separators=(',', ':'))
             return self._js_prefix + new_json_str + self._js_suffix
         else:
+            if original_data is not None:
+                asset_violations = self._asset_invariant_verifier.find_mutated_assets(original_data, data)
+                if asset_violations:
+                    joined = ", ".join(item.path for item in asset_violations[:5])
+                    self.last_apply_error = f"Asset invariant violation: {joined}"
+                    logger.error("Asset invariant violation while applying %s: %s", os.path.basename(file_path), joined)
+                    return None
+            if original_data is not None and (not is_js and not is_locale_file and self._structured_extractor.supports_file(file_path)):
+                allowed_paths = self._invariant_verifier.build_allowed_paths(translations.keys())
+                violations = self._invariant_verifier.find_unexpected_changes(original_data, data, allowed_paths)
+                if violations:
+                    joined = ", ".join(f"{item.path} ({item.reason})" for item in violations[:5])
+                    self.last_apply_error = f"Structured invariant violation: {joined}"
+                    logger.error(
+                        "Structured invariant violation while applying %s: %s",
+                        os.path.basename(file_path),
+                        joined,
+                    )
+                    return None
             return data
+
+    def _should_block_asset_like_translation_update(
+        self,
+        original_data: Any,
+        path: str,
+        translated_value: Any,
+    ) -> bool:
+        """Return True when a translation update appears to mutate an asset identifier."""
+        if original_data is None:
+            return False
+        if not isinstance(path, str) or not isinstance(translated_value, str):
+            return False
+
+        original_value = self._resolve_original_value_for_translation_path(original_data, path)
+        if not isinstance(original_value, str):
+            return False
+
+        original_clean = original_value.strip().strip('"\'')
+        translated_clean = translated_value.strip().strip('"\'')
+        if not original_clean or not translated_clean:
+            return False
+        if original_clean == translated_clean:
+            return False
+
+        if self._is_plugin_parameter_path(path):
+            if self._looks_like_plugin_registry_label(path, original_clean):
+                return True
+            if self._is_input_binding_key_context(path) and self._are_input_binding_tokens(original_clean):
+                return True
+            if self._is_technical_string(original_clean):
+                return True
+
+        path_asset_context = self._is_asset_context_path(path) or self._is_audio_key_context(path)
+        if not path_asset_context:
+            if not self._has_technical_key_hint(path):
+                return False
+            return self._is_risky_technical_identifier(original_clean)
+
+        if self._looks_like_audio_parameter_value(original_clean):
+            return True
+        if self._contains_asset_reference(original_clean):
+            return True
+        if self._matches_known_asset_identifier(original_clean):
+            return True
+        if self._looks_like_asset_name(original_clean):
+            return True
+        return False
+
+    def _is_plugin_parameter_path(self, path: str) -> bool:
+        """Return True when path points inside plugins.js parameters."""
+        if not isinstance(path, str):
+            return False
+        return ".parameters." in path or path.endswith(".parameters")
+
+    def _looks_like_plugin_registry_label(self, path: str, value: str) -> bool:
+        """Return True for plugin order labels that double as identifiers."""
+        key_tokens = self._tokenize_key_hints(path)
+        if "order" not in key_tokens:
+            return False
+
+        stripped = self._strip_rpgm_text_codes(value).strip()
+        if not stripped or "\n" in stripped:
+            return False
+
+        if "category" in key_tokens:
+            return re.fullmatch(r"[A-Za-z_][A-Za-z0-9_ ]*", stripped) is not None
+
+        if "type" not in key_tokens:
+            return False
+
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9' _-]{0,39}", stripped) is None:
+            return False
+        word_count = len([word for word in stripped.split() if word])
+        return 1 <= word_count <= 4
+
+    def _is_risky_technical_identifier(self, value: str) -> bool:
+        """Return True for short identifier-like technical values that must not be translated."""
+        if not isinstance(value, str):
+            return False
+        cleaned = value.strip().strip('"\'')
+        if not cleaned or '\n' in cleaned:
+            return False
+        if self._is_technical_string(cleaned):
+            return True
+        return re.fullmatch(r"[A-Za-z_][A-Za-z0-9_\-.]*", cleaned) is not None
+
+    def _resolve_original_value_for_translation_path(self, data: Any, path: str) -> Any:
+        """Resolve original source value for direct and nested @JSON translation paths."""
+        if not isinstance(path, str) or not path:
+            return None
+
+        if ".@JSON" in path:
+            root_path, nested_path = path.split(".@JSON", 1)
+            nested_path = nested_path.lstrip('.')
+            root_value = self._get_value_at_path(data, root_path)
+            if not isinstance(root_value, str):
+                return None
+            try:
+                nested_obj = json.loads(root_value)
+            except (json.JSONDecodeError, TypeError):
+                return None
+            if not nested_path:
+                return nested_obj
+            return self._resolve_original_value_for_translation_path(nested_obj, nested_path)
+
+        if any(marker in path for marker in (".@JS", ".@MVCMD", ".@NOTEBLOCK_", ".@NOTEINLINE_")):
+            return None
+
+        return self._get_value_at_path(data, path)
+
+    def _find_invalid_structured_translation_keys(
+        self,
+        file_path: str,
+        data: Any,
+        translations: Dict[str, str],
+    ) -> List[str]:
+        """Return translation keys that are not part of the structured file's allowed surface."""
+        allowed_entries: List[Tuple[str, str, str]] = []
+        self._structured_extractor.extract(file_path, data, allowed_entries)
+        if self.translate_notes and not is_protected_structured_noop_file(file_path):
+            self._extract_structured_note_entries(data, "", allowed_entries)
+
+        allowed_paths = {path for path, _text, _tag in allowed_entries}
+        return [path for path in translations.keys() if path not in allowed_paths]
 
     def _apply_nested_json_translation(self, data: Any, root_path: str, nested_trans: dict):
         """
@@ -1115,6 +2302,35 @@ class JsonParser(BaseParser):
                 cmd["parameters"][0] = new_lines[k]
             else:
                 cmd["parameters"][0] = ""
+
+    def _apply_mv_plugin_command_translation(self, data: Any, command_path: str, updates: list) -> None:
+        """Replace extracted quoted text segments inside an MV plugin command."""
+        command_value_path = f"{command_path}.parameters.0"
+        command_text = self._get_value_at_path(data, command_value_path)
+        if not isinstance(command_text, str):
+            return
+
+        segments = self._extract_quoted_segments(command_text)
+        if not segments:
+            return
+
+        replacements = {segment_index: text for segment_index, text in updates if isinstance(text, str)}
+        if not replacements:
+            return
+
+        rebuilt_parts: List[str] = []
+        last_index = 0
+
+        for segment_index, (start, end, quote_char, inner_text) in enumerate(segments):
+            rebuilt_parts.append(command_text[last_index:start + 1])
+            replacement_text = replacements.get(segment_index, inner_text)
+            replacement_text = replacement_text.replace(quote_char, f"\\{quote_char}")
+            rebuilt_parts.append(replacement_text)
+            rebuilt_parts.append(quote_char)
+            last_index = end + 1
+
+        rebuilt_parts.append(command_text[last_index:])
+        self._set_value_at_path(data, command_value_path, ''.join(rebuilt_parts))
 
     def _get_value_at_path(self, data: Any, path: str) -> Any:
         tmp_sep = "\0"
@@ -1420,7 +2636,7 @@ class JsonParser(BaseParser):
             has_non_ascii = any(ord(c) > 127 for c in text)
             
             if (has_spaces and len(text.strip()) > 3) or has_non_ascii:
-                if self.is_safe_to_translate(text, is_dialogue=True) and not self._is_technical_string(text):
+                if self._is_extractable_runtime_text(text, is_dialogue=True):
                     path = f"JS_SRC_{idx}"
                     self.extracted.append((path, text, "system"))
 

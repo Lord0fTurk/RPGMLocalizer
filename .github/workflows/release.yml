@@ -11,6 +11,7 @@ jobs:
     name: Build for ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
         include:
@@ -42,7 +43,70 @@ jobs:
 
       - name: Generate Build Icons
         run: |
-          python scripts/generate_icons.py
+          python - <<'PY'
+          import subprocess
+          import sys
+          import tempfile
+          from pathlib import Path
+
+          from PIL import Image
+
+          root = Path.cwd()
+          source_icon = root / "icon.png"
+          windows_icon = root / "icon.ico"
+          macos_icon = root / "icon.icns"
+          ico_sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
+          icns_base_sizes = [16, 32, 128, 256, 512]
+
+          if not source_icon.exists():
+              raise FileNotFoundError(f"Missing source icon: {source_icon}")
+
+          with Image.open(source_icon) as image:
+              image.convert("RGBA").save(windows_icon, format="ICO", sizes=ico_sizes)
+          print(f"Generated {windows_icon.name}")
+
+          if sys.platform == "darwin":
+              with tempfile.TemporaryDirectory() as temp_dir:
+                  iconset_dir = Path(temp_dir) / "icon.iconset"
+                  iconset_dir.mkdir(parents=True, exist_ok=True)
+
+                  for size in icns_base_sizes:
+                      normal_path = iconset_dir / f"icon_{size}x{size}.png"
+                      subprocess.run([
+                          "sips", "-z", str(size), str(size), str(source_icon), "--out", str(normal_path)
+                      ], check=True)
+
+                      if size <= 256:
+                          retina_size = size * 2
+                          retina_path = iconset_dir / f"icon_{size}x{size}@2x.png"
+                          subprocess.run([
+                              "sips", "-z", str(retina_size), str(retina_size), str(source_icon), "--out", str(retina_path)
+                          ], check=True)
+
+                  subprocess.run([
+                      "iconutil", "-c", "icns", str(iconset_dir), "-o", str(macos_icon)
+                  ], check=True)
+              print(f"Generated {macos_icon.name}")
+          else:
+              print("Skipped icon.icns generation on non-macOS runner")
+          PY
+
+      - name: Verify Generated Icons
+        run: |
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+
+          root = Path.cwd()
+          required = [root / "icon.png", root / "icon.ico"]
+          if sys.platform == "darwin":
+              required.append(root / "icon.icns")
+
+          missing = [str(path) for path in required if not path.exists()]
+          if missing:
+              raise FileNotFoundError("Missing generated icons: " + ", ".join(missing))
+          print("Verified icons:", ", ".join(path.name for path in required))
+          PY
 
       - name: Build with PyInstaller
         run: |

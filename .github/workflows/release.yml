@@ -42,6 +42,7 @@ jobs:
           pip install pyinstaller pillow
 
       - name: Generate Build Icons
+        shell: bash
         run: |
           python - <<'PY'
           import subprocess
@@ -92,6 +93,7 @@ jobs:
           PY
 
       - name: Verify Generated Icons
+        shell: bash
         run: |
           python - <<'PY'
           import sys

@@ -865,6 +865,89 @@ class JsonParser(BaseParser):
                 except (json.JSONDecodeError, TypeError):
                     pass
 
+    def _walk_entries(self, data: Any, current_path: str) -> List[Tuple[str, str, str]]:
+        """Recursively walk JSON structure and return list of entries (for use with external sink)."""
+        results: List[Tuple[str, str, str]] = []
+        if isinstance(data, dict):
+            self._process_dict_entries(data, current_path, results)
+        elif isinstance(data, list):
+            self._process_list_entries(data, current_path, results)
+        elif isinstance(data, str):
+            if (data.startswith('{') or data.startswith('[')) and len(data) > 2:
+                try:
+                    nested_data = json.loads(data)
+                    nested_results = self._walk_entries(nested_data, f"{current_path}.@JSON")
+                    results.extend(nested_results)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        return results
+
+    def _process_dict_entries(self, data: dict, current_path: str, results: List[Tuple[str, str, str]]):
+        """Process dict node and append entries to results list."""
+        is_sound_obj = self._is_sound_like_object(data) or self._is_asset_context_path(current_path)
+        for key, value in data.items():
+            safe_key = self._escape_path_key(key)
+            new_path = f"{current_path}.{safe_key}" if current_path else safe_key
+            if key in self._skip_fields:
+                continue
+            if is_sound_obj and key == 'name':
+                continue
+            key_lower = key.lower()
+            if any(key_lower.endswith(suffix) for suffix in self.CODE_KEY_SUFFIXES):
+                continue
+            if isinstance(value, str) and (value.startswith('{') or value.startswith('[')) and len(value) > 2:
+                try:
+                    nested_data = json.loads(value)
+                    nested_results = self._walk_entries(nested_data, f"{new_path}.@JSON")
+                    results.extend(nested_results)
+                    continue
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            is_plugin_param = ".parameters" in new_path or ".@JSON" in new_path or "parameters" in current_path
+            should_extract = False
+            if key in self.DATABASE_FIELDS or (key == 'name' and not is_sound_obj):
+                if key == 'name':
+                    if self._should_extract_name(current_path, value, is_plugin_param):
+                        should_extract = True
+                    else:
+                        if not isinstance(value, str):
+                            results.extend(self._walk_entries(value, new_path))
+                        continue
+                elif isinstance(value, str):
+                    should_extract = True
+                else:
+                    results.extend(self._walk_entries(value, new_path))
+                    continue
+            elif is_plugin_param and isinstance(value, str):
+                if self._should_extract_generic_plugin_parameter(key, value):
+                    should_extract = True
+            if should_extract:
+                if not isinstance(value, str):
+                    results.extend(self._walk_entries(value, new_path))
+                    continue
+                context_tag = "dialogue_block" if is_plugin_param or (key in ['message1', 'message2', 'message3', 'message4', 'help', 'description']) else "name"
+                if self._contains_asset_reference(value) or self._is_technical_string(value):
+                    continue
+                if self._matches_known_asset_identifier(value):
+                    continue
+                if not self.is_safe_to_translate(value, is_dialogue=(context_tag != "name")):
+                    continue
+                if key in ['name', 'nickname', 'gameTitle', 'title', 'currencyUnit']:
+                    context_tag = "name"
+                results.append((new_path, value, context_tag))
+                continue
+            if key in self.SYSTEM_TERMS:
+                continue
+            results.extend(self._walk_entries(value, new_path))
+
+    def _process_list_entries(self, data: list, current_path: str, results: List[Tuple[str, str, str]]):
+        """Process list node and append entries to results list."""
+        for i, item in enumerate(data):
+            new_path = f"{current_path}.{i}" if current_path else str(i)
+            if isinstance(item, dict) and "code" in item and "parameters" in item:
+                continue
+            results.extend(self._walk_entries(item, new_path))
+
     # VisuStella MZ / Yanfly type annotation suffixes that indicate NON-translatable values
     # e.g. "drawGameTitle:func" -> value is JavaScript code
     # e.g. "BattleSystem:eval" -> value is JS eval expression
@@ -1425,6 +1508,14 @@ class JsonParser(BaseParser):
         
         # Process the first 357 command normally
         self._process_event_command_into(first, base_path, target)
+        
+        # Walk into dict params of the first (357) command (e.g., WD_Quest structured params at params[3])
+        # Must append to target (sink), not self.extracted
+        first_params = first.get("parameters", [])
+        for p_idx, param in enumerate(first_params):
+            if isinstance(param, dict):
+                for entry_path, entry_text, entry_tag in self._walk_entries(param, f"{base_path}.parameters.{p_idx}"):
+                    target.append((entry_path, entry_text, entry_tag))
         
         # Process 657 continuation lines
         for j, cmd in enumerate(commands[1:], 1):

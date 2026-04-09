@@ -134,6 +134,22 @@ class TestAssetContextPathHardening(unittest.TestCase):
         self.assertNotIn("Cursor1.ogg", values)
         self.assertIn("Playable text", values)
 
+    def test_percent_encoded_asset_path_is_not_extracted(self):
+        """Percent-encoded asset paths must be treated as technical filenames."""
+        data = {"graphic": "img/system/sava%C5%9FAttackInfoArrow2.png?ver=12#sprite", "label": "Attack Info"}
+        entries = _extract(data, "customconfig.json")
+        values = self._get_values(entries)
+        self.assertNotIn("img/system/sava%C5%9FAttackInfoArrow2.png?ver=12#sprite", values)
+        self.assertIn("Attack Info", values)
+
+    def test_double_encoded_asset_path_is_not_extracted(self):
+        """Double-encoded asset paths must still be treated as technical filenames."""
+        data = {"graphic": "img\\system\\sava%25C5%259FAttackInfoArrow2.png", "label": "Attack Info"}
+        entries = _extract(data, "customconfig.json")
+        values = self._get_values(entries)
+        self.assertNotIn("img\\system\\sava%25C5%259FAttackInfoArrow2.png", values)
+        self.assertIn("Attack Info", values)
+
 
 class TestSoundObjectInMZPluginArgs(unittest.TestCase):
     """Event command 357 args path — MZ plugin command with SE in args."""

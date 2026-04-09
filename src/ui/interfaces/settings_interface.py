@@ -52,12 +52,12 @@ class SettingsInterface(ScrollArea):
         self.setObjectName("SettingsInterface")
 
         # Parser Settings Group
-        self.parserGroup = SettingCardGroup("Parser Options", self.scrollWidget)
+        self.parserGroup = SettingCardGroup("Parser", self.scrollWidget)
         
         self.chk_translate_comments = SwitchSettingCard(
             FIF.CHAT,
             "Translate comments",
-            "Identify and translate event comments (Code 108/408). Disabled by default because plugin tags often live here.",
+            "Translate event comments (Code 108/408).",
             parent=self.parserGroup
         )
         self.chk_translate_comments.setChecked(False)
@@ -65,7 +65,7 @@ class SettingsInterface(ScrollArea):
         self.chk_translate_notes = SwitchSettingCard(
             FIF.EDIT,
             "Translate 'note' fields",
-            "Include database 'note' fields (Caution: may break plugins)",
+            "Translate database note fields.",
             parent=self.parserGroup
         )
         self.chk_translate_notes.setChecked(False)
@@ -74,12 +74,12 @@ class SettingsInterface(ScrollArea):
         self.parserGroup.addSettingCard(self.chk_translate_notes)
         
         # Pipeline Settings Group
-        self.pipelineGroup = SettingCardGroup("Translation Pipeline", self.scrollWidget)
+        self.pipelineGroup = SettingCardGroup("Pipeline", self.scrollWidget)
         
         self.chk_backup = SwitchSettingCard(
             FIF.SAVE,
             "Create Backups",
-            "Automatically create backups of original files before overwriting",
+            "Create backups before saving.",
             parent=self.pipelineGroup
         )
         self.chk_backup.setChecked(True)
@@ -87,7 +87,7 @@ class SettingsInterface(ScrollArea):
         self.chk_cache = SwitchSettingCard(
             FIF.SPEED_HIGH,
             "Use Cache",
-            "Skip previously translated strings to save time",
+            "Reuse previous translations.",
             parent=self.pipelineGroup
         )
         self.chk_cache.setChecked(True)
@@ -96,7 +96,7 @@ class SettingsInterface(ScrollArea):
             "Clear Cache",
             FIF.DELETE,
             "Clear Translation Cache",
-            "Remove all cached translations to force a fresh translation",
+            "Clear cached translations.",
             self.pipelineGroup
         )
         
@@ -105,12 +105,12 @@ class SettingsInterface(ScrollArea):
         self.pipelineGroup.addSettingCard(self.btn_clear_cache)
 
         # Performance Group
-        self.performanceGroup = SettingCardGroup("Performance", self.scrollWidget)
+        self.performanceGroup = SettingCardGroup("Speed", self.scrollWidget)
         
         self.slider_batch_size = SliderSettingCard(
             icon=FIF.SPEED_HIGH,
             title="Batch Processing Size",
-            content="Number of text entries to merge per request. With Multi-Endpoints enabled, 50-100 is safe.",
+            content="Entries merged per request.",
             parent=self.performanceGroup
         )
         self.slider_batch_size.setRange(1, 200)
@@ -119,7 +119,7 @@ class SettingsInterface(ScrollArea):
         self.slider_concurrent = SliderSettingCard(
             icon=FIF.PEOPLE,
             title="Concurrent Requests",
-            content="Maximum number of parallel translation requests (5-50)",
+            content="Parallel requests.",
             parent=self.performanceGroup
         )
         self.slider_concurrent.setRange(5, 50)
@@ -129,12 +129,12 @@ class SettingsInterface(ScrollArea):
         self.performanceGroup.addSettingCard(self.slider_concurrent)
 
         # Formatting Group
-        self.formattingGroup = SettingCardGroup("Formatting (Word Wrap)", self.scrollWidget)
+        self.formattingGroup = SettingCardGroup("Text Flow", self.scrollWidget)
         
         self.chk_visustella_wordwrap = SwitchSettingCard(
             FIF.ALIGNMENT,
             "Inject VisuStella <WordWrap>",
-            "Automatically appends <WordWrap> to translated dialogues. WARNING: ONLY enable if game has VisuStella Message Core MZ!",
+            "Append <WordWrap> to translated dialogue.",
             parent=self.formattingGroup
         )
         self.chk_visustella_wordwrap.setChecked(False)
@@ -142,7 +142,7 @@ class SettingsInterface(ScrollArea):
         self.chk_auto_wordwrap = SwitchSettingCard(
             FIF.ALIGNMENT,
             "Vanilla Auto Word-Wrap",
-            "Automatically inserts line breaks (\\n) for texts exceeding ~54 chars. Best for games without message plugins.",
+            "Insert line breaks for long text.",
             parent=self.formattingGroup
         )
         self.chk_auto_wordwrap.setChecked(False)
@@ -156,7 +156,7 @@ class SettingsInterface(ScrollArea):
         self.chk_multi_endpoint = SwitchSettingCard(
             FIF.SPEED_HIGH,
             "Use Multiple Google Mirrors",
-            "Rotate between multiple Google endpoints for stability",
+            "Rotate between Google endpoints.",
             parent=self.networkGroup
         )
         self.chk_multi_endpoint.setChecked(True)
@@ -164,7 +164,7 @@ class SettingsInterface(ScrollArea):
         self.chk_lingva_fallback = SwitchSettingCard(
             FIF.SPEED_HIGH,
             "Enable Lingva Fallback",
-            "Use Lingva as a fallback if Google endpoints fail",
+            "Use Lingva if Google fails.",
             parent=self.networkGroup
         )
         self.chk_lingva_fallback.setChecked(True)
@@ -172,7 +172,7 @@ class SettingsInterface(ScrollArea):
         self.slider_request_delay = SliderSettingCard(
             icon=FIF.SPEED_HIGH,
             title="Request Delay (ms)",
-            content="Delay between requests to reduce rate limits",
+            content="Delay between requests.",
             parent=self.networkGroup
         )
         self.slider_request_delay.setRange(0, 1000)
@@ -181,7 +181,7 @@ class SettingsInterface(ScrollArea):
         self.slider_timeout = SliderSettingCard(
             icon=FIF.SPEED_HIGH,
             title="Request Timeout (sec)",
-            content="Maximum time to wait for a response",
+            content="Request timeout.",
             parent=self.networkGroup
         )
         self.slider_timeout.setRange(5, 30)
@@ -190,7 +190,7 @@ class SettingsInterface(ScrollArea):
         self.slider_max_retries = SliderSettingCard(
             icon=FIF.SPEED_HIGH,
             title="Max Retries",
-            content="Retry count for transient failures",
+            content="Retry count.",
             parent=self.networkGroup
         )
         self.slider_max_retries.setRange(1, 5)
@@ -208,7 +208,7 @@ class SettingsInterface(ScrollArea):
         self.chk_glossary = SwitchSettingCard(
             FIF.BOOK_SHELF,
             "Use Glossary",
-            "Apply consistent translations for specific terms",
+            "Use term replacements.",
             parent=self.glossaryGroup
         )
         self.chk_glossary.setChecked(False)
@@ -225,7 +225,7 @@ class SettingsInterface(ScrollArea):
             "Create Sample",
             FIF.ADD,
             "Create Sample Glossary",
-            "Generate a sample glossary.json file",
+            "Create a sample glossary.",
             self.glossaryGroup
         )
 
@@ -234,14 +234,14 @@ class SettingsInterface(ScrollArea):
         self.glossaryGroup.addSettingCard(self.btn_create_sample)
 
         # Filtering Group
-        self.filterGroup = SettingCardGroup("Filtering Rules", self.scrollWidget)
+        self.filterGroup = SettingCardGroup("Filters", self.scrollWidget)
         
         # Custom card for Regex input
         self.card_regex = CardWidget(self.filterGroup)
         self.card_regex.setFixedHeight(200)  # Explicit height to ensure visibility
         self.v_regex = QVBoxLayout(self.card_regex)
         self.lbl_regex_title = StrongBodyLabel("Regex Blacklist", self.card_regex)
-        self.lbl_regex_desc = CaptionLabel("Enter Regex patterns to ignore (one per line). Example: ^System_.*", self.card_regex)
+        self.lbl_regex_desc = CaptionLabel("Ignore patterns, one per line. Example: ^System_.*", self.card_regex)
         self.txt_regex = TextEdit(self.card_regex)
         self.txt_regex.setPlaceholderText("^Skip_This_.*\n^<Internal_Code>.*\nActor\\d+")
         

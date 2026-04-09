@@ -53,10 +53,8 @@ class AboutInterface(ScrollArea):
         self.v_desc = QVBoxLayout(self.card_desc)
         
         desc_text = (
-            "RPGMLocalizer is an automated translation tool designed for RPG Maker games.\n"
-            "It supports RPG Maker XP, VX, VX Ace, MV, and MZ.\n"
-            "Using advanced heuristics and Google Translate, it localizes game content while "
-            "preserving game scripts and control codes."
+            "RPGMLocalizer translates RPG Maker games while protecting scripts, control codes, and technical data.\n"
+            "Supported engines: XP, VX, VX Ace, MV, and MZ."
         )
         self.lbl_desc = BodyLabel(desc_text, self.card_desc)
         self.lbl_desc.setWordWrap(True)
@@ -68,10 +66,10 @@ class AboutInterface(ScrollArea):
         self.card_actions = CardWidget(self.scrollWidget)
         self.v_actions = QVBoxLayout(self.card_actions)
         
-        self.lbl_support_title = StrongBodyLabel("Support Development", self.card_actions)
-        self.lbl_support_desc = CaptionLabel("If you find this tool useful, consider supporting me on Patreon.", self.card_actions)
+        self.lbl_support_title = StrongBodyLabel("Support", self.card_actions)
+        self.lbl_support_desc = CaptionLabel("Optional project support.", self.card_actions)
         
-        self.btn_patreon = PrimaryPushButton(FIF.HEART, "Support on Patreon", self.card_actions)
+        self.btn_patreon = PrimaryPushButton(FIF.HEART, "Patreon", self.card_actions)
         self.btn_patreon.clicked.connect(self._open_patreon)
         
         self.v_actions.addWidget(self.lbl_support_title)
@@ -81,7 +79,7 @@ class AboutInterface(ScrollArea):
         self.v_actions.setContentsMargins(20, 20, 20, 20)
         
         # 4. License Info
-        self.lbl_license = CaptionLabel("Licensed under GNU GPLv3", self.scrollWidget)
+        self.lbl_license = CaptionLabel("GNU GPLv3", self.scrollWidget)
         self.lbl_license.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         import datetime

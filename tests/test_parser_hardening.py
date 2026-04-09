@@ -3,8 +3,11 @@ import os
 import tempfile
 import unittest
 
+from src.core.parsers.base import BaseParser
 from src.core.parser_factory import get_parser
 from src.core.parsers.json_parser import JsonParser
+from src.core.parsers.extraction_surface_registry import ExtractionSurfaceRegistry
+from src.core.parsers.plugin_family_registry import PluginFamilyRegistry
 from src.core.parsers.ruby_parser import RubyParser
 from src.core.translation_pipeline import TranslationPipeline
 
@@ -12,6 +15,19 @@ from src.core.translation_pipeline import TranslationPipeline
 class NullJsonParser:
     def apply_translation(self, file_path: str, translations: dict[str, str]) -> None:
         return None
+
+
+class DummyParser(BaseParser):
+    def extract_text(self, file_path: str) -> list[tuple[str, str, str]]:
+        return []
+
+    def apply_translation(self, file_path: str, translations: dict[str, str]) -> None:
+        return None
+
+
+class ScriptWriteGuardParser:
+    def apply_translation(self, file_path: str, translations: dict[str, str]) -> None:
+        raise AssertionError("Scripts.rvdata2 should not be written by default")
 
 
 class TestParserHardening(unittest.TestCase):
@@ -46,6 +62,52 @@ class TestParserHardening(unittest.TestCase):
         values = [text for _path, text, _ctx in parser.extracted]
         self.assertNotIn(r"\V[1182]", values)
         self.assertIn("Real choice", values)
+
+    def test_plugin_family_registry_classifies_common_ecosystems(self) -> None:
+        registry = PluginFamilyRegistry()
+
+        self.assertEqual(registry.classify("YEP_StatusMenuCore").name, "VisuStella/Yanfly")
+        self.assertEqual(registry.classify("MOG_TitlePictureCom").name, "MOG")
+        self.assertTrue(registry.classify("SRD_AutoNameBox").allow_single_word_text)
+
+    def test_surface_registry_distinguishes_menu_labels_from_technical_fields(self) -> None:
+        registry = ExtractionSurfaceRegistry()
+
+        self.assertEqual(registry.classify_surface("Menu Label"), "menu_label")
+        self.assertEqual(registry.classify_surface("Menu Symbol"), "technical_identifier")
+        self.assertEqual(registry.classify_surface("Ground Layer Filename"), "asset_reference")
+
+    def test_single_word_menu_labels_survive_family_profile(self) -> None:
+        parser = JsonParser()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugins_dir = os.path.join(tmpdir, "www", "js", "plugins")
+            os.makedirs(plugins_dir, exist_ok=True)
+            with open(os.path.join(plugins_dir, "YEP_StatusMenuCore.js"), "w", encoding="utf-8") as handle:
+                handle.write("/*:\n * @param General Command\n * @text General\n * @default Status\n */")
+
+            file_path = os.path.join(tmpdir, "www", "js", "plugins.js")
+            with open(file_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    'var $plugins = [{' 
+                    '"name":"YEP_StatusMenuCore",'
+                    '"status":true,'
+                    '"description":"",'
+                    '"parameters":{"General Command":"Status"}'
+                    '}];'
+                )
+
+            extracted = parser.extract_text(file_path)
+
+        values = {text for _path, text, _ctx in extracted}
+        self.assertIn("Status", values)
+
+    def test_note_and_meta_prose_are_not_treated_as_technical(self) -> None:
+        parser = DummyParser()
+
+        self.assertTrue(parser.is_safe_to_translate("note: This is a reminder", is_dialogue=True))
+        self.assertTrue(parser.is_safe_to_translate("meta: Visible text", is_dialogue=True))
+        self.assertFalse(parser.is_safe_to_translate("Script: $gameTemp.doThing()", is_dialogue=False))
 
     def test_comment_like_command_is_skipped_when_enabled(self) -> None:
         parser = JsonParser(translate_comments=True)
@@ -328,10 +390,11 @@ class TestParserHardening(unittest.TestCase):
             with open(file_path, "w", encoding="utf-8") as handle:
                 json.dump({"sound": "audio/se/Cursor1.ogg", "label": "Open Menu"}, handle, ensure_ascii=False)
 
-            updated = parser.apply_translation(file_path, {"sound": "audio/se/İmleç1.ogg"})
+            updated = parser.apply_translation(file_path, {"sound": "audio/se/İmleç1.ogg", "label": "Menüyü Aç"})
 
-        self.assertIsNone(updated)
-        self.assertIn("Asset invariant violation", parser.last_apply_error or "")
+        self.assertIsNotNone(updated)
+        self.assertEqual(updated["sound"], "audio/se/Cursor1.ogg") # Risky mutation should be skipped
+        self.assertEqual(updated["label"], "Menüyü Aç") # Safe translations still applied
 
     def test_apply_translation_rejects_asset_id_mutation_in_plugins_js(self) -> None:
         parser = JsonParser()
@@ -354,8 +417,28 @@ class TestParserHardening(unittest.TestCase):
 
             updated = parser.apply_translation(file_path, {"0.parameters.Cursor SE": "audio/se/İmleç1.ogg"})
 
-        self.assertIsNone(updated)
-        self.assertIn("Asset invariant violation", parser.last_apply_error or "")
+        self.assertIsNotNone(updated)
+        self.assertIn('"Cursor SE":"audio/se/Cursor1.ogg"', updated) # Original asset path maintained
+
+    def test_apply_translation_refuses_ambiguous_list_dict_fallback(self) -> None:
+        parser = JsonParser()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = os.path.join(tmpdir, "Ambiguous.json")
+            payload = {
+                "entries": [
+                    {"name": "Alpha", "id": 1},
+                    {"name": "Beta", "id": 2},
+                ]
+            }
+            with open(file_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False)
+
+            updated = parser.apply_translation(file_path, {"entries.name": "Translated"})
+
+        self.assertIsNotNone(updated)
+        self.assertEqual(updated["entries"][0]["name"], "Alpha")
+        self.assertEqual(updated["entries"][1]["name"], "Beta")
 
     def test_note_tag_asset_basename_is_skipped_when_real_asset_exists(self) -> None:
         parser = JsonParser(translate_notes=True)
@@ -401,6 +484,117 @@ class TestParserHardening(unittest.TestCase):
         self.assertIn("Day %1", values)
         self.assertNotIn("main", values)
 
+    def test_raw_js_source_uses_safe_sinks_only(self) -> None:
+        parser = JsonParser()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = os.path.join(tmpdir, "custom_plugin.js")
+            with open(file_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    'const title = "Welcome back";\n'
+                    'ImageManager.loadPicture("Cursor1");\n'
+                    '$gameMessage.add("The gate is open!");\n'
+                )
+
+            extracted = parser.extract_text(file_path)
+
+        values = {text for _path, text, _ctx in extracted}
+        self.assertIn("Welcome back", values)
+        self.assertIn("The gate is open!", values)
+        self.assertNotIn("Cursor1", values)
+
+    def test_merged_script_block_uses_safe_sink_filtering(self) -> None:
+        parser = JsonParser()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = os.path.join(tmpdir, "Map001.json")
+            payload = {
+                "events": [
+                    None,
+                    {
+                        "id": 1,
+                        "pages": [
+                            {
+                                "list": [
+                                    {"code": 355, "parameters": ['$gameMessage.add("Hello world");'], "indent": 0},
+                                    {"code": 655, "parameters": ['ImageManager.loadPicture("Cursor1");'], "indent": 0},
+                                ]
+                            }
+                        ],
+                    },
+                ]
+            }
+            with open(file_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False)
+
+            extracted = parser.extract_text(file_path)
+
+        values = {text for _path, text, _ctx in extracted}
+        self.assertIn("Hello world", values)
+        self.assertNotIn("Cursor1", values)
+
+    def test_mz_plugin_args_use_surface_aware_fallback(self) -> None:
+        parser = JsonParser()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = os.path.join(tmpdir, "Map001.json")
+            payload = {
+                "events": [
+                    None,
+                    {
+                        "id": 1,
+                        "pages": [
+                            {
+                                "list": [
+                                    {
+                                        "code": 357,
+                                        "parameters": [
+                                            "CustomUi",
+                                            "ShowText",
+                                            "",
+                                            {"buttonText": "Open Menu", "imageName": "Cursor1"},
+                                        ],
+                                        "indent": 0,
+                                    }
+                                ]
+                            }
+                        ],
+                    },
+                ]
+            }
+            with open(file_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False)
+
+            extracted = parser.extract_text(file_path)
+
+        values = {text for _path, text, _ctx in extracted}
+        self.assertIn("Open Menu", values)
+        self.assertNotIn("Cursor1", values)
+
+    def test_plugins_js_skips_asset_tuple_values(self) -> None:
+        parser = JsonParser()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            js_dir = os.path.join(tmpdir, "www", "js")
+            os.makedirs(js_dir, exist_ok=True)
+            file_path = os.path.join(js_dir, "plugins.js")
+            with open(file_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    'var $plugins = [{' 
+                    '"name":"TestPlugin",'
+                    '"status":true,'
+                    '"description":"",'
+                    '"parameters":{"Default Enemy Indicator":"battleAttackInfoArrow1,96,305","Sound Name":"Cursor1","Menu 1 Name":"Quest"}'
+                    '}];'
+                )
+
+            extracted = parser.extract_text(file_path)
+
+        values = {text for _path, text, _ctx in extracted}
+        self.assertIn("Quest", values)
+        self.assertNotIn("battleAttackInfoArrow1,96,305", values)
+        self.assertNotIn("Cursor1", values)
+
     def test_save_does_not_overwrite_file_when_parser_returns_none(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             file_path = os.path.join(tmpdir, "Map001.json")
@@ -420,6 +614,26 @@ class TestParserHardening(unittest.TestCase):
                 saved_data = json.load(handle)
 
         self.assertEqual(saved_data, original_data)
+
+    def test_scripts_rvdata2_save_is_skipped_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = os.path.join(tmpdir, "Scripts.rvdata2")
+            original_bytes = b"original script blob"
+            with open(file_path, "wb") as handle:
+                handle.write(original_bytes)
+
+            pipeline = TranslationPipeline({"use_cache": False, "backup_enabled": False})
+            parsed_files = {
+                file_path: (ScriptWriteGuardParser(), [("0.code.string_0", "Hello", "script")]),
+            }
+            results_map = {(file_path, "0.code.string_0"): "Merhaba"}
+
+            pipeline._save_translations(parsed_files, results_map)
+
+            with open(file_path, "rb") as handle:
+                saved_bytes = handle.read()
+
+        self.assertEqual(saved_bytes, original_bytes)
 
 
 if __name__ == "__main__":

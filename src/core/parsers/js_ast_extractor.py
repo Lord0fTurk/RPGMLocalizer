@@ -105,6 +105,31 @@ class JavaScriptAstAuditExtractor:
         "code",
         "locale",
     }
+    SAFE_SINK_CALL_HINTS = {
+        "$gamemessage.add",
+        "addcommand",
+        "addtext",
+        "drawtext",
+        "sethelptext",
+        "sethelpwindowitem",
+        "setcaption",
+        "setlabel",
+        "setdescription",
+        "settitle",
+        "alert",
+        "confirm",
+        "prompt",
+    }
+    SAFE_SINK_TEXT_HINTS = {
+        "text",
+        "message",
+        "caption",
+        "label",
+        "title",
+        "description",
+        "help",
+        "tooltip",
+    }
 
     def __init__(self) -> None:
         self._tokenizer = JSStringTokenizer()
@@ -131,6 +156,34 @@ class JavaScriptAstAuditExtractor:
         """Extract audit-only string candidates from JS source."""
         candidates, engine = self.extract_audit_candidates_from_source(js_code)
         return [(item.path, item.text, item.tag) for item in candidates], engine
+
+    def extract_safe_sink_entries_from_source(self, js_code: str) -> tuple[List[AuditEntry], str]:
+        """Extract strings only from semantically safe JS sinks."""
+        if not js_code.strip():
+            return [], self.engine_name
+
+        if self._parser is None:
+            return self._extract_safe_strings_with_tokenizer(js_code), self.engine_name
+
+        source_bytes = js_code.encode("utf-8")
+        tree = self._parser.parse(source_bytes)
+
+        entries: List[AuditEntry] = []
+        seen_paths: set[str] = set()
+
+        for node in self._iter_string_nodes(tree.root_node):
+            text_value = self._decode_string_value(source_bytes, node)
+            if not self._is_safe_sink_string(node, text_value, source_bytes):
+                continue
+
+            path = f"@SAFE{node.start_point.row}:{node.start_point.column}"
+            if path in seen_paths:
+                continue
+
+            seen_paths.add(path)
+            entries.append((path, text_value, "js_safe_sink"))
+
+        return entries, self.engine_name
 
     def extract_audit_candidates_from_source(
         self,
@@ -218,7 +271,14 @@ class JavaScriptAstAuditExtractor:
             for index, (_start, _end, value, _quote) in enumerate(strings)
         ]
 
-    def _build_language(self) -> Language | None:
+    def _extract_safe_strings_with_tokenizer(self, js_code: str) -> List[AuditEntry]:
+        strings = self._tokenizer.extract_translatable_strings(js_code)
+        return [
+            (f"@SAFE_TOK{index}", value, "js_safe_sink_fallback")
+            for index, (_start, _end, value, _quote) in enumerate(strings)
+        ]
+
+    def _build_language(self):
         if Language is None or tree_sitter_javascript is None:
             return None
         return Language(tree_sitter_javascript.language())
@@ -303,6 +363,54 @@ class JavaScriptAstAuditExtractor:
             return "medium"
         return "low"
 
+    def _is_safe_sink_string(self, node: Any, text_value: str, source_bytes: bytes) -> bool:
+        stripped = text_value.strip()
+        if not stripped:
+            return False
+
+        if self._tokenizer._is_technical_string(stripped):
+            return False
+
+        callee_name, arg_index = self._get_call_context(node, source_bytes)
+        if callee_name is not None:
+            normalized_callee = callee_name.lower()
+            if any(hint in normalized_callee for hint in self.SAFE_SINK_CALL_HINTS):
+                if arg_index == 0:
+                    return self._looks_textual_candidate(stripped)
+                if normalized_callee.endswith("addcommand") and arg_index == 1:
+                    return False
+            if normalized_callee.endswith("setvalue") and arg_index == 1:
+                return self._looks_textual_candidate(stripped)
+            return False
+
+        pair_key = self._get_pair_value_key(node, source_bytes)
+        if pair_key and self._is_positive_text_key(pair_key):
+            return self._looks_textual_candidate(stripped)
+
+        assignment_key = self._get_assignment_target_key(node, source_bytes)
+        if assignment_key and self._is_positive_text_key(assignment_key):
+            return self._looks_textual_candidate(stripped)
+
+        variable_name = self._get_variable_declarator_name(node, source_bytes)
+        if variable_name and self._is_positive_text_key(variable_name):
+            return self._looks_textual_candidate(stripped)
+
+        return False
+
+    def _is_positive_text_key(self, key_name: str) -> bool:
+        normalized = key_name.lower()
+        if normalized in self.NEGATIVE_KEY_HINTS:
+            return False
+        return any(hint in normalized for hint in self.SAFE_SINK_TEXT_HINTS)
+
+    def _looks_textual_candidate(self, text_value: str) -> bool:
+        stripped = text_value.strip()
+        if not stripped:
+            return False
+        if len(stripped) >= 4 and (" " in stripped or any(ord(char) > 127 for char in stripped)):
+            return True
+        return any(mark in stripped for mark in ("!", "?", ".", ":", ";")) and len(stripped) >= 4
+
     def _score_key_hint(self, key_name: str) -> int:
         lower_key = key_name.lower()
         if lower_key in self.NEGATIVE_KEY_HINTS:
@@ -361,6 +469,15 @@ class JavaScriptAstAuditExtractor:
                 return self._decode_string_value(source_bytes, index_node)
             return self._node_text(index_node, source_bytes)
         return None
+
+    def _get_variable_declarator_name(self, node: Any, source_bytes: bytes) -> str | None:
+        parent = node.parent
+        if parent is None or parent.type != "variable_declarator":
+            return None
+        if parent.child_by_field_name("value") != node:
+            return None
+        name_node = parent.child_by_field_name("name")
+        return self._node_text(name_node, source_bytes) if name_node is not None else None
 
     def _get_call_context(self, node: Any, source_bytes: bytes) -> tuple[str | None, int | None]:
         current = node

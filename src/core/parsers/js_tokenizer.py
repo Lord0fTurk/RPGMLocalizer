@@ -7,9 +7,16 @@ identifies string tokens with their positions for safe extraction and replacemen
 
 Used by json_parser.py to find translatable text inside script calls.
 """
-import re
 import logging
 from typing import List, Tuple, Optional
+
+try:
+    from tree_sitter import Language, Parser
+    import tree_sitter_javascript
+except ImportError:  # pragma: no cover - exercised through fallback behavior
+    Language = None
+    Parser = None
+    tree_sitter_javascript = None
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +32,10 @@ class JSStringTokenizer:
     - Multi-line comments (/* ... */)
     - Regex literals (basic avoidance)
     """
+
+    def __init__(self) -> None:
+        self._language = self._build_language()
+        self._parser = Parser(self._language) if self._language is not None and Parser is not None else None
     
     def extract_strings(self, js_code: str) -> List[Tuple[int, int, str, str]]:
         """
@@ -41,6 +52,11 @@ class JSStringTokenizer:
         """
         if not js_code:
             return []
+
+        if self._parser is not None:
+            parsed = self._extract_strings_with_tree_sitter(js_code)
+            if parsed:
+                return parsed
         
         tokens = []
         i = 0
@@ -66,6 +82,11 @@ class JSStringTokenizer:
                     i += 1
                 else:
                     i = length  # unterminated comment
+                continue
+
+            # --- Regex literals ---
+            if c == '/' and self._looks_like_regex_literal(js_code, i):
+                i = self._skip_regex_literal(js_code, i)
                 continue
             
             # --- String literals ---
@@ -131,6 +152,57 @@ class JSStringTokenizer:
             i += 1
         
         return tokens
+
+    def _build_language(self):
+        if Language is None or tree_sitter_javascript is None:
+            return None
+        return Language(tree_sitter_javascript.language())
+
+    def _extract_strings_with_tree_sitter(self, js_code: str) -> List[Tuple[int, int, str, str]]:
+        parser = self._parser
+        if parser is None:
+            return []
+        source_bytes = js_code.encode("utf-8")
+        tree = getattr(parser, "parse")(source_bytes)
+        tokens: List[Tuple[int, int, str, str]] = []
+
+        for node in self._iter_string_nodes(tree.root_node):
+            raw_text = source_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="ignore")
+            if not raw_text:
+                continue
+
+            if node.type == "template_string":
+                if any(child.type == "template_substitution" for child in node.named_children):
+                    continue
+                value = raw_text[1:-1] if len(raw_text) >= 2 else raw_text
+                quote = "`"
+            else:
+                quote = raw_text[0] if raw_text and raw_text[0] in ('"', "'") else '"'
+                value = self._decode_literal_value(raw_text, quote)
+
+            tokens.append((node.start_byte, node.end_byte, value, quote))
+
+        return tokens
+
+    def _iter_string_nodes(self, node):
+        stack = [node]
+        while stack:
+            current = stack.pop()
+            if current.type in {"string", "template_string"}:
+                yield current
+            stack.extend(reversed(current.children))
+
+    def _decode_literal_value(self, raw_text: str, quote: str) -> str:
+        if len(raw_text) < 2:
+            return raw_text
+        if quote == '`':
+            return raw_text[1:-1]
+        try:
+            import ast
+
+            return ast.literal_eval(raw_text)
+        except (SyntaxError, ValueError):
+            return raw_text[1:-1]
     
     def extract_translatable_strings(self, js_code: str, 
                                       min_length: int = 2,
@@ -171,6 +243,30 @@ class JSStringTokenizer:
             
             # Check context: skip strings in comparisons
             if self._is_in_comparison(js_code, start):
+                continue
+
+            # Skip strings that are part of regex constructors.
+            if self._is_in_regex_constructor(js_code, start):
+                continue
+
+            # Skip tagged raw templates used for technical patterns/paths.
+            if self._is_in_string_raw_template(js_code, start):
+                continue
+
+            # Skip strings used in path/URL constructors.
+            if self._is_in_path_constructor(js_code, start):
+                continue
+
+            # Skip strings used in technical code execution helpers.
+            if self._is_in_code_constructor(js_code, start):
+                continue
+
+            # Skip strings used in data transform wrappers.
+            if self._is_in_data_wrapper(js_code, start):
+                continue
+
+            # Skip only separator-like strings used in join/split helpers.
+            if self._is_in_separator_helper(js_code, start, value):
                 continue
             
             # Optionally require space or non-ASCII (indicates natural language)
@@ -230,6 +326,10 @@ class JSStringTokenizer:
         js_managers = ['textmanager.', 'datamanager.', 'imagemanager.', 'scenemanager.', 'soundmanager.', 'audiomanager.']
         if any(manager in v_lower for manager in js_managers):
             return True
+
+        js_code_markers = ('eval(', 'function(', 'new function(', 'settimeout(', 'setinterval(')
+        if any(marker in v_lower for marker in js_code_markers):
+            return True
         
         # Boolean-ish
         if v_lower in ('true', 'false', 'null', 'undefined', 'none', 'nan',
@@ -275,6 +375,141 @@ class JSStringTokenizer:
             return True
         
         return False
+
+    def _looks_like_regex_literal(self, js_code: str, slash_index: int) -> bool:
+        """Heuristically determine whether a slash starts a regex literal."""
+        if slash_index + 1 >= len(js_code):
+            return False
+
+        prev = slash_index - 1
+        while prev >= 0 and js_code[prev] in ' \t\r\n':
+            prev -= 1
+
+        if prev < 0:
+            return True
+
+        prev_char = js_code[prev]
+        if prev_char in '([{:;,!?=<>+-*%&|^~':
+            return True
+
+        tail = js_code[max(0, prev - 12):prev + 1].lower()
+        if any(tail.endswith(keyword) for keyword in ('return', 'throw', 'case', 'if', 'while', 'for', 'with', 'delete', 'void', 'typeof', 'new', 'in')):
+            return True
+
+        return False
+
+    def _skip_regex_literal(self, js_code: str, slash_index: int) -> int:
+        """Skip a regex literal, including character classes and flags."""
+        i = slash_index + 1
+        length = len(js_code)
+        in_class = False
+
+        while i < length:
+            ch = js_code[i]
+            if ch == '\\':
+                i += 2
+                continue
+            if ch == '[':
+                in_class = True
+            elif ch == ']' and in_class:
+                in_class = False
+            elif ch == '/' and not in_class:
+                i += 1
+                while i < length and js_code[i].isalpha():
+                    i += 1
+                return i
+            i += 1
+
+        return length
+
+    def _is_in_regex_constructor(self, js_code: str, string_start: int) -> bool:
+        """Return True when a string is an argument to RegExp/new RegExp."""
+        prefix = js_code[max(0, string_start - 24):string_start].lower()
+        compact = "".join(prefix.split())
+        return compact.endswith('regexp(') or compact.endswith('newregexp(')
+
+    def _is_in_string_raw_template(self, js_code: str, string_start: int) -> bool:
+        """Return True when a template literal is tagged with String.raw."""
+        if string_start <= 0:
+            return False
+
+        prefix = js_code[max(0, string_start - 32):string_start].lower()
+        compact = "".join(prefix.split())
+        return compact.endswith('string.raw`') or compact.endswith('string.raw(')
+
+    def _is_in_path_constructor(self, js_code: str, string_start: int) -> bool:
+        """Return True when a string is used in path/URL construction."""
+        prefix = js_code[max(0, string_start - 32):string_start].lower()
+        compact = "".join(prefix.split())
+        markers = (
+            'path.join(',
+            'path.resolve(',
+            'path.normalize(',
+            'path.basename(',
+            'path.dirname(',
+            'path.extname(',
+            'newurl(',
+            'url(',
+        )
+        for marker in markers:
+            marker_pos = compact.rfind(marker)
+            if marker_pos == -1:
+                continue
+            if ')' not in compact[marker_pos:]:
+                return True
+        return False
+
+    def _is_in_code_constructor(self, js_code: str, string_start: int) -> bool:
+        """Return True when a string is used in eval/Function/timer code helpers."""
+        prefix = js_code[max(0, string_start - 32):string_start].lower()
+        compact = "".join(prefix.split())
+        return any(
+            compact.endswith(marker)
+            for marker in (
+                'eval(',
+                'function(',
+                'newfunction(',
+                'settimeout(',
+                'setinterval(',
+                'requestanimationframe(',
+                'queuemicrotask(',
+                'promise.resolve(',
+                'promise.reject(',
+                'object.assign(',
+            )
+        )
+
+    def _is_in_data_wrapper(self, js_code: str, string_start: int) -> bool:
+        """Return True when a string is used in JSON/base64 wrapper helpers."""
+        prefix = js_code[max(0, string_start - 32):string_start].lower()
+        compact = "".join(prefix.split())
+        return any(
+            compact.endswith(marker)
+            for marker in (
+                'json.parse(',
+                'json.stringify(',
+                'atob(',
+                'btoa(',
+            )
+        )
+
+    def _looks_like_separator_value(self, value: str) -> bool:
+        """Return True when a string is likely an array/string separator."""
+        stripped = value.strip()
+        if not stripped:
+            return False
+        if any(char.isalnum() for char in stripped):
+            return False
+        allowed = set(" \t\r\n,./_|:-+*#;\\")
+        return all(char in allowed for char in stripped)
+
+    def _is_in_separator_helper(self, js_code: str, string_start: int, value: str) -> bool:
+        """Return True when a string is a separator for join/split-style helpers."""
+        prefix = js_code[max(0, string_start - 24):string_start].lower()
+        compact = "".join(prefix.split())
+        if not any(compact.endswith(marker) for marker in ('join(', 'split(')):
+            return False
+        return self._looks_like_separator_value(value)
     
     def _is_in_comparison(self, js_code: str, string_start: int) -> bool:
         """

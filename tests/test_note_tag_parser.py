@@ -27,6 +27,18 @@ class TestNoteTagParser(unittest.TestCase):
         texts = self.parser.extract_translatable(note)
         self.assertEqual(len(texts), 0)
 
+    def test_technical_note_values_are_skipped(self):
+        """Identifier-like or asset-like note values should not be treated as text."""
+        note = (
+            "<Quest Reward: 100>\n"
+            "<Display Name: img/system/Window.png>\n"
+            "<Summary: Quest_01>"
+        )
+        texts = self.parser.extract_translatable(note)
+        self.assertNotIn("100", texts)
+        self.assertNotIn("img/system/Window.png", texts)
+        self.assertNotIn("Quest_01", texts)
+
     def test_block_tag_extraction(self):
         """Multi-line block tags should have their content extracted."""
         note = "<Custom Death Message>\n%1 has been slain!\n</Custom Death Message>"
@@ -44,6 +56,36 @@ class TestNoteTagParser(unittest.TestCase):
         note = "<Element: Fire>\n<Help Text: Cast a fireball>\n<Icon: 128>"
         texts = self.parser.extract_translatable(note)
         self.assertIn("Cast a fireball", texts)
+
+    def test_common_plugin_family_tags(self):
+        """Common Yanfly, VisuStella, Galv, and MOG tags should be extractable."""
+        note = (
+            "<Display Name: Hero Title>\n"
+            "<Display Text: Welcome to the forest>\n"
+            "<Popup Text: Critical Hit!>\n"
+            "<Battle Text: A wild slime appears>\n"
+            "<Title: The Lost Relic>"
+        )
+        texts = self.parser.extract_translatable(note)
+        self.assertIn("Hero Title", texts)
+        self.assertIn("Welcome to the forest", texts)
+        self.assertIn("Critical Hit!", texts)
+        self.assertIn("A wild slime appears", texts)
+        self.assertIn("The Lost Relic", texts)
+
+    def test_quest_journal_tags(self):
+        """Quest/journal style note tags should be extractable."""
+        note = (
+            "<Quest Name: A Hero's Beginning>\n"
+            "<Quest Objective: Find the old sword>\n"
+            "<Quest Reward: 100 Gold>\n"
+            "<Summary: The village elder needs help>"
+        )
+        texts = self.parser.extract_translatable(note)
+        self.assertIn("A Hero's Beginning", texts)
+        self.assertIn("Find the old sword", texts)
+        self.assertIn("100 Gold", texts)
+        self.assertIn("The village elder needs help", texts)
 
     def test_empty_note(self):
         """Empty notes should return no segments."""

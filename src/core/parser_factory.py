@@ -3,15 +3,17 @@ Parser Factory for RPGMLocalizer.
 Returns the appropriate parser based on file extension.
 """
 import os
-from typing import Optional
+from typing import Any, Optional
 
+from .parsers.hendrix_csv_parser import HendrixLocalizationCsvParser, HENDRIX_CSV_FILENAME
 from .parsers.json_parser import JsonParser
 from .parsers.plain_text_parser import CreditsTextParser, SUPPORTED_TEXT_FILENAMES
 from .parsers.ruby_parser import RubyParser
+from .parsers.ts_adv_scenario_parser import TsAdvScenarioParser, TS_SCENARIO_EXTENSION
 from .parsers.base import BaseParser
 
 
-def get_parser(file_path: str, settings: dict = None) -> Optional[BaseParser]:
+def get_parser(file_path: str, settings: Optional[dict[str, Any]] = None) -> Optional[BaseParser]:
     """
     Get the appropriate parser for a file based on its extension.
     
@@ -23,7 +25,20 @@ def get_parser(file_path: str, settings: dict = None) -> Optional[BaseParser]:
         Parser instance or None if no suitable parser found
     """
     ext = os.path.splitext(file_path)[1].lower()
+    basename = os.path.basename(file_path).lower()
     settings = settings or {}
+
+    if basename == HENDRIX_CSV_FILENAME:
+        return HendrixLocalizationCsvParser(
+            source_lang=settings.get('source_lang', 'auto'),
+            target_lang=settings.get('target_lang', 'tr'),
+            regex_blacklist=settings.get('regex_blacklist', [])
+        )
+    if ext == TS_SCENARIO_EXTENSION:
+        return TsAdvScenarioParser(
+            decode_key=settings.get('ts_decode_key', 255),
+            regex_blacklist=settings.get('regex_blacklist', [])
+        )
     
     if ext in [".json", ".js"]:
         return JsonParser(
@@ -47,12 +62,15 @@ def get_parser(file_path: str, settings: dict = None) -> Optional[BaseParser]:
 
 def get_supported_extensions() -> list:
     """Get list of supported file extensions."""
-    return ['.json', '.rvdata2', '.rxdata', '.rvdata', '.js', '.txt']
+    return ['.json', '.rvdata2', '.rxdata', '.rvdata', '.js', '.txt', '.csv', TS_SCENARIO_EXTENSION]
 
 
 def is_supported_file(file_path: str) -> bool:
     """Check if a file is supported for translation."""
     ext = os.path.splitext(file_path)[1].lower()
+    basename = os.path.basename(file_path).lower()
+    if basename == HENDRIX_CSV_FILENAME:
+        return True
     if ext == '.txt':
         return os.path.basename(file_path).lower() in SUPPORTED_TEXT_FILENAMES
     return ext in get_supported_extensions()

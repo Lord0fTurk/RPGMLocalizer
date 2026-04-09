@@ -208,6 +208,35 @@ class TestPluginsJsRoundTrip(SingletonResetTestCase):
         self.assertIn('"Dash Button":"shift"', result)
         self.assertIn('"Attack Text":"Saldiri"', result)
 
+    def test_plugins_js_apply_rejects_unexpected_structural_mutation(self) -> None:
+        parser = JsonParser()
+        plugins_js = (
+            'var $plugins = '
+            '[{"name":"MenuGuardPlugin","status":true,"parameters":{'
+            '"Menu Label":"Options","Safe Text":"Welcome"}}];\n'
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = os.path.join(tmpdir, "plugins.js")
+            with open(file_path, "w", encoding="utf-8") as handle:
+                handle.write(plugins_js)
+
+            original_setter = parser._set_value_at_path
+
+            def bad_setter(data: object, path: str, value: object) -> None:
+                original_setter(data, path, value)
+                if isinstance(data, list) and path == "0.parameters.Menu Label":
+                    data[0]["status"] = False
+
+            parser._set_value_at_path = bad_setter  # type: ignore[assignment]
+            result = parser.apply_translation(
+                file_path,
+                {"0.parameters.Menu Label": "Ana Menu", "0.parameters.Safe Text": "Hos geldin"},
+            )
+
+        self.assertIsNone(result)
+        self.assertIn("Structured invariant violation", parser.last_apply_error or "")
+
 
 class TestSingleCharacterExtraction(SingletonResetTestCase):
     def test_non_ascii_single_character_survives_pipeline_filter(self) -> None:

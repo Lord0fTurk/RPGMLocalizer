@@ -1,9 +1,10 @@
+from typing import cast
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QHeaderView, 
                              QFileDialog, QTableWidgetItem)
 from qfluentwidgets import (ScrollArea, PrimaryPushButton, PushButton, 
                             TableWidget, FluentIcon as FIF, LineEdit, 
-                            ComboBox, SwitchButton, SubtitleLabel, InfoBar, CheckBox)
+                            ComboBox, SwitchButton, SubtitleLabel, InfoBar, CheckBox, CaptionLabel)
 
 from src.core.glossary import Glossary, create_sample_glossary
 import os
@@ -34,21 +35,24 @@ class GlossaryInterface(ScrollArea):
         self.vBoxLayout.setSpacing(20)
 
         # 1. Header
-        self.lbl_title = SubtitleLabel("Glossary Manager", self)
+        self.lbl_title = SubtitleLabel("Glossary", self)
         self.vBoxLayout.addWidget(self.lbl_title)
+
+        self.lbl_hint = SubtitleLabel("Keep common terms here. Use regex for patterns.", self)
+        self.vBoxLayout.addWidget(self.lbl_hint)
         
         # 2. Controls Toolbar
         self.hBoxToolbar = QHBoxLayout()
         
         # Inputs for new term
         self.txt_original = LineEdit(self)
-        self.txt_original.setPlaceholderText("Original Term")
+        self.txt_original.setPlaceholderText("Original")
         self.txt_translation = LineEdit(self)
         self.txt_translation.setPlaceholderText("Translation")
         
-        self.btn_add = PrimaryPushButton(FIF.ADD, "Add Term", self)
+        self.btn_add = PrimaryPushButton(FIF.ADD, "Add", self)
         
-        self.chk_regex = CheckBox("Regex?", self)
+        self.chk_regex = CheckBox("Regex", self)
         
         self.hBoxToolbar.addWidget(self.txt_original, 1)
         self.hBoxToolbar.addWidget(self.txt_translation, 1)
@@ -60,10 +64,10 @@ class GlossaryInterface(ScrollArea):
         # 3. Action Buttons (Load, Save, etc)
         self.hBoxActions = QHBoxLayout()
         
-        self.btn_load = PushButton(FIF.FOLDER, "Load Glossary", self)
-        self.btn_save = PushButton(FIF.SAVE, "Save Glossary", self)
-        self.btn_create_sample = PushButton(FIF.DOCUMENT, "Create Sample", self)
-        self.btn_clear = PushButton(FIF.DELETE, "Clear All", self)
+        self.btn_load = PushButton(FIF.FOLDER, "Load", self)
+        self.btn_save = PushButton(FIF.SAVE, "Save", self)
+        self.btn_create_sample = PushButton(FIF.DOCUMENT, "Sample", self)
+        self.btn_clear = PushButton(FIF.DELETE, "Clear", self)
         
         self.hBoxActions.addWidget(self.btn_load)
         self.hBoxActions.addWidget(self.btn_save)
@@ -77,16 +81,18 @@ class GlossaryInterface(ScrollArea):
         self.table = TableWidget(self)
         self.table.setColumnCount(3)
         self.table.setHorizontalHeaderLabels(["Original", "Translation", "Type"])
-        self.table.verticalHeader().hide()
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents) # Type column
+        vertical_header = cast(QHeaderView, self.table.verticalHeader())
+        horizontal_header = cast(QHeaderView, self.table.horizontalHeader())
+        vertical_header.hide()
+        horizontal_header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        horizontal_header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents) # Type column
         self.table.setBorderRadius(8)
         self.table.setBorderVisible(True)
         
         self.vBoxLayout.addWidget(self.table)
         
         # 5. Status
-        self.lbl_status = SubtitleLabel(f"Total Terms: 0", self)
+        self.lbl_status = SubtitleLabel("Terms: 0", self)
         self.lbl_status.setObjectName("lblStatus")
         self.vBoxLayout.addWidget(self.lbl_status)
 
@@ -110,7 +116,7 @@ class GlossaryInterface(ScrollArea):
             return
             
         if original in self.glossary.terms:
-             InfoBar.warning("Duplicate", "Term already exists. It will be updated.", parent=self)
+            InfoBar.warning("Duplicate", "Term exists. Updating it.", parent=self)
         
         self.glossary.add_term(original, trans, is_regex)
         self._refresh_table()
@@ -138,7 +144,7 @@ class GlossaryInterface(ScrollArea):
             self.table.setItem(i, 1, item_trans)
             self.table.setItem(i, 2, item_type)
             
-        self.lbl_status.setText(f"Total Terms: {len(self.glossary)}")
+        self.lbl_status.setText(f"Terms: {len(self.glossary)}")
         
     def load_glossary(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -149,7 +155,7 @@ class GlossaryInterface(ScrollArea):
                 self.current_file_path = file_path
                 self._refresh_table()
                 self.glossary_selected.emit(file_path)
-                InfoBar.success("Success", f"Loaded glossary from {os.path.basename(file_path)}", parent=self)
+                InfoBar.success("Success", f"Loaded {os.path.basename(file_path)}", parent=self)
             else:
                 InfoBar.error("Error", "Failed to load glossary.", parent=self)
 
@@ -163,7 +169,7 @@ class GlossaryInterface(ScrollArea):
             self.current_file_path = file_path
         
         if self.glossary.save(self.current_file_path):
-            InfoBar.success("Success", "Glossary saved successfully.", parent=self)
+            InfoBar.success("Success", "Glossary saved.", parent=self)
             self.glossary_selected.emit(self.current_file_path)
         else:
             InfoBar.error("Error", "Failed to save glossary.", parent=self)
@@ -180,9 +186,9 @@ class GlossaryInterface(ScrollArea):
         if self.glossary.load(path):
             self.current_file_path = path
             self._refresh_table()
-            InfoBar.success("Success", f"Loaded sample glossary.", parent=self)
+            InfoBar.success("Success", "Sample loaded.", parent=self)
 
     def clear_glossary(self):
         self.glossary.terms.clear()
         self._refresh_table()
-        InfoBar.info("Cleared", "Glossary has been cleared.", parent=self)
+        InfoBar.info("Cleared", "Glossary cleared.", parent=self)

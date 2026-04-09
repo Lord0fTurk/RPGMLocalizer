@@ -38,12 +38,12 @@ class MainWindow(FluentWindow):
         self.consoleInterface.setObjectName("consoleInterface")
         
         # 4. Add to Navigation
-        self.addSubInterface(self.homeInterface, FIF.HOME, "Translation")
+        self.addSubInterface(self.homeInterface, FIF.HOME, "Home")
         self.addSubInterface(self.settingsInterface, FIF.SETTING, "Settings")
         self.addSubInterface(self.glossaryInterface, FIF.BOOK_SHELF, "Glossary")
         self.addSubInterface(self.exportInterface, FIF.SHARE, "Export/Import")
-        self.addSubInterface(self.aboutInterface, FIF.INFO, "About", position=NavigationItemPosition.BOTTOM)
         self.addSubInterface(self.consoleInterface, FIF.COMMAND_PROMPT, "Console", position=NavigationItemPosition.BOTTOM)
+        self.addSubInterface(self.aboutInterface, FIF.INFO, "About", position=NavigationItemPosition.BOTTOM)
         
         # Add Support/Donate button
         self.navigationInterface.addItem(

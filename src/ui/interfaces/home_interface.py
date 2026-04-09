@@ -1,4 +1,4 @@
-﻿import os
+import os
 from typing import Optional
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QFileDialog, QLabel
 from PyQt6.QtCore import Qt, pyqtSignal as Signal
@@ -23,6 +23,30 @@ class HomeInterface(QWidget):
         self.vBoxLayout = QVBoxLayout(self)
         self.vBoxLayout.setContentsMargins(36, 36, 36, 36)
         self.vBoxLayout.setSpacing(20)
+
+        self._current_project_path = ""
+        self._current_source_code = "auto"
+        self._current_target_code = "tr"
+        self._current_running = False
+
+        # 0. Overview Card
+        self.card_overview = CardWidget(self)
+        self.l_overview = QVBoxLayout(self.card_overview)
+
+        self.lbl_overview_title = StrongBodyLabel("Quick Overview", self.card_overview)
+        self.lbl_overview_project = CaptionLabel("Project: not selected", self.card_overview)
+        self.lbl_overview_languages = CaptionLabel("Languages: auto → Turkish", self.card_overview)
+        self.lbl_overview_status = CaptionLabel("Status: ready", self.card_overview)
+
+        for label in (self.lbl_overview_project, self.lbl_overview_languages, self.lbl_overview_status):
+            label.setWordWrap(True)
+
+        self.l_overview.addWidget(self.lbl_overview_title)
+        self.l_overview.addWidget(self.lbl_overview_project)
+        self.l_overview.addWidget(self.lbl_overview_languages)
+        self.l_overview.addWidget(self.lbl_overview_status)
+
+        self.vBoxLayout.addWidget(self.card_overview)
         
         # 1. Project Selection Card
         self.card_project = CardWidget(self)
@@ -151,6 +175,7 @@ class HomeInterface(QWidget):
         self.lbl_source = BodyLabel("Source Language", self.card_lang)
         self.cmb_source = ComboBox(self.card_lang)
         self.cmb_source.addItems(list(self.source_languages.keys()))
+        self.cmb_source.currentTextChanged.connect(self._on_language_changed)
         self.v_source.addWidget(self.lbl_source)
         self.v_source.addWidget(self.cmb_source)
         
@@ -159,6 +184,7 @@ class HomeInterface(QWidget):
         self.lbl_target = BodyLabel("Target Language", self.card_lang)
         self.cmb_target = ComboBox(self.card_lang)
         self.cmb_target.addItems(list(self.target_languages.keys()))
+        self.cmb_target.currentTextChanged.connect(self._on_language_changed)
         self.v_target.addWidget(self.lbl_target)
         self.v_target.addWidget(self.cmb_target)
         
@@ -170,8 +196,36 @@ class HomeInterface(QWidget):
         self.l_lang.addLayout(self.h_lang)
         
         self.vBoxLayout.addWidget(self.card_lang)
+
+        # 3. Scope Note
+        self.card_scope = CardWidget(self)
+        self.l_scope = QVBoxLayout(self.card_scope)
+
+        self.lbl_scope_title = StrongBodyLabel("Localization Scope", self.card_scope)
+        self.lbl_scope_line1 = CaptionLabel(
+            "Best results come from standard RPG Maker project structures.",
+            self.card_scope,
+        )
+        self.lbl_scope_line2 = CaptionLabel(
+            "Custom plugin-driven structures may need manual review.",
+            self.card_scope,
+        )
+        self.lbl_scope_line3 = CaptionLabel(
+            "Use the coverage audit when you want to check for missed text surfaces.",
+            self.card_scope,
+        )
+
+        for label in (self.lbl_scope_line1, self.lbl_scope_line2, self.lbl_scope_line3):
+            label.setWordWrap(True)
+
+        self.l_scope.addWidget(self.lbl_scope_title)
+        self.l_scope.addWidget(self.lbl_scope_line1)
+        self.l_scope.addWidget(self.lbl_scope_line2)
+        self.l_scope.addWidget(self.lbl_scope_line3)
+
+        self.vBoxLayout.addWidget(self.card_scope)
         
-        # 3. Actions & Status
+        # 4. Actions & Status
         self.card_actions = CardWidget(self)
         self.l_actions = QVBoxLayout(self.card_actions)
         
@@ -200,6 +254,8 @@ class HomeInterface(QWidget):
         self.vBoxLayout.addWidget(self.card_actions)
         self.vBoxLayout.addStretch(1)
 
+        self._refresh_overview()
+
     def _browse_folder(self):
         directory = QFileDialog.getExistingDirectory(
             self, 
@@ -209,6 +265,8 @@ class HomeInterface(QWidget):
         normalized_path = self._normalize_project_path(directory)
         if normalized_path:
             self.txt_path.setText(normalized_path)
+            self._current_project_path = normalized_path
+            self._refresh_overview()
             self._check_encrypted_game(normalized_path)
 
     @staticmethod
@@ -228,9 +286,10 @@ class HomeInterface(QWidget):
             return None
         target_lower = target_name.lower()
         try:
-            for entry in os.scandir(parent_dir):
-                if entry.is_dir() and entry.name.lower() == target_lower:
-                    return entry.path
+            with os.scandir(parent_dir) as entries:
+                for entry in entries:
+                    if entry.is_dir() and entry.name.lower() == target_lower:
+                        return entry.path
         except OSError:
             return None
         return None
@@ -293,12 +352,18 @@ class HomeInterface(QWidget):
         path = self._normalize_project_path(self.txt_path.text())
         if path:
             self.txt_path.setText(path)
+            self._current_project_path = path
         
         # Convert display names to language codes
         source_name = self.cmb_source.currentText()
         target_name = self.cmb_target.currentText()
         source_code = self.source_languages.get(source_name, "auto")
         target_code = self.target_languages.get(target_name, "tr")
+
+        self._current_source_code = source_code
+        self._current_target_code = target_code
+        self._current_running = True
+        self._refresh_overview()
         
         data = {
             "project_path": path,
@@ -317,10 +382,12 @@ class HomeInterface(QWidget):
             self.progress_bar.setValue(progress)
             
     def set_running(self, running: bool):
+        self._current_running = running
         self.btn_start.setEnabled(not running)
         self.btn_stop.setEnabled(running)
         if not running:
             self.progress_bar.hide()
+        self._refresh_overview()
 
     def apply_settings(self, settings: dict):
         if not settings:
@@ -328,15 +395,43 @@ class HomeInterface(QWidget):
 
         project_path = settings.get("project_path", "")
         if project_path:
-            self.txt_path.setText(self._normalize_project_path(project_path))
+            normalized = self._normalize_project_path(project_path)
+            self.txt_path.setText(normalized)
+            self._current_project_path = normalized
 
         source_code = settings.get("source_lang")
         if source_code:
             self._set_combo_by_code(self.cmb_source, self.source_languages, source_code)
+            self._current_source_code = source_code
 
         target_code = settings.get("target_lang")
         if target_code:
             self._set_combo_by_code(self.cmb_target, self.target_languages, target_code)
+            self._current_target_code = target_code
+
+        self._refresh_overview()
+
+    def _on_language_changed(self, _text: str) -> None:
+        self._current_source_code = self.source_languages.get(self.cmb_source.currentText(), "auto")
+        self._current_target_code = self.target_languages.get(self.cmb_target.currentText(), "tr")
+        self._refresh_overview()
+
+    def _refresh_overview(self) -> None:
+        project_text = self._current_project_path or self._normalize_project_path(self.txt_path.text()) or "not selected"
+        source_name = self._language_name_from_code(self.source_languages, self._current_source_code)
+        target_name = self._language_name_from_code(self.target_languages, self._current_target_code)
+        run_text = "running" if self._current_running else "ready"
+
+        self.lbl_overview_project.setText(f"Project: {project_text}")
+        self.lbl_overview_languages.setText(f"Languages: {source_name} → {target_name}")
+        self.lbl_overview_status.setText(f"Status: {run_text}")
+
+    @staticmethod
+    def _language_name_from_code(mapping: dict, code: str) -> str:
+        for name, value in mapping.items():
+            if value == code:
+                return name
+        return code or "unknown"
 
     def _set_combo_by_code(self, combo, mapping: dict, code: str):
         for name, value in mapping.items():

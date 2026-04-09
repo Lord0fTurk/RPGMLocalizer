@@ -32,6 +32,21 @@ class TestJSStringTokenizer(unittest.TestCase):
         # Template literal with expression → placeholder
         self.assertIn("Hello ", tokens[0][2])
 
+    def test_string_raw_template_is_skipped(self):
+        """String.raw tagged templates should be treated as technical."""
+        code = r'const p = String.raw`C:\\Temp\\${name}`; var y = "safe";'
+        tokens = self.tok.extract_translatable_strings(code)
+        values = [token[2] for token in tokens]
+        self.assertNotIn(r'C:\Temp\${name}', values)
+        self.assertIn("safe", values)
+
+    def test_plain_template_literal_can_still_be_extracted(self):
+        """Ordinary template literals should still be considered when textual."""
+        code = 'const msg = `Hello world`;'
+        tokens = self.tok.extract_translatable_strings(code)
+        values = [token[2] for token in tokens]
+        self.assertIn("Hello world", values)
+
     def test_escape_sequences(self):
         tokens = self.tok.extract_strings(r'var x = "Line1\nLine2";')
         self.assertEqual(len(tokens), 1)
@@ -206,6 +221,125 @@ class TestJSStringTokenizerEdgeCases(unittest.TestCase):
         tokens = self.tok.extract_strings(code)
         self.assertEqual(len(tokens), 1)
         self.assertEqual(tokens[0][2], "text")
+
+    def test_regex_literal_with_quotes_is_skipped(self):
+        """Regex literals containing quote characters should not be tokenized as strings."""
+        code = 'var r = /"oops"/i; var y = "safe";'
+        tokens = self.tok.extract_strings(code)
+        self.assertEqual(len(tokens), 1)
+        self.assertEqual(tokens[0][2], "safe")
+
+    def test_regex_literal_with_comment_markers_is_skipped(self):
+        """Regex literals containing comment-like markers should not be tokenized as comments or strings."""
+        code = r'var r = /\/\* not a comment *\//; var y = "safe";'
+        tokens = self.tok.extract_strings(code)
+        self.assertEqual(len(tokens), 1)
+        self.assertEqual(tokens[0][2], "safe")
+
+    def test_regex_literal_after_return_is_skipped(self):
+        """Regex literals after return should be skipped, not treated as division."""
+        code = 'return /abc/.test(value); var y = "safe";'
+        tokens = self.tok.extract_strings(code)
+        self.assertEqual(len(tokens), 1)
+        self.assertEqual(tokens[0][2], "safe")
+
+    def test_division_operator_is_not_regex(self):
+        """Division operators should not trigger regex skipping."""
+        code = 'const ratio = a / b; var y = "safe";'
+        tokens = self.tok.extract_strings(code)
+        self.assertEqual(len(tokens), 1)
+        self.assertEqual(tokens[0][2], "safe")
+
+    def test_regexp_constructor_strings_are_skipped(self):
+        """Strings inside RegExp constructors should be treated as technical."""
+        code = 'const r = new RegExp("abc", "i"); const s = RegExp("def"); var y = "safe";'
+        tokens = self.tok.extract_translatable_strings(code)
+        values = [token[2] for token in tokens]
+        self.assertNotIn("abc", values)
+        self.assertNotIn("def", values)
+        self.assertIn("safe", values)
+
+    def test_regexp_constructor_translatable_string_is_skipped(self):
+        """Even human-looking strings should be skipped inside RegExp constructors."""
+        code = 'const r = RegExp("Open Menu"); var y = "safe text";'
+        tokens = self.tok.extract_translatable_strings(code)
+        values = [token[2] for token in tokens]
+        self.assertNotIn("Open Menu", values)
+        self.assertIn("safe text", values)
+
+    def test_path_join_strings_are_skipped(self):
+        """Strings used in path joins should be treated as technical."""
+        code = 'const p = path.join("img", "pictures", "Hero Face.png"); var y = "safe text";'
+        tokens = self.tok.extract_translatable_strings(code)
+        values = [token[2] for token in tokens]
+        self.assertNotIn("img", values)
+        self.assertNotIn("pictures", values)
+        self.assertNotIn("Hero Face.png", values)
+        self.assertIn("safe text", values)
+
+    def test_new_url_strings_are_skipped(self):
+        """Strings used in URL construction should be treated as technical."""
+        code = 'const u = new URL("https://example.com/game", base); var y = "safe text";'
+        tokens = self.tok.extract_translatable_strings(code)
+        values = [token[2] for token in tokens]
+        self.assertNotIn("https://example.com/game", values)
+        self.assertIn("safe text", values)
+
+    def test_eval_and_function_strings_are_skipped(self):
+        """Strings inside eval-like code constructors should be treated as technical."""
+        code = 'eval("showMenu()") ; Function("return 1") ; setTimeout("doWork()", 1000); var y = "safe text";'
+        tokens = self.tok.extract_translatable_strings(code)
+        values = [token[2] for token in tokens]
+        self.assertNotIn("showMenu()", values)
+        self.assertNotIn("return 1", values)
+        self.assertNotIn("doWork()", values)
+        self.assertIn("safe text", values)
+
+    def test_json_and_base64_wrappers_are_skipped(self):
+        """JSON/base64 wrapper strings should be treated as technical."""
+        code = 'const a = JSON.parse("{\\"x\\":1}"); const b = JSON.stringify("data"); const c = atob("SGVsbG8="); var y = "safe text";'
+        tokens = self.tok.extract_translatable_strings(code)
+        values = [token[2] for token in tokens]
+        self.assertNotIn('{"x":1}', values)
+        self.assertNotIn("data", values)
+        self.assertNotIn("SGVsbG8=", values)
+        self.assertIn("safe text", values)
+
+    def test_promise_and_object_assign_wrappers_are_skipped(self):
+        """Promise and object merge helpers should be treated as technical."""
+        code = 'Promise.resolve("ready"); Promise.reject("fail"); Object.assign(target, { label: "HUD" }); var y = "safe text";'
+        tokens = self.tok.extract_translatable_strings(code)
+        values = [token[2] for token in tokens]
+        self.assertNotIn("ready", values)
+        self.assertNotIn("fail", values)
+        self.assertNotIn("HUD", values)
+        self.assertIn("safe text", values)
+
+    def test_transform_helpers_are_skipped(self):
+        """Common transform helpers should be treated as technical."""
+        code = 'const a = parseInt("42", 10); const c = Number("12"); var y = "safe text";'
+        tokens = self.tok.extract_translatable_strings(code)
+        values = [token[2] for token in tokens]
+        self.assertNotIn("42", values)
+        self.assertNotIn("12", values)
+        self.assertIn("safe text", values)
+
+    def test_text_replace_strings_can_still_be_extracted(self):
+        """Human-readable replace strings should still be considered text."""
+        code = 'const a = text.replace("Open Menu", "Close Menu"); var y = "safe text";'
+        tokens = self.tok.extract_translatable_strings(code)
+        values = [token[2] for token in tokens]
+        self.assertIn("Open Menu", values)
+        self.assertIn("Close Menu", values)
+        self.assertIn("safe text", values)
+
+    def test_join_separator_is_skipped(self):
+        """Join separators should be treated as technical."""
+        code = 'const text = items.join(" / "); var y = "safe text";'
+        tokens = self.tok.extract_translatable_strings(code)
+        values = [token[2] for token in tokens]
+        self.assertNotIn(" / ", values)
+        self.assertIn("safe text", values)
 
     def test_unicode_string(self):
         code = 'var x = "こんにちは世界";'

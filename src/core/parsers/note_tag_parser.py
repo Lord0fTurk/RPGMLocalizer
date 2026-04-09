@@ -43,6 +43,8 @@ class NoteTagParser:
         'on death', 'on revive', 'on escape',
         'menu text', 'help text', 'info text',
         'display name', 'display text',
+        'quest name', 'quest title', 'quest objective', 'quest description',
+        'quest reward', 'objective text', 'reward text', 'summary',
         # MOG
         'name', 'title', 'description text',
         # Galv
@@ -107,6 +109,8 @@ class NoteTagParser:
             # If content has natural language (spaces, non-ASCII), likely translatable
             if not is_text and content.strip():
                 is_text = self._looks_like_text(content.strip())
+            if is_text and self._is_technical_value(content.strip()):
+                is_text = False
             
             segments.append((m.start(), m.end(), tag_name, content.strip(), 
                            'block_tag', is_text))
@@ -124,6 +128,8 @@ class NoteTagParser:
             is_text = tag_lower in self.TEXT_VALUE_TAGS
             if not is_text and tag_lower not in self.SKIP_VALUE_TAGS:
                 is_text = self._looks_like_text(value)
+            if is_text and self._is_technical_value(value):
+                is_text = False
             
             segments.append((m.start(), m.end(), tag_name, value, 
                            'value_tag', is_text))
@@ -147,13 +153,13 @@ class NoteTagParser:
                 text = note_text[pos:start].strip()
                 if text:
                     free_texts.append((pos, start, '', text, 'free_text', 
-                                      self._looks_like_text(text)))
+                                      self._looks_like_text(text) and not self._is_technical_value(text)))
             pos = end
         if pos < len(note_text):
             text = note_text[pos:].strip()
             if text:
                 free_texts.append((pos, len(note_text), '', text, 'free_text',
-                                  self._looks_like_text(text)))
+                                  self._looks_like_text(text) and not self._is_technical_value(text)))
         
         segments.extend(free_texts)
         segments.sort(key=lambda x: x[0])
@@ -232,6 +238,39 @@ class NoteTagParser:
         if value[0].isupper() and len(value) > 5:
             return True
         
+        return False
+
+    def _is_technical_value(self, value: str) -> bool:
+        """Return True when a note value looks like an identifier, path, or asset."""
+        if not isinstance(value, str):
+            return True
+
+        stripped = value.strip().strip('"\'')
+        if not stripped:
+            return True
+
+        lower = stripped.lower()
+        if lower in {"true", "false", "null", "undefined", "on", "off", "yes", "no"}:
+            return True
+
+        if stripped.isdigit():
+            return True
+
+        if re.fullmatch(r"0x[0-9a-fA-F]+", stripped):
+            return True
+
+        if ('/' in stripped or '\\' in stripped) and ' ' not in stripped:
+            return True
+
+        if any(lower.endswith(ext) for ext in ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ogg', '.wav', '.mp3', '.m4a', '.json', '.js')):
+            return True
+
+        if '_' in stripped and ' ' not in stripped:
+            return True
+
+        if len(stripped) <= 2 and stripped.isascii():
+            return True
+
         return False
     
     def _in_ranges(self, pos: int, ranges: List[Tuple[int, int]]) -> bool:

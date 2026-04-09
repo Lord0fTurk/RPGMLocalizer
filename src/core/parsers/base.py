@@ -211,7 +211,7 @@ class BaseParser(QObject, metaclass=ParserMeta):
         if trimmed.startswith('<') and trimmed.endswith('>'):
             return False
             
-        prefixes = ('v[', 'n[', 'i[', '::', 'eval(', 'Script:', 'Plugin:', 'note:', 'meta:', 'rgba(', 'rgb(')
+        prefixes = ('v[', 'n[', 'i[', '::', 'eval(', 'script:', 'plugin:', 'rgba(', 'rgb(')
         if lower_trimmed.startswith(prefixes) and not is_dialogue:
             return False
 

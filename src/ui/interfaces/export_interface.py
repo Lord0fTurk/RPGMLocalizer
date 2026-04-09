@@ -15,14 +15,25 @@ class ExportInterface(ScrollArea):
         self.export_path = ""
         self.import_path = ""
 
+        # Overview note
+        self.hintGroup = SettingCardGroup("Transfer", self.scrollWidget)
+        self.card_hint = PushSettingCard(
+            "Choose file",
+            FIF.INFO,
+            "CSV for editing, JSON for round-trip",
+            "Export translated text or import edited results.",
+            self.hintGroup
+        )
+        self.hintGroup.addSettingCard(self.card_hint)
+
         # Export Group
-        self.exportGroup = SettingCardGroup("Export Translations", self.scrollWidget)
+        self.exportGroup = SettingCardGroup("Export", self.scrollWidget)
         
         self.card_export = PushSettingCard(
-            "Select Output File",
+            "Select Output",
             FIF.SHARE,
             "Export to CSV/JSON",
-            "Export all extracted text for manual editing",
+            "Write extracted text to a file.",
             self.exportGroup
         )
         self.card_export.clicked.connect(self._select_export_path)
@@ -30,8 +41,8 @@ class ExportInterface(ScrollArea):
         from qfluentwidgets import SwitchSettingCard
         self.chk_export_only = SwitchSettingCard(
             FIF.SAVE,
-            "Export Only",
-            "Extract text without translating (for manual editing)",
+            "Export only",
+            "Extract text without writing back.",
             parent=self.exportGroup
         )
         self.chk_export_only.setChecked(False)
@@ -40,13 +51,13 @@ class ExportInterface(ScrollArea):
         self.exportGroup.addSettingCard(self.chk_export_only)
         
         # Import Group
-        self.importGroup = SettingCardGroup("Import Translations", self.scrollWidget)
+        self.importGroup = SettingCardGroup("Import", self.scrollWidget)
         
         self.card_import = PushSettingCard(
-            "Select Input File",
+            "Select Input",
             FIF.DOWNLOAD,
             "Import from CSV/JSON",
-            "Apply manually edited translations back to the game",
+            "Apply edited translations back to the game.",
             self.importGroup
         )
         self.card_import.clicked.connect(self._select_import_path)
@@ -54,6 +65,7 @@ class ExportInterface(ScrollArea):
         self.importGroup.addSettingCard(self.card_import)
 
         # Layout
+        self.expandLayout.addWidget(self.hintGroup)
         self.expandLayout.addWidget(self.exportGroup)
         self.expandLayout.addWidget(self.importGroup)
         self.expandLayout.addStretch(1)

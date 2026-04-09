@@ -44,6 +44,34 @@ class TestMvPluginCommandSafety(unittest.TestCase):
         self.assertEqual(text, "Welcome to campus")
         self.assertEqual(context, "dialogue_block")
 
+    def test_advload_command_is_not_extracted(self) -> None:
+        data = [
+            {
+                "code": 356,
+                "parameters": ["AdvLoad chapter_001"],
+                "indent": 0,
+            }
+        ]
+
+        self.parser.extracted = []
+        self.parser._process_list(data, "events.1.list")
+
+        self.assertEqual(self.parser.extracted, [])
+
+    def test_choicepos_command_is_not_extracted(self) -> None:
+        data = [
+            {
+                "code": 356,
+                "parameters": ["ChoicePos 404 248"],
+                "indent": 0,
+            }
+        ]
+
+        self.parser.extracted = []
+        self.parser._process_list(data, "events.1.list")
+
+        self.assertEqual(self.parser.extracted, [])
+
     def test_apply_translation_only_updates_quoted_payload(self) -> None:
         data = [
             {

@@ -107,6 +107,48 @@ class TestCoverageAudit(unittest.TestCase):
         self.assertIn("strings.json", basenames)
         self.assertNotIn("plugin_sidecar.json", basenames)
 
+    def test_pipeline_collect_files_skips_binary_json_sidecars_without_crashing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = self._create_minimal_mv_project(tmpdir)
+            sidecar_path = os.path.join(data_dir, "binary_sidecar.json")
+            with open(sidecar_path, "wb") as handle:
+                handle.write(b"\x89PNG\r\n\x1a\nnot json")
+
+            pipeline = TranslationPipeline({"use_cache": False, "backup_enabled": False})
+            files = pipeline._collect_files(data_dir)
+
+        basenames = {os.path.basename(path).lower() for path in files}
+        self.assertIn("system.json", basenames)
+        self.assertNotIn("binary_sidecar.json", basenames)
+
+    def test_pipeline_collect_files_skips_backup_json_copies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = self._create_minimal_mv_project(tmpdir)
+            backup_path = os.path.join(data_dir, "Skills_Backup.json")
+            with open(backup_path, "w", encoding="utf-8") as handle:
+                handle.write('{"broken": true')
+
+            pipeline = TranslationPipeline({"use_cache": False, "backup_enabled": False})
+            files = pipeline._collect_files(data_dir)
+
+        basenames = {os.path.basename(path).lower() for path in files}
+        self.assertIn("system.json", basenames)
+        self.assertNotIn("skills_backup.json", basenames)
+
+    def test_pipeline_collect_files_skips_copy_json_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = self._create_minimal_mv_project(tmpdir)
+            copy_path = os.path.join(data_dir, "CommonEvents - Copy (2).json")
+            with open(copy_path, "w", encoding="utf-8") as handle:
+                handle.write('{"duplicate": true}')
+
+            pipeline = TranslationPipeline({"use_cache": False, "backup_enabled": False})
+            files = pipeline._collect_files(data_dir)
+
+        basenames = {os.path.basename(path).lower() for path in files}
+        self.assertIn("system.json", basenames)
+        self.assertNotIn("commonevents - copy (2).json", basenames)
+
     def test_pipeline_saves_translated_credits_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = self._create_minimal_mv_project(tmpdir)
@@ -183,11 +225,44 @@ class TestCoverageAudit(unittest.TestCase):
         self.assertIn("www/js/plugins/NumbState.js", raw_js_files)
         self.assertNotIn("www/js/libs/pixi.js", raw_js_files)
         self.assertGreater(report["raw_js_audit"]["candidate_entries"], 0)
-        self.assertGreater(report["raw_js_audit"]["engines"].get("tree_sitter", 0), 0)
+        self.assertGreater(sum(report["raw_js_audit"]["engines"].values()), 0)
         self.assertIn("confidence_buckets", report["raw_js_audit"])
         self.assertIn("write_readiness", report["raw_js_audit"])
         self.assertTrue(all("engine" in item for item in report["raw_js_audit"]["files"]))
         self.assertTrue(all("write_readiness" in item for item in report["raw_js_audit"]["files"]))
+
+    def test_coverage_audit_reports_custom_hendrix_and_ts_surfaces(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = os.path.join(tmpdir, "www", "data")
+            js_dir = os.path.join(tmpdir, "www", "js")
+            scenario_dir = os.path.join(tmpdir, "scenario")
+            os.makedirs(data_dir, exist_ok=True)
+            os.makedirs(js_dir, exist_ok=True)
+            os.makedirs(scenario_dir, exist_ok=True)
+
+            with open(os.path.join(data_dir, "System.json"), "w", encoding="utf-8") as handle:
+                json.dump({"gameTitle": "Test Game"}, handle)
+
+            with open(os.path.join(js_dir, "plugins.js"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    'var $plugins = ['
+                    '{"name":"Hendrix_Localization","status":true,"parameters":{"Languages":"[]","Default Language":"en"}},'
+                    '{"name":"TS_Decode","status":true,"parameters":{"Key":"255"}}'
+                    '];\n'
+                )
+
+            with open(os.path.join(tmpdir, "game_messages.csv"), "w", encoding="utf-8", newline="") as handle:
+                handle.write("\ufeffChange,Excluded,Name,Original,en\n,,,,Hello\n")
+
+            with open(os.path.join(scenario_dir, "001.sl"), "w", encoding="utf-8") as handle:
+                handle.write("sample")
+
+            pipeline = TranslationPipeline({"use_cache": False, "backup_enabled": False})
+            report = pipeline.analyze_project_coverage(tmpdir)
+
+        detected = report["custom_surfaces"]["detected"]
+        self.assertEqual(detected.get("hendrix_csv"), 1)
+        self.assertEqual(detected.get("ts_adv_scenarios"), 1)
 
     def _create_minimal_mv_project(self, project_root: str, newline: str = "\n") -> str:
         data_dir = os.path.join(project_root, "www", "data")

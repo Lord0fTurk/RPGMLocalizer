@@ -2,6 +2,408 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.6.4] - 2026-04-08
+
+### Improved: RPG Maker Coverage and Ruby Marshal Safety
+
+#### Fixed: VX Ace `rvdata2` List Traversal Could Skip Text
+- Ruby Marshal list traversal now increments recursion depth correctly, so VX Ace database/event arrays are walked consistently.
+- The special script-array path now only activates for real `Scripts.rvdata2` structures, preventing `len()` crashes on ordinary Ruby objects.
+
+#### Fixed: Ruby Byte Strings Now Decode With Safe Fallbacks
+- Ruby string bytes now use the same multi-encoding fallback path as other extraction code.
+- This improves support for Shift-JIS and other legacy encodings commonly seen in XP/VX/VX Ace projects.
+
+#### Fixed: Script Rewrites Preserve Detected Encoding When Possible
+- `Scripts.rvdata2` reserialization now prefers the encoding that was detected during decode instead of always forcing UTF-8.
+- This reduces the chance of breaking older RGSS scripts during apply/save.
+
+#### Fixed: Directory Scans No Longer Leave Open Iterators
+- Case-insensitive project path helpers now close `os.scandir()` handles explicitly.
+- This removes `ResourceWarning` noise during scanning and keeps the pipeline cleaner on repeated runs.
+
+#### Fixed: `plugins.js` Metadata Parsing Is Now Whitespace-Tolerant
+- Active plugin detection now parses the JSON payload directly instead of relying on a brittle exact-string precheck.
+- Pretty-printed or third-party rewritten `plugins.js` files now still load plugin metadata correctly.
+
+#### Added: Regression Coverage for Legacy RPG Maker Data
+- Added tests for Shift-JIS Ruby fields, script-array encoding preservation, and VX Ace-style list traversal.
+- Full test suite passes after the hardening changes.
+
+#### Added: Real Project Validation On MV Games
+- Validated the updated extractor and apply flow against multiple real MV projects to confirm the new surface-aware rules do not break normal translation runs.
+
+#### Added: Regression Coverage for Common Third-Party Plugin Families
+- Added note-tag coverage tests for Yanfly, VisuStella, Galv, and MOG-style plugin text markers.
+- This keeps the parser aligned with the plugin ecosystems most likely to appear in real RPG Maker projects.
+
+#### Improved: Quest/Journal Note Tags
+- Added explicit quest/journal note-tag support such as `Quest Name`, `Quest Objective`, and `Quest Reward`.
+- This improves coverage for Yanfly-style quest plugins and similar third-party journal systems.
+
+#### Improved: False Positive Hardening for Note Tags
+- Added technical-value filtering for note fields so numeric, path-like, asset-like, and identifier-like values are less likely to be mistaken for translatable text.
+- This reduces accidental extraction from plugin notes while keeping player-facing descriptions and dialogue intact.
+
+#### Improved: Plugin Parameter Identifier Guard
+- Added a stricter identifier heuristic for metadata-driven plugin text so labels like `Quest_01` or `HUD_Main` stay out of translation.
+- This narrows false positives in third-party plugin configs without affecting normal prose such as `Welcome hero`.
+
+#### Improved: Brace Placeholder Protection
+- Added protection for simple brace placeholders like `{name}` that appear in real plugin examples such as `\i[4]{name}`.
+- This helps preserve mixed formatting/template strings used by Yanfly- and L10nMV-style plugins during translation.
+
+#### Improved: Percent Placeholder Protection
+- Added protection for numbered placeholders like `%1` so common plugin strings such as `Loading %1` survive translation safely.
+- This reduces corruption in quest, menu, and dialogue template strings used by real RPG Maker plugins.
+
+#### Improved: Printf-Style Placeholder Protection
+- Added protection for format strings like `%s`, `%d`, and `%0.2f` to preserve mixed plugin/UI templates.
+- This reduces damage in third-party plugin text that uses classic printf-style substitution markers.
+
+#### Added: Mixed Placeholder Stress Coverage
+- Added a regression test for strings that combine `\i[4]{name}`, `%1`, printf-style placeholders, and RPG Maker color codes in a single line.
+- This guards against placeholder collision bugs when multiple formatting systems appear together.
+
+#### Added: Extreme Mixed Placeholder Coverage
+- Added a broader regression test that also includes `#{questId}` and `${playerName}` in the same string.
+- This verifies that script-like and template-like placeholder families can coexist without restoration collisions.
+
+#### Improved: JavaScript Regex Literal Skipping
+- `JSStringTokenizer` now skips regex literals before scanning for quoted strings.
+- This prevents regex contents like `"oops"` or `/* ... */` from being misdetected as translatable text.
+
+#### Improved: JavaScript Regex vs Division Heuristics
+- Added extra context checks so `return /abc/.test(x)` still behaves like a regex literal while `a / b` stays a division operator.
+- This reduces false positives in third-party plugin scripts that mix math and pattern matching.
+
+#### Improved: RegExp Constructor Filtering
+- Added a context check that skips string literals used inside `RegExp(...)` and `new RegExp(...)` calls.
+- This prevents technical regex patterns from being mistaken for player-facing text during script extraction.
+
+#### Improved: `String.raw` Template Filtering
+- Added a context check that skips tagged `String.raw\`...\`` template literals.
+- This reduces false positives for raw path/pattern templates that are meant for technical use, not player text.
+
+#### Improved: Path and URL Constructor Filtering
+- Added a context check that skips string literals inside `path.join`-style helpers and `URL` constructors.
+- This reduces false positives for technical path-building code in third-party scripts and plugins.
+
+#### Improved: Code Execution Helper Filtering
+- Added a context check that skips string literals inside `eval`, `Function`, and timer-style code helpers.
+- This reduces false positives for code-bearing plugin strings that are not meant to be localized.
+
+#### Improved: JSON and Base64 Wrapper Filtering
+- Added a context check that skips string literals inside `JSON.parse`, `JSON.stringify`, `atob`, and `btoa` wrappers.
+- This reduces false positives for serialized payloads and encoded technical blobs in plugin scripts.
+
+#### Improved: Promise and Object Merge Helper Filtering
+- Added a context check that skips string literals inside `Promise.resolve`, `Promise.reject`, and `Object.assign`.
+- This reduces false positives for helper calls that carry technical state or config data rather than player-visible text.
+
+#### Improved: Transform Helper Filtering
+- Added a context check that skips string literals inside common transform helpers like `replace`, `split`, `match`, `search`, `parseInt`, and `Number`.
+- This reduces false positives for code that manipulates patterns, separators, or numeric parsing inputs.
+
+#### Improved: Join Separator Filtering
+- Added a context check that skips string literals inside `.join(...)` calls.
+- This reduces false positives for array separator strings that are usually technical glue rather than translatable text.
+
+#### Improved: Helper Filter Balance
+- Relaxed the broad transform-helper block so human-readable `replace(...)` text can still be extracted.
+- Separator-like `.join(...)` and `.split(...)` values remain protected, keeping the false-positive reduction without overblocking text.
+
+#### Improved: Registry Label Balance
+- Tightened plugin registry-label detection so `category` keys only count as technical when they actually match a known option set.
+- This reduces overblocking of generic category-like text in plugin metadata.
+
+#### Improved: Note and Meta Text Balance
+- Relaxed placeholder and parser prefix handling so plain `note:` / `meta:` prose is no longer treated as technical by default.
+- Fixed `is_safe_to_translate()` prefix matching for `script:` and `plugin:` so technical command-like strings are still blocked correctly.
+
+#### Fixed: Ruby Marshal Nested Object Traversal
+- `RubyParser` now recurses into nested Ruby objects that are not event commands, which restores extraction from VX Ace map/common-event pages.
+- RubyMarshal `RubyString` values are now treated as real strings, so database and event text no longer vanish during traversal.
+
+#### Fixed: `Scripts.rvdata2` Safe Loader Fallback
+- Added a byte-preserving fallback loader for `Scripts.rvdata2` when RubyMarshal hits `unicodeescape` decode failures.
+- Script blobs stored as `RubyString` objects are now converted back to bytes safely so script-string extraction can continue.
+
+#### Fixed: Script-Container Writes Are Disabled by Structure
+- Script-container RubyMarshal payloads now use a structural guard instead of a filename-based rule.
+- The pipeline skips saving these payloads by default so runtime script code is not rewritten accidentally.
+
+#### Improved: Pipeline Script Write Guard
+- Added a pipeline-level guard for script-container payloads so the safe default is enforced even if parser behavior changes.
+- This keeps script rewrites opt-in and prevents accidental game-breaking saves.
+
+#### Improved: UI Flow and Readability
+- Added a quick overview card to the Home screen so project and language state are visible before translation starts.
+- Shortened and regrouped settings labels to make the configuration pages easier to scan and less verbose.
+- Renamed the primary navigation entry to `Home` to better match the app's mental model.
+
+#### Improved: Support, Export/Import, Glossary, and Console UI
+- Added a short guidance card to the Export/Import page and tightened the action labels.
+- Simplified the Glossary page labels and toolbar to reduce visual noise and make frequent actions easier to spot.
+- Shortened the About page description and support copy to keep the information panel lightweight.
+- Added timestamps to console log entries and renamed the log panel to better reflect its role.
+
+#### Improved: Navigation Order
+- Reordered the navigation so core workflow pages appear first and supporting pages stay out of the main flow.
+- This makes the Home/Settings/Glossary path easier to discover.
+
+#### Improved: Shared Asset Path Normalization
+- Added a shared asset-text helper that normalizes percent-encoded strings, strips query/fragment suffixes, and standardizes path separators before asset checks run.
+- Ruby and JSON parsers now use the same asset candidate logic, reducing drift between extraction surfaces.
+- Optional `pathvalidate` checks were added as an extra safety layer for path-like candidates.
+
+#### Improved: Asset Tuple Reference Hardening
+- Added a guard for asset-like values that carry numeric tuple suffixes such as `name,96,305`, which appear in some plugin parameter surfaces.
+- This closes another false-positive crash path where asset identifiers could slip through without a file extension.
+
+#### Added: Encoded Asset Regression Coverage
+- Added tests for percent-encoded, double-encoded, and Windows-style asset path variants so asset identifiers stay protected even when a game or plugin rewrites them oddly.
+- This keeps asset leakage blocked across the common path encodings seen in RPG Maker projects.
+
+### Research Notes: Open Source RPG Maker Tools
+- Reviewed GitHub search results for RPG Maker localization tooling and found existing MV/MZ-focused tools like `L10nMV.js`, `RPGMakerMVTranslator`, and `rmmvlt`, plus Ruby/VX Ace-oriented projects such as `rpgmaker-vx-ace-i18n` and `RPG-Maker-Translator`.
+- The main format split in the ecosystem matches the codebase’s own split: Ruby Marshal for XP/VX/VX Ace and JSON/JS for MV/MZ.
+- Third-party plugin ecosystems still cluster around metadata-heavy MV/MZ plugins, so whitespace-tolerant `plugins.js` parsing and metadata-driven filtering are key for compatibility.
+
+### New: Custom Translation Surface Detection and Support
+
+#### Added: Hendrix Localization `game_messages.csv` Support
+- Added a dedicated parser for `game_messages.csv` files used by the `Hendrix_Localization` plugin.
+- The pipeline now detects active Hendrix projects, extracts text from the `Original` column, writes translations into the target language column, and updates `plugins.js` language metadata so new target languages such as `tr` can be activated safely.
+
+#### Added: `TS_ADVsystem` Scenario `.sl` Support
+- Added a dedicated parser for `scenario/*.sl` files used by `TS_ADVsystem` projects together with `TS_Decode`.
+- The pipeline now detects active `TS_Decode` plugins, reads the configured XOR decode key, collects scenario files, and round-trips decoded dialogue/narration lines without touching macro, label, or comment commands.
+
+#### Improved: Custom Surface Visibility in Pipeline Logs and Coverage Audit
+- The pipeline now reports detected custom translation surfaces such as Hendrix CSV and TS scenario files during project scanning.
+- Coverage audit output now includes custom-surface counts so unsupported or partially supported game structures are easier to diagnose before translation starts.
+
+#### Added: Home Interface Scope Note
+- Added a user-facing notice on the Home interface clarifying that RPGMLocalizer targets standard RPG Maker project structures first.
+- The note now explicitly warns that non-standard/custom plugin-driven data layouts may be unsupported and that even standard projects can still leave some text surfaces untranslated.
+
+#### Improved: Generic Plugin List Label Coverage
+- Generic plugin-parameter arrays/lists now preserve extraction of single-word UI labels such as `Start`, `Options`, or `Save` when the parent key clearly indicates a text-like surface.
+- Technical token arrays such as input bindings (`shift`, `tab`) remain blocked, keeping the broader plugin hardening model intact.
+
+#### Improved: Menu Surface Protection
+- Added an explicit extraction surface policy that distinguishes `menu_label`, `technical_identifier`, `asset_reference`, and generic text paths.
+- Apply-time validation now rejects unexpected structure changes for `plugins.js` and locale-style JSON surfaces, reducing the chance of writing translations into the wrong menu field.
+- Ambiguous list-of-dicts lookups no longer fall back to the first match, which prevents accidental writes to the wrong repeated menu entry.
+- Menu-like plugin lists now preserve single-word labels while still blocking technical tokens such as input bindings and registry symbols.
+
+#### Improved: Lower False-Positive Surface Guards
+- Added a stricter low-FP display-text heuristic so short ASCII identifiers are less likely to be extracted from menu and plugin surfaces.
+- Script and AST-based extraction still allow real sentence-like text, so normal dialogue coverage stays intact while technical labels are filtered more aggressively.
+
+### Improved: Linux Release Packaging Options
+- GitHub Actions releases now publish both `RPGMLocalizer-Linux.AppImage` and a portable `RPGMLocalizer-Linux.tar.gz` bundle.
+- Added a Unix launcher script (`RPGMLocalizer.sh`) for the portable tarball so Linux users get a clear entrypoint with the same crash-and-retry style fallback used by the packaged binary flow.
+
+### Improved: Single-Source Icon Pipeline for GitHub Actions Builds
+- `icon.png` is now the source-of-truth icon asset for the application UI and release packaging flow.
+- Added `scripts/generate_icons.py` so GitHub Actions builds generate `icon.ico` for Windows and `icon.icns` for macOS from `icon.png` before running PyInstaller.
+- Linux AppImage packaging now reuses `icon.png` directly instead of converting from `.ico`, reducing build-time platform dependencies.
+
+### Audio & Asset False-Positive Hardening
+
+#### Fixed: Spaced `SE` Plugin Parameters Could Still Leak Asset IDs
+- Hardened plugin-parameter extraction to recognize spaced audio keys such as `Default Talk SE` and `Default Confirm SE` (GALV-style), including CSV-style values like `Cursor1,80,150`.
+- Prevented these values from entering translation even when plugin metadata marks the parameter as string-like text.
+
+#### Fixed: Metadata Text-Intent Path Could Reopen Asset Filenames
+- Added metadata-aware asset-context filtering so `Filename`/`File`/asset-like plugin parameters are blocked even on text-intent plugin metadata paths.
+- Improved asset-context detection with token-aware matching to reduce short-token false positives while still protecting asset identifiers.
+
+#### Fixed: Technical Menu Symbols Could Be Translated and Break JS Runtime
+- Added explicit technical-key protection for symbol-like identifiers (for example `Menu X Symbol = options`) to prevent invalid identifier mutations such as `options -> seçenekler`.
+- Added apply-time hardening that skips risky mutations for technical identifier fields even if legacy dictionaries contain contaminated entries.
+
+#### Fixed: Input Binding Tokens Could Be Translated Into Invalid Hotkeys
+- Added metadata-aware protection for plugin input-binding parameters such as `Attack Button`, `Hold Direction Button`, and similar key-binding surfaces.
+- Apply-time hardening now also blocks risky mutations of original input tokens like `ok`, `shift`, and `pagedown`, preventing control bindings from turning into translated strings such as `tamam`, `vardiya`, or `sayfa aşağı`.
+
+#### Fixed: Backslash-Space Escape Corruption in Nested Plugin JSON Text
+- Strengthened post-translation sanitization to repair escaped control sequences when translation output inserts spaces after one-or-more backslashes (for example `\ n`, `\ c[4]`, `\ {`).
+- This prevents broken control-code rendering and missing text in plugin-driven UI blocks (notably quest/menu formatted text).
+
+#### Fixed: Quest Journal Type Registries Could Be Translated and Hide Quest Lists
+- Added metadata-aware protection for plugin registry/order labels such as YEP Quest Journal's `Type Order`, where display strings double as internal identifiers.
+- This prevents runtime list mismatches like translated `Main Quests -> Ana Gorevler` while quest data still stores the original type ids, which caused quest list panes to render empty.
+
+#### Fixed: Plugin `console.log` / Lunatic Comment-Code Blocks Could Leak Into Translation
+- Hardened technical-string detection for plugin comment/code blocks containing JavaScript console/code markers.
+- Apply-time protection now also rejects risky `plugins.js` mutations for technical code-bearing parameters and order-registry labels, reducing damage from old contaminated dictionaries.
+
+#### Expanded: Regression Coverage for Real Crash Classes
+- Added targeted regression tests for spaced `SE` parameters, metadata-path filename filtering, symbol-identifier safety, quest-registry labels, console/code blocks, and backslash-space escape repair in `plugins.js` apply flow.
+- Verified hardening with focused parser suites (`test_release_hardening`, `test_plugin_metadata_filtering`, `test_sound_name_leak`).
+
+#### Fixed: Audio/Sound File Names Extracted From Plugin Parameters (Critical)
+- Fixed a massive crash vector where active sound file names like "Cursor1" or "Cancel1" were inadvertently extracted and sent to translation when they appeared in generic plugin parameters whose keys contained the word "name" (e.g., `cursorSeName`, `okSoundName`).
+- Implemented a surgical regex pattern heuristic in `_should_extract_generic_plugin_parameter` that strictly identifies audio-related UI keys (using Case-Insensitive partials like `SeName`, `BgmName`, `_se_name`, `soundName`) and automatically prevents their single-word file names from being sent to translation without disrupting actual UI texts like `gameName` or `nickname`.
+- Restored test consistency by expanding sound object checks `_is_sound_like_object()` to gracefully handle partial sound payloads (e.g., `{name, pitch}`, `{name, volume}`).
+- Created `scripts/debug_sound_leak.py` as a diagnostic utility to simulate game extraction and pinpoint sound asset leaks directly on live RPG Maker data.
+
+#### Fixed: Extensionless Audio Name Leakage Through `name` Heuristics
+- Hardened `name` extraction with an asset-context path guard so values under audio/asset-shaped paths are never extracted, even when they have no file extension (e.g., `Town Theme`, `Battle1`).
+- Added camelCase-aware context parsing and token matching in `_is_asset_context_path()` to correctly catch paths such as `audioSettings`, `battleBgm`, and similar mixed-style keys.
+- Tightened the legacy database `name` fast-path: values now pass technical and asset safety checks (`_contains_asset_reference`, `_matches_known_asset_identifier`, `_is_technical_string`) before extraction.
+- Extended sound leak regression coverage with new tests for asset-context path blocking and legacy-guard behavior in `tests/test_sound_name_leak.py`.
+
+### Parser Tolerance and Locale Safety
+
+#### Fixed: Default Cache Path Is Now Deterministic and Visible
+- The default translation cache directory is now resolved to a stable absolute `.rpgm_cache` path next to the source workspace or packaged executable instead of relying on a relative working-directory path.
+- UI cache clearing and pipeline startup logs now show the real cache directory, making it easier to diagnose when stale translations come from cache versus already-modified game files.
+
+#### Fixed: Real Asset Basenames Are Now Protected Across Generic JSON and Locale Surfaces
+- The parser now builds a project-local asset registry from actual `audio/`, `img/`, `movies/`, and `fonts/` files and uses it to block bare asset identifiers such as `Cursor1`, `Window`, or `Battle1` before they can be translated.
+- This closes the crash class where a bare filename is translated first and later expanded by the engine into broken runtime paths such as `audio/se/<translated>.ogg`.
+- The same runtime asset-id guard is now enforced consistently across MZ plugin-command text, continuation lines, script-string extraction, raw JS string extraction, and nested plugin JSON list values.
+
+#### Fixed: Save-Time Asset Invariant Now Blocks Missed Technical Mutations
+- Added a second-layer asset invariant verifier during apply/save so that even if a custom surface accidentally slips an asset id through extraction, the file write is aborted when a real asset/path-like value changes.
+- This hardens generic JSON, locale-like translation files, and `plugins.js` against remaining `audio/se/<translated>.ogg`, `img/system/<translated>.png`, and similar runtime corruption classes.
+
+#### Fixed: Ruby Parser Now Shares the Same Asset Safety Model
+- `RubyParser` extraction and apply paths now use project-aware asset identifier checks and reject save-time mutations of real asset references.
+- This brings XP/VX/VX Ace style data closer to the same crash resistance already added on the JSON/MV/MZ side.
+
+#### Fixed: Importer No Longer Crashes on Non-String `translated` Values
+- CSV/JSON import now normalizes status and translation values safely instead of assuming every imported `translated` field is a string.
+- Invalid or nested imported values are skipped instead of crashing the import flow with errors like `'dict' object has no attribute 'strip'`.
+
+#### Fixed: Non-JSON Sidecar `*.json` Files No Longer Raise Hard Parse Noise
+- `.json` files whose contents do not actually start with a JSON object/array are now treated as unsupported sidecar/plugin files and skipped safely during extraction.
+- This reduces noisy parse errors on custom files such as `MapXXXlighting.json` without reopening those technical surfaces for translation.
+- The main pipeline now filters these sidecar files out during collection as well, so normal project runs no longer send them to the JSON parser in the first place.
+- The same early filter now applies to locale JSON discovery too, preventing malformed sidecars inside `locales/` from reintroducing parser noise.
+- Direct parser fallback logging for these expected skips was also softened from warning-level noise to informational output.
+
+#### Fixed: Nested `Translations.json` Locale Dictionaries No Longer Crash Extraction
+- Locale-like files such as `Translations.json` are now treated as nested key/value translation surfaces instead of assuming every value is a flat string.
+- Recursive locale extraction and apply now support nested dict/list paths while still skipping technical asset/path values like `.ogg`, `.png`, and similar resource identifiers.
+
+### Hybrid Structured JSON Foundation
+
+#### Improved: Extraction Surface Registry
+- Added a shared extraction surface registry so parsers can classify text, asset, and technical keys before fallback heuristics run.
+- This keeps generic recursive walking from acting as the primary extraction strategy.
+
+#### Improved: Regex-First Extraction Was Demoted To Fallback
+- Regex-based collection is no longer the primary extraction path.
+- Surface-aware, metadata-aware, and AST/token-aware extractors now drive the main flow, while regex remains a helper/fallback for narrow cases.
+- Regex is no longer the primary extractor; the main flow now uses structured field rules, plugin metadata, and AST/token analysis to decide what should be extracted, and regex only remains as a fallback for narrow cases.
+
+#### New: Deterministic Object-Mapping for Safe RPG Maker JSON Surfaces
+- Added a structured JSON extraction layer for high-confidence RPG Maker files such as database records, `System.json`, `MapXXX.json` display names, and core event-text commands.
+- These files now use explicit field and event-code mappings instead of relying only on recursive generic walking, reducing false positives on technical data.
+
+#### New: Structured Translation Invariant Verification
+- Added a post-apply invariant verifier for structured JSON files.
+- If translation unexpectedly mutates a path outside the approved extracted surface, the parser now aborts the save instead of writing potentially corrupted game data.
+
+#### New: Hybrid Event Extraction Bridge
+- Structured map/common-event extraction now keeps deterministic handling for standard dialogue/choice/name surfaces while still reusing the hardened legacy logic for MV quoted plugin-command payloads and merged script-string extraction.
+- This lets the project move toward a hybrid architecture without dropping existing safety fixes.
+
+#### Expanded: Structured Coverage for Editor-Only and Battle Event Surfaces
+- `MapInfos.json` now routes through structured mode as a protected no-op surface, preventing editor-only map tree names from being re-opened by the generic JSON walker.
+- `Troops.json` battle event pages now use structured event extraction so safe troop dialogue and choice text can be localized without reopening troop names or unrelated technical fields.
+
+#### Improved: Visible Invariant Failure Diagnostics
+- Structured apply failures now preserve a human-readable failure reason on the parser and surface that reason through pipeline save logging.
+- This makes technical invariant trips easier to diagnose from the UI/log output before any corrupted file write can happen.
+
+#### Expanded: Protected No-Op Surfaces for Technical JSON Files
+- Added protected structured handling for `Animations.json`, `Tilesets.json`, and `QSprite.json`.
+- These files now bypass the generic recursive extractor so editor labels, tileset names, sample image paths, pose identifiers, and similar technical/plugin configuration data are no longer sent to translation by default.
+- Structured apply now also rejects imported/manual translation keys that target these protected surfaces, preventing export/import workflows from mutating editor-only or technical JSON paths behind the extractor's back.
+
+### Audit-Only JavaScript AST Coverage
+
+#### Improved: Safe-Sink JS Extraction
+- JavaScript script/string extraction now prefers `tree-sitter`-backed safe-sink detection, with tokenizer fallback kept only as a backup path.
+- Added a raw JS AST audit extractor that scores strings by context instead of treating every literal as a translation candidate.
+
+#### New: Tree-sitter Based Raw JS Coverage Audit
+- Added an audit-only JavaScript extractor backed by `tree-sitter` and the official JavaScript grammar.
+- Raw JS coverage now scores string literals by AST context instead of relying only on tokenizer heuristics, improving separation between UI/error text and technical asset/config strings.
+
+#### Improved: Raw JS Coverage Engine Visibility
+- Coverage reports now include which audit engine analyzed each JS file and a summary of engine usage.
+- This makes it easier to tell when the audit is using AST mode versus tokenizer fallback in a given environment.
+
+#### New: Confidence Buckets and JS Write-Readiness Audit
+- Raw JS AST candidates are now grouped into confidence buckets (`high`, `medium`, `low`, or `heuristic` fallback) based on context-aware scoring.
+- Coverage reports now summarize per-file and aggregate JS write-readiness so future allowlist work can start from "promising" files instead of scanning the entire raw JS surface blindly.
+
+### Metadata-Aware Plugin Parameter Safety
+
+#### Improved: Surface-Aware Plugin Fallbacks
+- Plugin parameter extraction now prefers metadata- and surface-aware decisions over generic recursive walking.
+- Shared asset-reference detection now blocks explicit asset/path references consistently across JSON and Ruby parser paths.
+
+#### Added: Plugin Family Registry For Common Ecosystems
+- Added a lightweight family profile registry for common plugin prefixes such as Yanfly/VisuStella, MOG, SRD, and Galv.
+- The registry only relaxes a few safe text heuristics for known UI-heavy families and keeps asset/code-heavy families under strict filtering.
+- Unrecognized plugin names fall back to the generic profile, so differently structured games continue using the conservative default path.
+
+#### Fixed: `plugins.js` Could Translate File-Typed Plugin Parameters
+- `plugins.js` extraction now reads RPG Maker MV/MZ plugin header annotations from `js/plugins/*.js` and respects semantic parameter metadata such as `@type file`, `@dir`, `@require`, and `struct<...>`.
+- File-backed plugin parameters and nested struct fields are now skipped before they can rename system skins, pictures, audio assets, or other engine/plugin resource identifiers.
+
+#### Fixed: Asset Registry Combo Parameters Could Rename Bare Asset IDs
+- Added metadata-aware blocking for plugin parameters that use `combo`/registry-style values to represent asset lists, preload lists, or technical button/input identifiers.
+- This closes real crash paths such as `Window -> Pencere`, translated preload lists like `custom: Window, IconSet`, and translated input tokens like `tab -> sekme`.
+
+#### Fixed: Text-Like `note` Parameters Are Preserved Without Reopening Code Blocks
+- `note`-typed plugin parameters are no longer treated as universally technical.
+- Help-description style note parameters remain translatable when their metadata clearly indicates player-visible text, while code-oriented note parameters such as `Show/Hide` or script/eval blocks remain protected.
+
+### Post-Translation Root Cause Hardening
+
+#### Improved: Ruby Parser Determinism
+- Ruby `Scripts.rvdata2` string extraction now prefers a tree-sitter-based path when the optional Ruby grammar package is available.
+- Regex-heavy Ruby script extraction was replaced with deterministic tokenizer and parser-backed logic.
+
+#### Added: Regression Coverage For Semantic Extraction
+- Added tests for safe JS sinks, MZ plugin arg surfaces, and Ruby surface-aware attribute filtering.
+- Verified the updated hardening path with the existing regression suite.
+
+#### Fixed: `credits.txt` Could Double Blank Lines on Windows
+- `.txt` save operations now preserve parser-provided newline sequences exactly instead of letting platform text-mode conversion expand existing CRLF lines.
+- This prevents translated `credits.txt` files from gaining extra blank lines after save on Windows.
+
+#### Fixed: Technical Plugin `GroupName` Parameters Could Be Translated
+- Added an explicit `groupname` technical-key guard so plugin grouping IDs such as OrangeHud's `GroupName=main` are not extracted for translation.
+- This closes a real runtime regression path where HUD/plugin group bindings could be renamed by machine translation.
+
+#### Fixed: `System.locale` Was Treated as Translatable Text
+- The `locale` field is now treated as a technical system identifier instead of a player-visible string.
+- Locale codes such as `en_US` and `tr_TR` no longer enter the translation pipeline.
+
+### Improved: JSON Collection Resilience
+
+#### Fixed: Binary/Non-UTF8 `*.json` Sidecars Could Crash File Discovery
+- JSON candidate sniffing now reads raw bytes instead of text-decoding the file header.
+- This prevents `UnicodeDecodeError` crashes during file collection when projects contain binary, encrypted, or malformed `.json` sidecars while still safely skipping non-JSON files.
+
+#### Fixed: Backup JSON Copies No Longer Pollute Standard Data Collection
+- Obvious backup-style data files such as `Skills_Backup.json` are now skipped during normal project collection.
+- This reduces noisy parse errors on copied database backups without affecting the canonical RPG Maker data files.
+
+#### Fixed: Windows-Style ` - Copy` Data Duplicates No Longer Pollute Collection
+- Duplicate data files such as `CommonEvents - Copy.json` and `CommonEvents - Copy (2).json` are now skipped during normal file collection.
+- This prevents large standard projects with manual backup copies from doubling extracted text or reintroducing stale data into the translation run.
+
 ## [v0.6.3] - 2026-03-19
 
 ### Fixed: Overly Strict Asset Invariant Blocking Legitimate Translations
@@ -319,7 +721,7 @@ All notable changes to this project will be documented in this file.
 ### ğŸ“¦ Major Feature: Professional Native Deployments & CI/CD
 - **Windows Executable Icon Fix**: Rewrote the .spec compiler properties to use absolute dynamic file paths (os.path.abspath) for icon.ico. Ensures that the taskbar and .exe perfectly render the RPGMLocalizer logo rather than the generic Windows application icon.
 - **MacOS Native Application Bundle (.app)**: Configured PyInstaller\'s BUNDLE directive via GitHub Actions. Instead of a naked Unix binary that opens the terminal, Mac users now receive a double-clickable, native macOS RPGMLocalizer.app application folder wrapped in a .zip archive.
-- **Linux AppImage Distribution**: Replaced the raw executable output with a fully packaged .AppImage. The Ubuntu builder now automatically injects imagemagick and ppimagetool to bundle the core binaries, icons, and .desktop files into a single, dependency-free portable executable for Linux!
+- **Linux AppImage Distribution**: Replaced the raw executable output with a fully packaged .AppImage. The Ubuntu builder now automatically injects imagemagick and  ppimagetool to bundle the core binaries, icons, and .desktop files into a single, dependency-free portable executable for Linux!
 
 ### ğŸ›¡ï¸ Major Feature: RPG Translation Stability Plan (False-Positive Prevention)
 

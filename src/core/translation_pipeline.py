@@ -11,6 +11,7 @@ import shutil
 import json
 import asyncio
 import logging
+import re
 from collections import Counter
 from enum import Enum
 from typing import Dict, List, Optional, Tuple, Any
@@ -20,7 +21,9 @@ from PyQt6.QtCore import QObject, pyqtSignal as Signal
 from .translator import GoogleTranslator, TranslationRequest
 from .parser_factory import get_parser
 from .parsers.js_ast_extractor import JavaScriptAstAuditExtractor
+from .parsers.hendrix_csv_parser import HENDRIX_CSV_FILENAME
 from .parsers.plain_text_parser import SUPPORTED_TEXT_FILENAMES
+from .parsers.ts_adv_scenario_parser import TS_SCENARIO_EXTENSION
 from .glossary import Glossary
 from .cache import TranslationCache, get_cache
 from .export_import import TranslationExporter, TranslationImporter
@@ -47,6 +50,17 @@ class TranslationPipeline(QObject):
     RAW_JS_AUDIT_EXCLUDED_DIRS = {"libs"}
     RAW_JS_AUDIT_EXCLUDED_FILES = {"plugins.js"}
     RAW_JS_AUDIT_TOP_SAMPLE_LIMIT = 8
+    IGNORED_DATA_FILE_SUFFIXES = (
+        "_backup.json",
+        ".backup.json",
+        ".bak.json",
+    )
+    HENDRIX_PLUGIN_NAME = "Hendrix_Localization"
+    TS_DECODE_PLUGIN_NAME = "TS_Decode"
+    CUSTOM_SURFACE_KEYS = {
+        "hendrix_csv": "Hendrix Localization CSV",
+        "ts_adv_scenarios": "TS_ADV scenarios",
+    }
     
     # Signals for UI updates
     stage_changed = Signal(str, str)     # stage_value, message
@@ -158,6 +172,8 @@ class TranslationPipeline(QObject):
             self.finished.emit(False, "No translatable files found")
             return
 
+        self._emit_custom_surface_summary(files)
+
         coverage_requested = self.settings.get("coverage_audit", False) or bool(self.settings.get("coverage_report_path"))
         if coverage_requested:
             try:
@@ -226,13 +242,14 @@ class TranslationPipeline(QObject):
 
         target_lower = target_name.lower()
         try:
-            for entry in os.scandir(parent_dir):
-                if entry.name.lower() != target_lower:
-                    continue
-                if must_be_dir and entry.is_dir():
-                    return entry.path
-                if not must_be_dir and entry.is_file():
-                    return entry.path
+            with os.scandir(parent_dir) as entries:
+                for entry in entries:
+                    if entry.name.lower() != target_lower:
+                        continue
+                    if must_be_dir and entry.is_dir():
+                        return entry.path
+                    if not must_be_dir and entry.is_file():
+                        return entry.path
         except OSError:
             return None
         return None
@@ -279,6 +296,9 @@ class TranslationPipeline(QObject):
         for entry in os.scandir(data_dir):
             if not entry.is_file() or not entry.name.lower().endswith(extensions):
                 continue
+            if self._should_skip_data_file(entry.name):
+                self.log_message.emit("info", f"Skipping backup data file: {entry.name}")
+                continue
             if entry.name.lower().endswith('.json') and not self._looks_like_json_document(entry.path):
                 self.log_message.emit("info", f"Skipping non-JSON sidecar: {entry.name}")
                 continue
@@ -298,6 +318,8 @@ class TranslationPipeline(QObject):
             # Note: We previously scanned all .js files here for hardcoded strings, 
             # but it was disabled because translating raw JS files (like VisuStella) 
             # breaks obfuscation/checksums and game API logic, causing a Black Screen.
+
+        files.extend(self._collect_custom_translation_files(project_root, plugin_js))
         
         # DKTools Localization / Plugin locale files (locales/*.json)
         # Check both project root and www folder for locales
@@ -333,18 +355,123 @@ class TranslationPipeline(QObject):
     def _looks_like_json_document(self, file_path: str) -> bool:
         """Return True when a `.json` file appears to contain a JSON object/array."""
         try:
-            with open(file_path, "r", encoding="utf-8-sig") as handle:
+            with open(file_path, "rb") as handle:
                 while True:
                     chunk = handle.read(256)
                     if not chunk:
                         return False
-                    stripped = chunk.lstrip()
+                    if chunk.startswith(b"\xef\xbb\xbf"):
+                        chunk = chunk[3:]
+                    stripped = chunk.lstrip(b" \t\r\n\x00")
                     if not stripped:
                         continue
-                    return stripped.startswith(("{", "["))
+                    return stripped.startswith((b"{", b"["))
         except OSError as error:
             self.logger.warning(f"Failed to inspect JSON candidate {file_path}: {error}")
             return False
+
+    def _should_skip_data_file(self, filename: str) -> bool:
+        """Return True for obvious backup/duplicate data JSON files."""
+        if not isinstance(filename, str):
+            return False
+        filename_lower = filename.lower()
+        if filename_lower.endswith(self.IGNORED_DATA_FILE_SUFFIXES):
+            return True
+        return bool(re.search(r" - copy(?: \(\d+\))?\.json$", filename_lower))
+
+    def _collect_custom_translation_files(self, project_root: str, plugin_js: Optional[str]) -> List[str]:
+        """Collect supported non-standard translation surfaces discovered from plugins."""
+        custom_files: List[str] = []
+        if not plugin_js or not os.path.exists(plugin_js):
+            return custom_files
+
+        if self._has_active_plugin(plugin_js, self.HENDRIX_PLUGIN_NAME):
+            for root in (project_root, os.path.dirname(project_root)):
+                csv_path = self._find_child_case_insensitive(root, HENDRIX_CSV_FILENAME, must_be_dir=False)
+                if not csv_path or not os.path.isfile(csv_path):
+                    continue
+                custom_files.append(csv_path)
+                self.log_message.emit("info", f"Detected Hendrix Localization CSV surface: {os.path.basename(csv_path)}")
+                break
+
+        ts_plugin = self._get_active_plugin(plugin_js, self.TS_DECODE_PLUGIN_NAME)
+        if ts_plugin is not None:
+            scenario_root = self._find_child_case_insensitive(os.path.dirname(project_root), "scenario", must_be_dir=True)
+            if not scenario_root:
+                scenario_root = self._find_child_case_insensitive(project_root, "scenario", must_be_dir=True)
+            if scenario_root and os.path.isdir(scenario_root):
+                decode_key = self._read_ts_decode_key(ts_plugin)
+                self.settings["ts_decode_key"] = decode_key
+                for entry in os.scandir(scenario_root):
+                    if not entry.is_file() or not entry.name.lower().endswith(TS_SCENARIO_EXTENSION):
+                        continue
+                    custom_files.append(entry.path)
+                if any(path.lower().endswith(TS_SCENARIO_EXTENSION) for path in custom_files):
+                    self.log_message.emit("info", f"Detected TS_ADV scenario surface: {os.path.basename(scenario_root)}")
+
+        return custom_files
+
+    def _read_ts_decode_key(self, plugin_entry: Dict[str, Any]) -> int:
+        """Read the TS_Decode XOR key from plugin parameters."""
+        params = plugin_entry.get("parameters")
+        if not isinstance(params, dict):
+            return 255
+        try:
+            return int(params.get("Key", 255))
+        except (TypeError, ValueError):
+            return 255
+
+    def _get_active_plugin(self, plugin_js_path: str, plugin_name: str) -> Optional[Dict[str, Any]]:
+        """Return the active plugin entry from `plugins.js` when present."""
+        try:
+            with open(plugin_js_path, "r", encoding="utf-8-sig") as handle:
+                payload = handle.read()
+        except OSError:
+            return None
+
+        try:
+            start = payload.find("[")
+            end = payload.rfind("]")
+            if start < 0 or end < 0:
+                return None
+            plugins = json.loads(payload[start : end + 1])
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            return None
+
+        for plugin in plugins:
+            if not isinstance(plugin, dict):
+                continue
+            if plugin.get("name") == plugin_name and plugin.get("status") is True:
+                return plugin
+        return None
+
+    def _has_active_plugin(self, plugin_js_path: str, plugin_name: str) -> bool:
+        """Return True when `plugins.js` contains an enabled plugin entry."""
+        return self._get_active_plugin(plugin_js_path, plugin_name) is not None
+
+    def _emit_custom_surface_summary(self, files: List[str]) -> None:
+        """Log detected custom translation surfaces for user visibility."""
+        counts = self._custom_surface_counts(files)
+        if not counts:
+            return
+
+        formatted = ", ".join(
+            f"{self.CUSTOM_SURFACE_KEYS.get(key, key)}: {count}"
+            for key, count in counts.items()
+        )
+        self.log_message.emit("info", f"Detected custom translation surfaces -> {formatted}")
+
+    def _custom_surface_counts(self, files: List[str]) -> Dict[str, int]:
+        """Count known non-standard translation surfaces in the collected file list."""
+        counts: Dict[str, int] = {}
+        for file_path in files:
+            basename = os.path.basename(file_path).lower()
+            extension = os.path.splitext(file_path)[1].lower()
+            if basename == HENDRIX_CSV_FILENAME:
+                counts["hendrix_csv"] = counts.get("hendrix_csv", 0) + 1
+            elif extension == TS_SCENARIO_EXTENSION:
+                counts["ts_adv_scenarios"] = counts.get("ts_adv_scenarios", 0) + 1
+        return counts
 
     def analyze_project_coverage(self, project_path: str) -> Dict[str, Any]:
         """Analyze which safe and audit-only text surfaces exist in a project."""
@@ -446,6 +573,9 @@ class TranslationPipeline(QObject):
                     if os.path.normpath(path) not in collected_set
                 ],
             },
+            "custom_surfaces": {
+                "detected": self._custom_surface_counts(collected_files),
+            },
             "raw_js_audit": {
                 "total_files": len(raw_js_files),
                 "engines": raw_js_engines,
@@ -541,6 +671,7 @@ class TranslationPipeline(QObject):
         """Log a compact coverage summary for visibility."""
         collected = coverage_report.get("collected", {})
         safe_text = coverage_report.get("safe_text_surfaces", {})
+        custom_surfaces = coverage_report.get("custom_surfaces", {})
         raw_js = coverage_report.get("raw_js_audit", {})
 
         self.log_message.emit(
@@ -562,6 +693,16 @@ class TranslationPipeline(QObject):
             self.log_message.emit(
                 "warning",
                 f"Coverage audit: safe text files still missed -> {', '.join(safe_text['missed'])}"
+            )
+
+        if custom_surfaces.get("detected"):
+            formatted_custom = ", ".join(
+                f"{self.CUSTOM_SURFACE_KEYS.get(key, key)}={value}"
+                for key, value in custom_surfaces["detected"].items()
+            )
+            self.log_message.emit(
+                "info",
+                f"Coverage audit: custom surfaces -> {formatted_custom}"
             )
 
         candidate_files = raw_js.get("files", [])
@@ -973,6 +1114,9 @@ class TranslationPipeline(QObject):
                 new_data = parser.apply_translation(file_path, changes)
                 if new_data is None:
                     parser_failure_reason = getattr(parser, "last_apply_error", None)
+                    if parser_failure_reason and "write disabled" in parser_failure_reason.lower():
+                        self.log_message.emit("info", f"{filename}: script writing disabled, preserving original file")
+                        return filename
                     if parser_failure_reason:
                         self.log_message.emit("warning", f"{filename}: {parser_failure_reason}")
                     raise ValueError(
@@ -1004,7 +1148,19 @@ class TranslationPipeline(QObject):
                     # Preserve parser-provided newline sequences exactly.
                     with safe_write(file_path, 'w', encoding='utf-8', newline='') as f:
                         f.write(new_data)
-                        
+
+                elif file_ext == '.csv':
+                    if not isinstance(new_data, str):
+                        raise ValueError(f"Expected CSV text output for {filename}, got {type(new_data).__name__}")
+                    with safe_write(file_path, 'w', encoding='utf-8', newline='') as f:
+                        f.write(new_data)
+
+                elif file_ext == TS_SCENARIO_EXTENSION:
+                    if not isinstance(new_data, str):
+                        raise ValueError(f"Expected scenario text output for {filename}, got {type(new_data).__name__}")
+                    with safe_write(file_path, 'w', encoding='utf-8', newline='') as f:
+                        f.write(new_data)
+                          
                 elif file_ext in ('.rvdata2', '.rxdata', '.rvdata'):
                     import rubymarshal.writer
                     with safe_write(file_path, 'wb') as f:
@@ -1025,9 +1181,128 @@ class TranslationPipeline(QObject):
         max_workers = min(os.cpu_count() or 4, 8)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             saved_filenames = list(executor.map(save_file, file_updates.keys()))
-            
+
         success_count = len([f for f in saved_filenames if f])
+
+        if any(os.path.basename(path).lower() == HENDRIX_CSV_FILENAME for path in file_updates):
+            self._ensure_hendrix_target_language(file_updates.keys())
+
         self.log_message.emit("success", f"Successfully saved {success_count} files.")
+
+    def _ensure_hendrix_target_language(self, updated_files: Any) -> None:
+        """Ensure Hendrix Localization knows about the active target language."""
+        target_lang = str(self.settings.get("target_lang", "tr") or "tr").strip().lower()
+        if not target_lang:
+            return
+
+        csv_files = [
+            path for path in updated_files
+            if os.path.basename(path).lower() == HENDRIX_CSV_FILENAME
+        ]
+        if not csv_files:
+            return
+
+        plugin_js_path = self._find_hendrix_plugin_js(csv_files[0])
+        if not plugin_js_path or not os.path.exists(plugin_js_path):
+            return
+
+        try:
+            with open(plugin_js_path, "r", encoding="utf-8-sig") as handle:
+                payload = handle.read()
+            start = payload.find("[")
+            end = payload.rfind("]")
+            if start < 0 or end < 0:
+                return
+
+            plugins = json.loads(payload[start : end + 1])
+            changed = False
+
+            for plugin in plugins:
+                if not isinstance(plugin, dict) or plugin.get("name") != self.HENDRIX_PLUGIN_NAME:
+                    continue
+                params = plugin.get("parameters")
+                if not isinstance(params, dict):
+                    continue
+
+                raw_languages = params.get("Languages", "[]")
+                language_entries = self._parse_hendrix_language_entries(raw_languages)
+                known_symbols = {entry.get("Symbol", "").strip().lower() for entry in language_entries}
+                if target_lang not in known_symbols:
+                    font_size = "28"
+                    if language_entries:
+                        font_size = str(language_entries[0].get("FontSize", "28") or "28")
+                    language_entries.append({
+                        "Name": self._display_name_for_language(target_lang),
+                        "Symbol": target_lang,
+                        "Font": "",
+                        "FontSize": font_size,
+                    })
+                    params["Languages"] = json.dumps(
+                        [json.dumps(entry, ensure_ascii=False) for entry in language_entries],
+                        ensure_ascii=False,
+                    )
+                    changed = True
+
+                if params.get("Default Language") != target_lang:
+                    params["Default Language"] = target_lang
+                    changed = True
+                break
+
+            if not changed:
+                return
+
+            if self.backup_manager:
+                self.backup_manager.create_backup(plugin_js_path)
+
+            rewritten = payload[:start] + json.dumps(plugins, ensure_ascii=False, separators=(",", ":")) + payload[end + 1 :]
+            with safe_write(plugin_js_path, 'w', encoding='utf-8') as handle:
+                handle.write(rewritten)
+            self.log_message.emit("info", f"Updated Hendrix Localization language config for '{target_lang}'")
+        except Exception as error:
+            self.logger.warning(f"Failed to update Hendrix Localization config: {error}")
+            self.log_message.emit("warning", f"Failed to update Hendrix Localization config: {error}")
+
+    def _find_hendrix_plugin_js(self, csv_path: str) -> Optional[str]:
+        """Find the `plugins.js` paired with a Hendrix CSV file."""
+        csv_dir = os.path.dirname(csv_path)
+        candidates = [csv_dir, os.path.dirname(csv_dir)]
+        for root in candidates:
+            plugin_js = self._find_file_in_subdir_case_insensitive(root, "js", "plugins.js")
+            if plugin_js:
+                return plugin_js
+        return None
+
+    def _parse_hendrix_language_entries(self, raw_languages: Any) -> List[Dict[str, Any]]:
+        """Parse Hendrix `Languages` plugin parameter payload."""
+        if not isinstance(raw_languages, str) or not raw_languages.strip():
+            return []
+        try:
+            payload = json.loads(raw_languages)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return []
+
+        parsed_entries: List[Dict[str, Any]] = []
+        for entry in payload:
+            if not isinstance(entry, str):
+                continue
+            try:
+                value = json.loads(entry)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+            if isinstance(value, dict):
+                parsed_entries.append(value)
+        return parsed_entries
+
+    def _display_name_for_language(self, language_symbol: str) -> str:
+        """Return a friendly display name for newly added Hendrix languages."""
+        names = {
+            "tr": "Turkish",
+            "en": "English",
+            "jp": "Japanese",
+            "cn": "Chinese",
+            "th": "Thai",
+        }
+        return names.get(language_symbol.lower(), language_symbol.upper())
 
     def _export_entries(self, entries: List[Tuple], export_path: str):
         """Export extracted entries to file."""

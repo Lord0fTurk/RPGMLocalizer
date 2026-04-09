@@ -4,6 +4,7 @@ import tempfile
 import unittest
 
 from src.core.parsers.json_parser import JsonParser
+from src.core.parsers.plugin_metadata import PluginFileMetadata, PluginParameterMetadata
 
 
 class TestPluginMetadataFiltering(unittest.TestCase):
@@ -51,6 +52,37 @@ class TestPluginMetadataFiltering(unittest.TestCase):
 
         values = {text for _path, text, _ctx in extracted}
         self.assertIn("Loading %1", values)
+        self.assertNotIn("Window", values)
+
+    def test_pretty_printed_plugins_js_still_loads_metadata(self) -> None:
+        parser = JsonParser()
+        plugin_name = "WhitespacePlugin"
+        plugin_source = """/*:
+ * @plugindesc Whitespace plugin.
+ * @param Picture
+ * @type file
+ * @dir img/pictures/
+ * @require 1
+ * @default Window
+ */"""
+        plugins_js = (
+            "var $plugins = [\n"
+            "  {\n"
+            "    \"name\": \"WhitespacePlugin\",\n"
+            "    \"status\": true,\n"
+            "    \"description\": \"\",\n"
+            "    \"parameters\": {\n"
+            "      \"Picture\": \"Window\"\n"
+            "    }\n"
+            "  }\n"
+            "];\n"
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = self._write_plugin_fixture(tmpdir, plugin_name, plugin_source, plugins_js)
+            extracted = parser.extract_text(file_path)
+
+        values = {text for _path, text, _ctx in extracted}
         self.assertNotIn("Window", values)
 
     def test_combo_asset_registry_is_skipped_but_completion_text_survives(self) -> None:
@@ -202,6 +234,32 @@ class TestPluginMetadataFiltering(unittest.TestCase):
         self.assertNotIn('["shift", "tab"]', values)
         self.assertNotIn("Pc Only", values)
 
+    def test_short_ascii_menu_label_is_skipped_in_low_fp_fallback(self) -> None:
+        parser = JsonParser()
+        plugin_name = "ShortLabelPlugin"
+        plugin_source = """/*:
+ * @plugindesc Short label plugin.
+ * @param Menu Label
+ * @type string
+ * @default ON
+ *
+ * @param Status Label
+ * @type string
+ * @default Save
+ */"""
+        plugins_js = (
+            'var $plugins = [{"name":"ShortLabelPlugin","status":true,"description":"",'
+            '"parameters":{"Menu Label":"ON","Status Label":"Save"}}];\n'
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = self._write_plugin_fixture(tmpdir, plugin_name, plugin_source, plugins_js)
+            extracted = parser.extract_text(file_path)
+
+        values = {text for _path, text, _ctx in extracted}
+        self.assertNotIn("ON", values)
+        self.assertIn("Save", values)
+
     def test_orientation_string_without_explicit_type_is_skipped(self) -> None:
         parser = JsonParser()
         plugin_name = "LegacyOrientationPlugin"
@@ -280,6 +338,32 @@ class TestPluginMetadataFiltering(unittest.TestCase):
         self.assertIn("Welcome hero", values)
         self.assertNotIn("ground38", values)
 
+    def test_metadata_text_hint_skips_identifier_like_labels(self) -> None:
+        parser = JsonParser()
+        plugin_name = "LabelLikePlugin"
+        plugin_source = """/*:
+ * @plugindesc Label-like config.
+ * @param Display Text
+ * @type string
+ * @default Quest_01
+ *
+ * @param Friendly Text
+ * @type string
+ * @default Welcome hero
+ */"""
+        plugins_js = (
+            'var $plugins = [{"name":"LabelLikePlugin","status":true,"description":"",'
+            '"parameters":{"Display Text":"Quest_01","Friendly Text":"Welcome hero"}}];\n'
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = self._write_plugin_fixture(tmpdir, plugin_name, plugin_source, plugins_js)
+            extracted = parser.extract_text(file_path)
+
+        values = {text for _path, text, _ctx in extracted}
+        self.assertIn("Welcome hero", values)
+        self.assertNotIn("Quest_01", values)
+
     def test_metadata_symbol_key_is_treated_as_technical(self) -> None:
         parser = JsonParser()
         plugin_name = "MenuSymbolPlugin"
@@ -338,6 +422,23 @@ class TestPluginMetadataFiltering(unittest.TestCase):
         self.assertNotIn("\\c[6]Main Quests", values)
         self.assertNotIn("\\c[4]Side Quests", values)
 
+    def test_metadata_type_category_without_registry_options_stays_text(self) -> None:
+        parser = JsonParser()
+        plugin_metadata = PluginFileMetadata(name="CategoryTextPlugin")
+        plugin_metadata.params["Category Title"] = PluginParameterMetadata(
+            name="Category Title",
+            type_name="string",
+            text="Category Title",
+            description="Category text plugin",
+        )
+
+        is_registry_label = parser._looks_like_metadata_defined_registry_label(
+            "Category Title",
+            "Category Overview",
+            plugin_metadata,
+        )
+        self.assertFalse(is_registry_label)
+
     def test_metadata_console_comment_block_is_skipped(self) -> None:
         parser = JsonParser()
         plugin_name = "LunaticCodePlugin"
@@ -388,6 +489,63 @@ class TestPluginMetadataFiltering(unittest.TestCase):
         values = {text for _path, text, _ctx in extracted}
         self.assertIn("Attack", values)
         self.assertNotIn("tamam", values)
+
+    def test_generic_plugin_list_single_word_labels_are_extracted(self) -> None:
+        parser = JsonParser()
+        plugin_payload = [
+            {
+                "name": "UnknownListPlugin",
+                "status": True,
+                "description": "",
+                "parameters": {
+                    "Menu Labels": json.dumps(["Start", "Options", "Save"], ensure_ascii=False),
+                    "triggerButton": json.dumps(["shift", "tab"], ensure_ascii=False),
+                },
+            }
+        ]
+        plugins_js = f"var $plugins = {json.dumps(plugin_payload, ensure_ascii=False)};\n"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            js_dir = os.path.join(tmpdir, "js")
+            os.makedirs(js_dir, exist_ok=True)
+            file_path = os.path.join(js_dir, "plugins.js")
+            with open(file_path, "w", encoding="utf-8") as handle:
+                handle.write(plugins_js)
+            extracted = parser.extract_text(file_path)
+
+        values = {text for _path, text, _ctx in extracted}
+        self.assertIn("Start", values)
+        self.assertIn("Options", values)
+        self.assertIn("Save", values)
+        self.assertNotIn("shift", values)
+        self.assertNotIn("tab", values)
+
+    def test_generic_menu_label_surface_is_extracted_but_symbol_is_not(self) -> None:
+        parser = JsonParser()
+        plugin_payload = [
+            {
+                "name": "MenuPolicyPlugin",
+                "status": True,
+                "description": "",
+                "parameters": {
+                    "Menu Label": "Options",
+                    "Menu Symbol": "options",
+                },
+            }
+        ]
+        plugins_js = f"var $plugins = {json.dumps(plugin_payload, ensure_ascii=False)};\n"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            js_dir = os.path.join(tmpdir, "js")
+            os.makedirs(js_dir, exist_ok=True)
+            file_path = os.path.join(js_dir, "plugins.js")
+            with open(file_path, "w", encoding="utf-8") as handle:
+                handle.write(plugins_js)
+            extracted = parser.extract_text(file_path)
+
+        values = {text for _path, text, _ctx in extracted}
+        self.assertIn("Options", values)
+        self.assertNotIn("options", values)
 
 
 if __name__ == "__main__":

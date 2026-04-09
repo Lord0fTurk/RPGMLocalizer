@@ -33,6 +33,32 @@ class TestPlaceholderProtection(unittest.TestCase):
         
         self.assertNotIn("\\C[1]", protected)
         self.assertTrue(len(placeholders) > 0)
+
+    def test_brace_placeholder_protection(self) -> None:
+        """Simple brace placeholders like {name} should be protected."""
+        text = "\\i[4]{name}"
+        protected, placeholders = protect_rpgm_syntax(text)
+
+        self.assertNotIn("{name}", protected)
+        self.assertTrue(len(placeholders) > 0)
+
+    def test_percent_placeholder_protection(self) -> None:
+        """Numbered percent placeholders like %1 should be protected."""
+        text = "Loading %1"
+        protected, placeholders = protect_rpgm_syntax(text)
+
+        self.assertNotIn("%1", protected)
+        self.assertTrue(len(placeholders) > 0)
+
+    def test_printf_style_placeholder_protection(self) -> None:
+        """Printf-style placeholders like %s and %0.2f should be protected."""
+        text = "HP: %d / %s, Rate: %0.2f"
+        protected, placeholders = protect_rpgm_syntax(text)
+
+        self.assertNotIn("%d", protected)
+        self.assertNotIn("%s", protected)
+        self.assertNotIn("%0.2f", protected)
+        self.assertTrue(len(placeholders) >= 3)
     
     def test_empty_string_returns_empty(self):
         """Empty string should return empty."""
@@ -49,6 +75,19 @@ class TestPlaceholderProtection(unittest.TestCase):
         
         self.assertEqual(protected, text)
         self.assertEqual(placeholders, {})
+
+    def test_note_and_meta_text_are_not_protected(self) -> None:
+        """Plain note/meta prose should not be protected as technical code."""
+        note_text = "note: This is a reminder"
+        meta_text = "meta: Visible text"
+
+        protected_note, placeholders_note = protect_rpgm_syntax(note_text)
+        protected_meta, placeholders_meta = protect_rpgm_syntax(meta_text)
+
+        self.assertEqual(protected_note, note_text)
+        self.assertEqual(placeholders_note, {})
+        self.assertEqual(protected_meta, meta_text)
+        self.assertEqual(placeholders_meta, {})
 
 
 class TestPlaceholderRestoration(unittest.TestCase):
@@ -72,6 +111,54 @@ class TestPlaceholderRestoration(unittest.TestCase):
         translated = protected
         restored = restore_rpgm_syntax(translated, placeholders)
         
+        self.assertEqual(restored, original)
+
+    def test_brace_placeholder_restoration(self) -> None:
+        """Brace placeholders should survive translation and restore cleanly."""
+        original = "\\i[4]{name}"
+        protected, placeholders = protect_rpgm_syntax(original)
+        translated = protected
+        restored = restore_rpgm_syntax(translated, placeholders)
+
+        self.assertEqual(restored, original)
+
+    def test_percent_placeholder_restoration(self) -> None:
+        """Percent placeholders should survive translation and restore cleanly."""
+        original = "Loading %1"
+        protected, placeholders = protect_rpgm_syntax(original)
+        translated = protected
+        restored = restore_rpgm_syntax(translated, placeholders)
+
+        self.assertEqual(restored, original)
+
+    def test_printf_style_placeholder_restoration(self) -> None:
+        """Printf-style placeholders should survive translation and restore cleanly."""
+        original = "HP: %d / %s, Rate: %0.2f"
+        protected, placeholders = protect_rpgm_syntax(original)
+        translated = protected
+        restored = restore_rpgm_syntax(translated, placeholders)
+
+        self.assertEqual(restored, original)
+
+    def test_mixed_placeholder_stress_restoration(self) -> None:
+        """Mixed RPG Maker placeholders should survive together without collisions."""
+        original = "\\i[4]{name} - Loading %1 - HP: %d - Rate: %0.2f - \\C[4]Ready\\C[0]"
+        protected, placeholders = protect_rpgm_syntax(original)
+        translated = protected
+        restored = restore_rpgm_syntax(translated, placeholders)
+
+        self.assertEqual(restored, original)
+
+    def test_extreme_mixed_placeholder_stress_restoration(self) -> None:
+        """Multiple placeholder families should restore without interfering."""
+        original = (
+            "\\i[4]{name} - Loading %1 - HP: %d - Rate: %0.2f - "
+            "\\C[4]Ready\\C[0] - #{questId} - ${playerName}"
+        )
+        protected, placeholders = protect_rpgm_syntax(original)
+        translated = protected
+        restored = restore_rpgm_syntax(translated, placeholders)
+
         self.assertEqual(restored, original)
     
     def test_no_placeholders_returns_text_unchanged(self):

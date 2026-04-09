@@ -41,9 +41,12 @@ RPGM_PATTERNS = [
     r'\\+(?:MSGCore|pop|WordWrap)\[[^\]]*\]',
     r'\\+[\.\!\|\^\$\{\}\>\<]',
     r'(?<!\\)\^',                    # Standalone ^ (RPG Maker "don't wait" signal without backslash)
+    r'%(?:\d+)',
+    r'%(?:\d+\$)?[-+#0 ]*(?:\d+)?(?:\.\d+)?[sdfoxX]',
+    r'\{[A-Za-z_][A-Za-z0-9_]{0,40}\}',
     r'#\{[^\}]+\}',                  
     r'\$\{[^\}]+\}',                  
-    r'\b(?:eval|script|evalText|note|meta):\s*[^\n]+', 
+    r'\b(?:eval|script|evalText):\s*[^\n]+', 
     r'<[^>]+>',
     r'\[\[[^\]]+\]\]',                
     r'\{\{[^\}]+\}\}',                

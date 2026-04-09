@@ -1,3 +1,4 @@
+from datetime import datetime
 from PyQt6.QtWidgets import QWidget, QVBoxLayout
 from PyQt6.QtGui import QFont
 from qfluentwidgets import TextEdit, StrongBodyLabel
@@ -10,7 +11,7 @@ class ConsoleLog(QWidget):
         super().__init__(parent)
         self.vBoxLayout = QVBoxLayout(self)
         
-        self.label = StrongBodyLabel("Process Log", self)
+        self.label = StrongBodyLabel("Activity Log", self)
         self.textEdit = TextEdit(self)
         self.textEdit.setReadOnly(True)
         self.textEdit.setFont(QFont("Consolas", 10))
@@ -29,7 +30,8 @@ class ConsoleLog(QWidget):
             "info": "#ffffff" # Default for dark theme
         }
         color = colors.get(level, "#ffffff")
-        formatted = f'<span style="color:{color};">[{level.upper()}] {message}</span>'
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        formatted = f'<span style="color:{color};">[{timestamp}] [{level.upper()}] {message}</span>'
         self.textEdit.append(formatted)
     
     def clear(self):

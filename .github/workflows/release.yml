@@ -3,27 +3,30 @@ name: Release Build
 on:
   push:
     tags:
+      # Support both changelog-style tags (v0.6.4) and plain numeric tags (0.6.4).
       - 'v*'
       - '[0-9]*'
 
 jobs:
   build:
-    name: Build for ${{ matrix.os }}
+    name: Build for ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
         include:
           - os: windows-latest
-            artifact_name: dist/RPGMLocalizer.exe
-            asset_name: RPGMLocalizer_Windows.exe
+            label: Windows
+            artifact_name: dist/RPGMLocalizer-Windows.exe
+            artifact_id: windows-build
           - os: ubuntu-latest
-            artifact_name: dist/RPGMLocalizer-x86_64.AppImage
-            asset_name: RPGMLocalizer-Linux.AppImage
+            label: Linux
+            artifact_name: dist/RPGMLocalizer-Linux.AppImage
+            artifact_id: linux-build
           - os: macos-latest
-            artifact_name: dist/RPGMLocalizer_MacOS.zip
-            asset_name: RPGMLocalizer_MacOS.zip
+            label: macOS
+            artifact_name: dist/RPGMLocalizer-MacOS.zip
+            artifact_id: macos-build
 
     steps:
       - name: Checkout Code
@@ -114,8 +117,14 @@ jobs:
         run: |
           pyinstaller RPGMLocalizer.spec
 
+      - name: Package Windows
+        if: matrix.os == 'windows-latest'
+        run: |
+          Copy-Item dist/RPGMLocalizer.exe dist/RPGMLocalizer-Windows.exe
+
       - name: Package Linux (AppImage)
         if: matrix.os == 'ubuntu-latest'
+        shell: bash
         run: |
           # Create AppDir structure
           mkdir -p AppDir/usr/bin
@@ -144,19 +153,40 @@ jobs:
           chmod +x appimagetool-x86_64.AppImage
           
           export ARCH=x86_64
-          ./appimagetool-x86_64.AppImage --appimage-extract-and-run AppDir dist/RPGMLocalizer-x86_64.AppImage
+          ./appimagetool-x86_64.AppImage --appimage-extract-and-run AppDir dist/RPGMLocalizer-Linux.AppImage
+
+      - name: Package Linux (tar.gz)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          rm -rf portable
+          mkdir -p portable/RPGMLocalizer
+          cp dist/RPGMLocalizer portable/RPGMLocalizer/RPGMLocalizer
+          cp RPGMLocalizer.sh portable/RPGMLocalizer/RPGMLocalizer.sh
+          cp icon.png portable/RPGMLocalizer/icon.png
+          cp LICENSE portable/RPGMLocalizer/LICENSE
+          chmod +x portable/RPGMLocalizer/RPGMLocalizer
+          chmod +x portable/RPGMLocalizer/RPGMLocalizer.sh
+          tar -C portable -czf dist/RPGMLocalizer-Linux.tar.gz RPGMLocalizer
 
       - name: Package MacOS
         if: matrix.os == 'macos-latest'
         run: |
           cd dist
-          zip -r RPGMLocalizer_MacOS.zip RPGMLocalizer.app
+          zip -r RPGMLocalizer-MacOS.zip RPGMLocalizer.app
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset_name }}
+          name: ${{ matrix.artifact_id }}
           path: ${{ matrix.artifact_name }}
+
+      - name: Upload Linux tar.gz Artifact
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-targz-build
+          path: dist/RPGMLocalizer-Linux.tar.gz
 
   release:
     name: Create GitHub Release
@@ -171,32 +201,35 @@ jobs:
       - name: Download Windows Artifact
         uses: actions/download-artifact@v4
         with:
-          name: RPGMLocalizer_Windows.exe
-          path: .
+          name: windows-build
+          path: release-assets
 
       - name: Download Linux Artifact
         uses: actions/download-artifact@v4
         with:
-          name: RPGMLocalizer-Linux.AppImage
-          path: .
+          name: linux-build
+          path: release-assets
 
       - name: Download MacOS Artifact
         uses: actions/download-artifact@v4
         with:
-          name: RPGMLocalizer_MacOS.zip
-          path: .
+          name: macos-build
+          path: release-assets
 
-      - name: Prepare Release Assets
-        run: |
-          mv ./RPGMLocalizer.exe ./RPGMLocalizer_Windows.exe
+      - name: Download Linux tar.gz Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-targz-build
+          path: release-assets
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            RPGMLocalizer_Windows.exe
-            RPGMLocalizer-Linux.AppImage
-            RPGMLocalizer_MacOS.zip
+            release-assets/RPGMLocalizer-Windows.exe
+            release-assets/RPGMLocalizer-Linux.AppImage
+            release-assets/RPGMLocalizer-Linux.tar.gz
+            release-assets/RPGMLocalizer-MacOS.zip
           body: ""
           draft: false
           prerelease: false

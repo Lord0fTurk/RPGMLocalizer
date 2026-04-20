@@ -290,6 +290,11 @@ class JsonParser(BaseParser):
         'map', 'number', 'select', 'skill', 'state',
         'switch', 'tileset', 'troop', 'variable', 'weapon',
     }
+    # Legacy boolean sentinel values used in pre-2017 Japanese MV plugins that
+    # omit @type. Plugin code eval()'s these against `var はい = true; var いいえ = false;`
+    # (JP pattern) or checks `=== 'ON'` / `=== 'true'` (EN pattern). Any parameter
+    # whose @default matches one of these is treated as a non-translatable boolean.
+    LEGACY_BOOL_DEFAULTS: frozenset[str] = frozenset({'はい', 'いいえ', 'true', 'false', 'on', 'off'})
     PLUGIN_METADATA_TEXT_HINTS = (
         'text', 'message', 'name', 'label', 'caption', 'title',
         'format', 'button', 'command', 'tooltip', 'help', 'unit',
@@ -1055,6 +1060,12 @@ class JsonParser(BaseParser):
         if base_type in ("select", "combo"):
             return not self._has_metadata_defined_text_intent(param_metadata)
         if base_type in self.PLUGIN_METADATA_TECHNICAL_TYPES:
+            return True
+        # Legacy boolean detection: pre-2017 Japanese plugins omit @type but use
+        # @default はい / @default いいえ as boolean sentinels (eval'd against
+        # `var はい = true; var いいえ = false;` in plugin code).
+        # Also covers English ON/OFF defaults without explicit @type boolean.
+        if param_metadata.default_value.strip() in self.LEGACY_BOOL_DEFAULTS:
             return True
         if param_metadata.dir_path or param_metadata.require:
             return True
@@ -2279,8 +2290,14 @@ class JsonParser(BaseParser):
         if any(manager in text_lower for manager in js_managers):
             return True
 
-        # Boolean strings often found in plugins
+        # Boolean strings often found in plugins.
+        # Includes legacy Japanese boolean sentinels (はい/いいえ) used by pre-2017
+        # Japanese MV plugins that lack @type annotations. These are eval()'d against
+        # JS variables declared as `var はい = true; var いいえ = false;` in the plugin
+        # and must never be translated.
         if text_lower in ['true', 'false', 'on', 'off', 'null', 'undefined', 'none', '']:
+            return True
+        if cleaned_text in ('はい', 'いいえ'):
             return True
             
         # File paths / embedded asset references

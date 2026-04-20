@@ -7,22 +7,31 @@ REGEX_LINE_SPLIT = r'\uE000'
 
 # Layer 2: Pipeline Batching (Managed by TranslationPipeline)
 TOKEN_BATCH_SEPARATOR = "\uE001"
-# Unicode Token Shield: ⟦_S_⟧ separators (no HTML wrapping needed)
-SAFE_BATCH_SEPARATOR = '\n\n⟦_S_⟧\n\n'
-# Matches: ⟦_S_⟧, [_S_], 【_S_】, (_S_), {_S_} and spaced variants + legacy PUA
-REGEX_BATCH_SPLIT = r'\s*\n*\s*[\[(\{【⟦]\s*_\s*[sS]\s*_\s*[\])\}】⟧]\s*\n*\s*|\s*\uE001\s*'
+# ASCII separator — Google-safe (pipe chars survive text-mode translation intact)
+# Replaces the old ⟦_S_⟧ Unicode tokens which Google sometimes mangled to '?'
+SAFE_BATCH_SEPARATOR = '\n|||RPGMSEP_S|||\n'
+# Matches: |||RPGMSEP_S||| (primary) + legacy Unicode variants ⟦_S_⟧/[_S_]/etc. + PUA
+REGEX_BATCH_SPLIT = r'\s*\n*\s*\|\|\|RPGMSEP_S\|\|\|\s*\n*\s*|' \
+                    r'\s*\n*\s*[?\[(\{【⟦]\s*_\s*[sS]\s*_\s*[?\])\}】⟧]\s*\n*\s*|' \
+                    r'\s*\uE001\s*'
 
 # Layer 3: Cross-Event Merging (Managed by TextMerger)
 TOKEN_MERGE_SEPARATOR = "\uE002"
-SAFE_MERGE_SEPARATOR = '\n\n⟦_M_⟧\n\n'
-# Matches: ⟦_M_⟧, [_M_], 【_M_】, (_M_), {_M_} and spaced variants + legacy PUA
-REGEX_MERGE_SPLIT = r'\s*\n*\s*[\[(\{【⟦]\s*_\s*[mM]\s*_\s*[\])\}】⟧]\s*\n*\s*|\s*\uE002\s*'
+# ASCII separator — Google-safe
+SAFE_MERGE_SEPARATOR = '\n|||RPGMSEP_M|||\n'
+# Matches: |||RPGMSEP_M||| (primary) + legacy Unicode variants + PUA
+REGEX_MERGE_SPLIT = r'\s*\n*\s*\|\|\|RPGMSEP_M\|\|\|\s*\n*\s*|' \
+                    r'\s*\n*\s*[?\[(\{【⟦]\s*_\s*[mM]\s*_\s*[?\])\}】⟧]\s*\n*\s*|' \
+                    r'\s*\uE002\s*'
 
 # Layer 4: Parser-Internal Bundling (Managed by RubyParser/JsonParser)
 TOKEN_INTERNAL_MERGE = "\uE003"
-SAFE_INTERNAL_MERGE = '\n\n⟦_I_⟧\n\n'
-# Matches: ⟦_I_⟧, [_I_], 【_I_】, (_I_), {_I_} and spaced variants + legacy PUA
-REGEX_INTERNAL_MERGE = r'\s*\n*\s*[\[(\{【⟦]\s*_\s*[iI]\s*_\s*[\])\}】⟧]\s*\n*\s*|\s*\uE003\s*'
+# ASCII separator — Google-safe
+SAFE_INTERNAL_MERGE = '\n|||RPGMSEP_I|||\n'
+# Matches: |||RPGMSEP_I||| (primary) + legacy Unicode variants + PUA
+REGEX_INTERNAL_MERGE = r'\s*\n*\s*\|\|\|RPGMSEP_I\|\|\|\s*\n*\s*|' \
+                       r'\s*\n*\s*[?\[(\{【⟦]\s*_\s*[iI]\s*_\s*[?\])\}】⟧]\s*\n*\s*|' \
+                       r'\s*\uE003\s*'
 
 
 # --- General Configuration ---

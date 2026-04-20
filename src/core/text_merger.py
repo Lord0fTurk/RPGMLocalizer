@@ -86,35 +86,33 @@ class TextMerger:
     def split_merged_result(self, merged_text: str, original_entries: List[Tuple[str, str, str]]) -> List[Tuple[str, str]]:
         """Splits the merged result and returns a list of (key, text) pairs."""
         lines, expected_count, mismatch = self._split_lines(merged_text, original_entries)
-        results = []
-        
-        # Mismatch Handling logic...
-        if mismatch:
-            # Fallback logic already in _split_lines
-            pass
 
+        if mismatch:
+            if len(lines) > expected_count:
+                # Extra separators injected by translator — trim surplus.
+                lines = lines[:expected_count]
+            else:
+                # Fewer parts than expected — pad with original texts to avoid data loss.
+                for i in range(len(lines), expected_count):
+                    lines.append(original_entries[i][2])
+
+        results = []
         for i, line in enumerate(lines):
             if i < len(original_entries):
                 results.append((original_entries[i][1], line))
-            else:
-                # Extra lines? (rare with PUA tokens)
-                pass
         return results
 
     def split_merged_result_checked(self, merged_text: str, original_entries: Any) -> Tuple[List[Tuple[str, str]], bool]:
         """Backward compatibility wrapper for existing tests and UI."""
-        # Convert list of tuples if needed
-        # (Legacy tests use [tag, key, text] while current uses [context, key, text])
         formatted_orig = []
         for entry in original_entries:
             if len(entry) == 3:
                 formatted_orig.append(entry)
             else:
-                # Handle potential variations in test data
                 formatted_orig.append(("", str(entry[1]), str(entry[2])))
-        
+
         res = self.split_merged_result(merged_text, formatted_orig)
-        lines, expected, mismatch = self._split_lines(merged_text, formatted_orig)
+        _, _, mismatch = self._split_lines(merged_text, formatted_orig)
         return res, mismatch
 
     def _split_lines(self, merged_text: str, original_entries: List[Tuple[str, str, str]]) -> Tuple[List[str], int, bool]:
@@ -124,8 +122,10 @@ class TextMerger:
         """
         expected_count = len(original_entries)
         
-        # Normalize separators for splitting (Unicode tokens)
-        merged_text = re.sub(r'[\[(\{【]\s*_\s*[mM]\s*_\s*[\])\}】]', '⟦_M_⟧', merged_text)
+        # Normalize separators for splitting.
+        # Primary: |||RPGMSEP_M||| (ASCII, Google-safe, already matched by REGEX_MERGE_SPLIT).
+        # Legacy: Unicode ⟦_M_⟧ bracket mutations → normalize to canonical ASCII form.
+        merged_text = re.sub(r'[?\[(\{【⟦]\s*_\s*[mM]\s*_\s*[?\])\}】⟧]', '|||RPGMSEP_M|||', merged_text)
 
         # Use regex to find separators
         if not hasattr(self, '_merge_split_pattern'):
@@ -136,8 +136,8 @@ class TextMerger:
         else:
             lines = [merged_text]
 
-        # Cleanup whitespace
-        lines = [l.strip() for l in lines]
+        # Cleanup whitespace and drop blank lines created by leading/trailing separators
+        lines = [l.strip() for l in lines if l.strip()]
         
         # Exact match check
         mismatch = len(lines) != expected_count

@@ -137,6 +137,9 @@ class GoogleTranslator(BaseTranslator):
     # Seconds all mirrors wait after any identity/429 — prevents cascade bans
     _GLOBAL_COOLDOWN_IDENTITY_SECS: int = 10
     _GLOBAL_COOLDOWN_429_SECS: int = 20
+    _GLOBAL_COOLDOWN_IDENTITY_MAX_SECS: int = 60  # Cap for escalating identity cooldown
+    _CIRCUIT_BREAKER_THRESHOLD: int = 5  # Consecutive identities before circuit breaker activates
+    _CIRCUIT_BREAKER_COOLDOWN_SECS: int = 45  # Long pause when circuit breaker trips
 
     # 10+ Google mirrors
     google_endpoints = [
@@ -157,11 +160,10 @@ class GoogleTranslator(BaseTranslator):
 
     # Ordered by reliability: Hetzner-hosted first (dedicated), Vercel last (cold-start)
     lingva_instances = [
-        "https://translate.plausibility.cloud",   # Hetzner, dedicated — most reliable
-        "https://lingva.garudalinux.org",          # Hetzner, Garuda Linux mirror
-        "https://translate.dr460nf1r3.org",        # Netcup, secondary
-        "https://lingva.ml",                       # Vercel, cold-start — tertiary
-        "https://translate.igna.wtf",              # Vercel — tertiary
+        "https://lingva.ml",                       # Vercel — primary (verified working)
+        "https://lingva.lunar.icu",                # Secondary (verified working)
+        "https://translate.plausibility.cloud",   # Hetzner, dedicated — tertiary (may timeout)
+        "https://lingva.garudalinux.org",          # Hetzner — returns 403, kept as last resort
     ]
 
     def __init__(
@@ -197,6 +199,8 @@ class GoogleTranslator(BaseTranslator):
         self._lingva_index = 0
         self._endpoint_semaphores: dict[str, asyncio.Semaphore] = {}  # Per-endpoint rate limiter
         self._global_cooldown_until: float = 0.0  # All mirrors pause until this timestamp
+        self._consecutive_identity_count: int = 0  # Tracks consecutive identity responses globally
+        self._circuit_breaker_active: bool = False  # True when identity cascade detected
         
         # Motor-aware syntax protection strategy
         self.use_syntax_guard = use_syntax_guard  # Use syntax_guard_rpgm (v0.6.6+)
@@ -236,7 +240,8 @@ class GoogleTranslator(BaseTranslator):
                 self._endpoint_health[ep] = {"fails": 0, "banned_until": 0.0}
             available = self.google_endpoints[:]
 
-        self._endpoint_index = (self._endpoint_index + 1) % len(available)
+        # Clamp before increment: _endpoint_index may be stale from a larger pool.
+        self._endpoint_index = (min(self._endpoint_index, len(available) - 1) + 1) % len(available)
         return available[self._endpoint_index]
 
     def _get_next_lingva(self) -> str:
@@ -330,10 +335,19 @@ class GoogleTranslator(BaseTranslator):
                     # Attempt translation
                     translated_parts = await self._try_translate(batch_text, s_lang, t_lang, len(protected_batch))
                     
+                    # Always ensure translated_parts is a list before the zip below.
                     if not translated_parts:
-                        # Fallback: Parallel Individual Retry
                         translated_parts = [None] * len(protected_batch)
-                        
+
+                        # Fallback: Individual Retry
+                        # Even when the circuit breaker is active, individual retries are
+                        # still worth attempting because _try_translate will skip Google
+                        # (call_endpoint bails immediately) but still try Lingva fallback
+                        # with expected_count=1, which handles single items reliably.
+                        if self._circuit_breaker_active:
+                            self.logger.debug(
+                                "Circuit breaker active — individual retries will use Lingva only"
+                            )
                         async def retry_single(idx):
                             try:
                                 single_res = await self._try_translate(protected_batch[idx], s_lang, t_lang, 1)
@@ -447,7 +461,7 @@ class GoogleTranslator(BaseTranslator):
 
     def _register_success(self, endpoint: str) -> None:
         health = self._endpoint_health.setdefault(endpoint, {"fails": 0, "banned_until": 0.0})
-        health["fails"] = max(0, health.get("fails", 0) - 1)
+        health["fails"] = 0  # Full reset on success — no "failure debt" accumulation
 
     async def _try_translate(self, text: str, source: str, target: str, expected_count: int, racing: bool = True) -> Optional[List[str]]:
         """Try with Google endpoints, then Lingva."""
@@ -457,7 +471,6 @@ class GoogleTranslator(BaseTranslator):
             "sl": source,
             "tl": target,
             "dt": "t",
-            "format": "text",  # Unicode tokens (⟦⟧) use text mode
             "q": text
         }
         
@@ -479,14 +492,43 @@ class GoogleTranslator(BaseTranslator):
             for attempt in range(1, self.max_retries + 1):
                 try:
                     if self.request_delay_ms:
-                        await asyncio.sleep(self.request_delay_ms / 1000.0)
+                        await asyncio.sleep(self.request_delay_ms / 1000.0 + random.uniform(0, 0.05))
 
-                    # Global IP cooldown: when ANY mirror returned an identity/429, all
-                    # mirrors pause to avoid a cascade ban across the entire IP.
-                    _cooldown_remaining = self._global_cooldown_until - time.time()
-                    if _cooldown_remaining > 0:
-                        self.logger.debug(f"[cooldown] {ep}: waiting {_cooldown_remaining:.1f}s")
-                        await asyncio.sleep(_cooldown_remaining)
+                    # Circuit breaker gate: when an identity cascade is in progress,
+                    # bail out immediately so the TaskGroup resolves quickly and the
+                    # Lingva fallback can be reached without waiting 45s.
+                    # (Lingva is no longer blocked during circuit-breaker cooldown —
+                    # see the Lingva section below.)
+                    if self._circuit_breaker_active:
+                        if self._global_cooldown_until > time.time():
+                            self.logger.debug(f"[circuit-breaker] {ep}: bailing out — breaker active, cooldown running")
+                            return None
+                        # Cooldown expired — reset breaker and try again
+                        self._circuit_breaker_active = False
+                        self._consecutive_identity_count = 0
+                        self.logger.info(f"[circuit-breaker] {ep}: cooldown expired — resuming requests")
+
+                    # Global IP cooldown: wait in 3-second chunks so we see
+                    # extensions set by other coroutines while we're sleeping.
+                    # Add jitter on each wake-up to prevent thundering-herd
+                    # (all 16 coroutines waking and firing simultaneously).
+                    while True:
+                        _wait = self._global_cooldown_until - time.time()
+                        if _wait <= 0:
+                            break
+                        self.logger.debug(f"[cooldown] {ep}: waiting {_wait:.1f}s")
+                        await asyncio.sleep(min(_wait, 3.0) + random.uniform(0.1, 0.5))
+
+                    # Re-check circuit breaker after waking from cooldown —
+                    # another coroutine may have tripped it during our sleep.
+                    if self._circuit_breaker_active:
+                        _cb_wait2 = self._global_cooldown_until - time.time()
+                        if _cb_wait2 > 0:
+                            self.logger.debug(f"[circuit-breaker] {ep}: bailing out after cooldown wait (re-triggered)")
+                            return None
+                        # Cooldown expired while we slept — reset and continue
+                        self._circuit_breaker_active = False
+                        self._consecutive_identity_count = 0
 
                     session = await self._get_session()
                     async with ep_sem:
@@ -499,8 +541,6 @@ class GoogleTranslator(BaseTranslator):
                                 if not data or not data[0]:
                                     self._register_failure(ep)
                                     continue
-
-                                self._register_success(ep)
 
                                 full = ""
                                 if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
@@ -518,24 +558,68 @@ class GoogleTranslator(BaseTranslator):
                                 # Treat this as a failure to trigger retry/fallback.
                                 # Also activate the global IP cooldown so all mirrors pause —
                                 # this is an IP-level signal, not per-mirror.
+                                #
+                                # CRITICAL: _register_success must NOT be called before this
+                                # check — it would neutralize the failure counter (+1 -1 = 0)
+                                # and prevent endpoint bans during identity cascades.
                                 if full.strip() == text.strip():
-                                    self.logger.warning(f"Identity response from {ep} (soft 429 suspect) — retrying")
-                                    self._global_cooldown_until = max(
-                                        self._global_cooldown_until,
-                                        time.time() + self._GLOBAL_COOLDOWN_IDENTITY_SECS,
-                                    )
+                                    self._consecutive_identity_count += 1
                                     self._register_failure(ep)
-                                    continue
 
-                                # Normalize mangled separators back to solid Unicode tokens
-                                full = re.sub(r'[\[(\{【]\s*_\s*[sS]\s*_\s*[\])\}】]', '⟦_S_⟧', full)
-                                full = re.sub(r'[\[(\{【]\s*_\s*[mM]\s*_\s*[\])\}】]', '⟦_M_⟧', full)
-                                full = re.sub(r'[\[(\{【]\s*_\s*[iI]\s*_\s*[\])\}】]', '⟦_I_⟧', full)
+                                    if self._consecutive_identity_count >= self._CIRCUIT_BREAKER_THRESHOLD:
+                                        # Circuit breaker: trip once and bail — don't log/retry further.
+                                        # Concurrent coroutines will see _circuit_breaker_active=True
+                                        # at the top of their next attempt and bail out too.
+                                        if not self._circuit_breaker_active:
+                                            self._circuit_breaker_active = True
+                                            self._global_cooldown_until = max(
+                                                self._global_cooldown_until,
+                                                time.time() + self._CIRCUIT_BREAKER_COOLDOWN_SECS,
+                                            )
+                                            self.logger.warning(
+                                                f"Circuit breaker ACTIVE after {self._consecutive_identity_count} "
+                                                f"consecutive identity responses — pausing {self._CIRCUIT_BREAKER_COOLDOWN_SECS}s"
+                                            )
+                                        return None  # Bail out entirely — don't retry on this endpoint
+                                    else:
+                                        # Escalating cooldown: 10s, 20s, 40s... capped at 60s
+                                        escalated = min(
+                                            self._GLOBAL_COOLDOWN_IDENTITY_SECS * (2 ** (self._consecutive_identity_count - 1)),
+                                            self._GLOBAL_COOLDOWN_IDENTITY_MAX_SECS,
+                                        )
+                                        self._global_cooldown_until = max(
+                                            self._global_cooldown_until,
+                                            time.time() + escalated,
+                                        )
+                                        self.logger.warning(
+                                            f"Identity response from {ep} (soft 429 suspect) — "
+                                            f"cooldown {escalated:.0f}s [{self._consecutive_identity_count}/{self._CIRCUIT_BREAKER_THRESHOLD}]"
+                                        )
+                                        # Per-attempt backoff (mirrors 429 behavior)
+                                        wait_time = (2 ** (attempt - 1)) + random.uniform(0.2, 0.8)
+                                        await asyncio.sleep(wait_time)
+                                        continue
+
+                                # Valid translation — reset identity cascade tracker
+                                self._consecutive_identity_count = 0
+                                self._circuit_breaker_active = False
+                                self._register_success(ep)
+
+                                # Normalize mangled separators back to canonical ASCII tokens.
+                                # Primary separator is now |||RPGMSEP_S||| (ASCII, Google-safe).
+                                # Legacy Unicode ⟦_S_⟧ variants and their Google mutations
+                                # (?, [, {, (, 【) are caught by BATCH_SPLIT_PATTERN directly.
+                                # This step handles edge-case partial mangling of the ASCII form
+                                # (e.g. extra whitespace inside pipes) — unlikely but defensive.
+                                full = re.sub(r'\|\s*\|\s*\|RPGMSEP_S\|\s*\|\s*\|', '|||RPGMSEP_S|||', full)
+                                full = re.sub(r'\|\s*\|\s*\|RPGMSEP_M\|\s*\|\s*\|', '|||RPGMSEP_M|||', full)
+                                full = re.sub(r'\|\s*\|\s*\|RPGMSEP_I\|\s*\|\s*\|', '|||RPGMSEP_I|||', full)
                                 
                                 # Split using hardened regex
                                 parts = self.BATCH_SPLIT_PATTERN.split(full)
                                 parts = [p.strip() for p in parts if p.strip()]
-                                if len(parts) > expected_count and not parts[-1]:
+                                if len(parts) > expected_count:
+                                    # Trim excess parts: translator may have added extra separators.
                                     parts = parts[:expected_count]
 
                                 if len(parts) != expected_count:
@@ -597,23 +681,41 @@ class GoogleTranslator(BaseTranslator):
             return final_result
             
         # 2. Lingva Fallback
-        if self.enable_lingva_fallback:
-            for _ in range(2):
+        # RenLocalizer pattern: Lingva is always attempted when Google fails — including
+        # during circuit breaker cooldown.  Blocking Lingva during a CB cooldown was the
+        # root cause of complete translation freezes: Google was rate-limited, CB was
+        # active, Lingva was skipped → everything returned None for the whole pipeline.
+        #
+        # IMPORTANT: Lingva cannot handle batch text (long URLs with ⟦_S_⟧ separators
+        # cause timeouts or identity responses).  Only attempt Lingva for single-item
+        # requests (expected_count == 1).  Batch requests fall through to None and the
+        # caller's individual-retry path handles each item separately via _try_translate
+        # with expected_count=1.
+        if self.enable_lingva_fallback and expected_count == 1:
+            n = len(self.lingva_instances)
+            for _ in range(n):
                 try:
                     instance = self._get_next_lingva()
                     url = f"{instance}/api/v1/{source}/{target}/{urllib.parse.quote(text)}"
                     session = await self._get_session()
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=self.timeout_seconds)) as resp:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=min(self.timeout_seconds, 15))) as resp:
                         if resp.status == 200:
                             data = await resp.json()
                             trans = data.get("translation", "")
+                            # Identity check for Lingva — same soft-429 pattern
+                            if trans.strip() == text.strip():
+                                self.logger.warning(f"Identity response from Lingva {instance} — skipping")
+                                continue
                             parts = self.BATCH_SPLIT_PATTERN.split(trans.strip())
                             parts = [p.strip() for p in parts if p.strip()]
-                            if len(parts) > expected_count and not parts[-1]:
+                            if len(parts) > expected_count:
                                 parts = parts[:expected_count]
                             if len(parts) == expected_count:
+                                # Lingva succeeded — reset identity cascade tracker
+                                self._consecutive_identity_count = 0
+                                self._circuit_breaker_active = False
                                 return parts
-                except Exception:
+                except Exception as exc:
+                    self.logger.debug(f"Lingva instance {instance} failed: {type(exc).__name__}: {exc}")
                     await asyncio.sleep(0.3)
-            
         return None

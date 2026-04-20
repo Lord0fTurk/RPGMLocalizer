@@ -1,4 +1,4 @@
-﻿"""
+"""
 Translation Pipeline for RPGMLocalizer.
 Orchestrates the entire translation workflow including:
 - File discovery and parsing
@@ -12,9 +12,10 @@ import json
 import asyncio
 import logging
 import re
+import time
 from collections import Counter
 from enum import Enum
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any
 
 from PyQt6.QtCore import QObject, pyqtSignal as Signal
 
@@ -40,6 +41,7 @@ from .constants import (
     DEFAULT_USE_MULTI_ENDPOINT,
     DEFAULT_ENABLE_LINGVA_FALLBACK
 )
+from .engine_profiler import EngineProfiler, ProjectProfile
 
 
 class TranslationPipeline(QObject):
@@ -96,16 +98,27 @@ class TranslationPipeline(QObject):
             enable_lingva_fallback=self.settings.get("enable_lingva_fallback", DEFAULT_ENABLE_LINGVA_FALLBACK),
             request_delay_ms=self.settings.get("request_delay_ms", DEFAULT_REQUEST_DELAY_MS),
             timeout_seconds=self.settings.get("request_timeout", DEFAULT_TIMEOUT_SECONDS),
-            max_retries=self.settings.get("max_retries", DEFAULT_MAX_RETRIES)
+            max_retries=self.settings.get("max_retries", DEFAULT_MAX_RETRIES),
+            use_syntax_guard=self.settings.get("use_syntax_guard", True)
         )
         self.merger = TextMerger(batch_size=batch_size)
         self.logger = logging.getLogger("Pipeline")
         self.js_ast_audit_extractor = JavaScriptAstAuditExtractor()
         
         # Optional components
-        self.glossary: Optional[Glossary] = None
-        self.cache: Optional[TranslationCache] = None
-        self.backup_manager: Optional[BackupManager] = None
+        self.glossary: Glossary | None = None
+        self.cache: TranslationCache | None = None
+        self.backup_manager: BackupManager | None = None
+        self.importer: TranslationImporter = TranslationImporter()
+        # Progress throttling
+        self._last_progress_update: float = 0
+        self._progress_throttle_ms: int = self.settings.get("progress_throttle_ms", 100)
+        
+        # Engine profiling
+        self._project_profile: ProjectProfile | None = None
+        
+        # Store parsed data for deferred backup (avoid re-parsing)
+        self._parsed_data_cache: dict[str, Any] = {}
         
         # Initialize optional components based on settings
         self._init_components()
@@ -166,6 +179,18 @@ class TranslationPipeline(QObject):
 
         self.log_message.emit("info", f"Data folder: {data_dir}")
         
+        # Engine profiling for project analysis
+        try:
+            self._project_profile = EngineProfiler(project_path).profile()
+            self._log_engine_profile()
+        except Exception as e:
+            self.logger.warning(f"Engine profiling failed: {e}")
+        
+        # Word-wrap compatibility hint
+        if self._project_profile and self._project_profile.has_wordwrap_plugins:
+            if not self.settings.get("auto_wordwrap", False) and not self.settings.get("visustella_wordwrap", False):
+                self.log_message.emit("info", "💡 Tip: Detected Message/WordWrap plugins. You might want to enable 'Auto Word-Wrap' in settings for better dialogue formatting.")
+        
         # Collect files
         files = self._collect_files(data_dir)
         if not files:
@@ -203,20 +228,25 @@ class TranslationPipeline(QObject):
         # Export option (if requested)
         export_path = self.settings.get('export_path')
         if export_path:
-            self._export_entries(all_entries, export_path)
+            is_distinct = self.settings.get('export_distinct', False)
+            self._export_entries(all_entries, export_path, distinct=is_distinct)
             if self.settings.get('export_only', False):
-                self.finished.emit(True, f"Exported {total} entries to {export_path}")
+                self.finished.emit(True, f"Exported {total} entries (Distinct: {is_distinct}) to {export_path}")
                 return
 
+        # Initialize Importer
+        self.importer = TranslationImporter()
+        
         # Check for import file
         import_path = self.settings.get('import_path')
         if import_path and os.path.exists(import_path):
-            results_map = self._import_translations(import_path)
-            self.log_message.emit("info", f"Imported {len(results_map)} translations from file")
-        else:
-            # Translate
-            self.stage_changed.emit(PipelineStage.TRANSLATING.value, f"Translating {total} entries...")
-            results_map = self._translate_entries(all_entries, source_lang, target_lang)
+            self.importer.import_file(import_path)
+            stats = self.importer.get_stats()
+            self.log_message.emit("info", f"Imported {stats['imported']} translations (Global rules: {stats['global_rules']})")
+        
+        # Translate remaining entries
+        self.stage_changed.emit(PipelineStage.TRANSLATING.value, f"Processing {total} entries...")
+        results_map = self._translate_entries(all_entries, source_lang, target_lang)
 
         if self.should_stop:
             self.finished.emit(False, "Stopped by user")
@@ -293,16 +323,17 @@ class TranslationPipeline(QObject):
         files = []
         
         # Standard Data folder
-        for entry in os.scandir(data_dir):
-            if not entry.is_file() or not entry.name.lower().endswith(extensions):
-                continue
-            if self._should_skip_data_file(entry.name):
-                self.log_message.emit("info", f"Skipping backup data file: {entry.name}")
-                continue
-            if entry.name.lower().endswith('.json') and not self._looks_like_json_document(entry.path):
-                self.log_message.emit("info", f"Skipping non-JSON sidecar: {entry.name}")
-                continue
-            files.append(entry.path)
+        with os.scandir(data_dir) as entries:
+            for entry in entries:
+                if not entry.is_file() or not entry.name.lower().endswith(extensions):
+                    continue
+                if self._should_skip_data_file(entry.name):
+                    self.logger.debug("Skipping backup data file: %s", entry.name)
+                    continue
+                if entry.name.lower().endswith('.json') and not self._looks_like_json_document(entry.path):
+                    self.logger.debug("Skipping non-JSON sidecar: %s", entry.name)
+                    continue
+                files.append(entry.path)
         
         # MV Plugin configuration (js/plugins.js)
         # Search relative to data_dir (e.g. data is www/data, so js is ../js)
@@ -315,9 +346,10 @@ class TranslationPipeline(QObject):
         if plugin_js and os.path.exists(plugin_js):
             files.append(plugin_js)
             
-            # Note: We previously scanned all .js files here for hardcoded strings, 
-            # but it was disabled because translating raw JS files (like VisuStella) 
-            # breaks obfuscation/checksums and game API logic, causing a Black Screen.
+            # Plugin JS UI literal extraction: Only scan plugin source files for safe UI strings
+            # when project has shop/quest/heavy UI signals (narrow activation).
+            # This is controlled by profile analysis to prevent false positives.
+            self._maybe_collect_plugin_js_ui_files(project_root, files)
 
         files.extend(self._collect_custom_translation_files(project_root, plugin_js))
         
@@ -328,15 +360,16 @@ class TranslationPipeline(QObject):
         for root in locale_roots:
             locales_dir = self._find_child_case_insensitive(root, "locales", must_be_dir=True)
             if locales_dir and os.path.exists(locales_dir) and os.path.isdir(locales_dir):
-                for entry in os.scandir(locales_dir):
-                    # Only include JSON files from locales folder (skip .pak files)
-                    if not entry.is_file() or not entry.name.lower().endswith('.json'):
-                        continue
-                    if not self._looks_like_json_document(entry.path):
-                        self.log_message.emit("info", f"Skipping non-JSON locale sidecar: {entry.name}")
-                        continue
-                    files.append(entry.path)
-                    self.log_message.emit("info", f"Found locale file: {entry.name}")
+                with os.scandir(locales_dir) as entries:
+                    for entry in entries:
+                        # Only include JSON files from locales folder (skip .pak files)
+                        if not entry.is_file() or not entry.name.lower().endswith('.json'):
+                            continue
+                        if not self._looks_like_json_document(entry.path):
+                            self.logger.debug("Skipping non-JSON locale sidecar: %s", entry.name)
+                            continue
+                        files.append(entry.path)
+                        self.log_message.emit("info", f"Found locale file: {entry.name}")
                 break  # Only use the first found locales dir
 
         files.extend(self._collect_safe_text_files(data_dir))
@@ -402,10 +435,11 @@ class TranslationPipeline(QObject):
             if scenario_root and os.path.isdir(scenario_root):
                 decode_key = self._read_ts_decode_key(ts_plugin)
                 self.settings["ts_decode_key"] = decode_key
-                for entry in os.scandir(scenario_root):
-                    if not entry.is_file() or not entry.name.lower().endswith(TS_SCENARIO_EXTENSION):
-                        continue
-                    custom_files.append(entry.path)
+                with os.scandir(scenario_root) as entries:
+                    for entry in entries:
+                        if not entry.is_file() or not entry.name.lower().endswith(TS_SCENARIO_EXTENSION):
+                            continue
+                        custom_files.append(entry.path)
                 if any(path.lower().endswith(TS_SCENARIO_EXTENSION) for path in custom_files):
                     self.log_message.emit("info", f"Detected TS_ADV scenario surface: {os.path.basename(scenario_root)}")
 
@@ -494,15 +528,73 @@ class TranslationPipeline(QObject):
         safe_files: List[str] = []
 
         try:
-            for entry in os.scandir(data_dir):
-                if not entry.is_file():
-                    continue
-                if entry.name.lower() in SUPPORTED_TEXT_FILENAMES:
-                    safe_files.append(entry.path)
+            with os.scandir(data_dir) as entries:
+                for entry in entries:
+                    if not entry.is_file():
+                        continue
+                    if entry.name.lower() in SUPPORTED_TEXT_FILENAMES:
+                        safe_files.append(entry.path)
         except OSError as error:
             self.logger.warning(f"Failed to scan safe text files in {data_dir}: {error}")
 
         return safe_files
+
+    def _maybe_collect_plugin_js_ui_files(self, project_root: str, files: List[str]) -> None:
+        """
+        Conditionally collect plugin JS files for safe sink UI extraction.
+        
+        Only activates when project has shop/quest/heavy UI signals to avoid
+        false positive extraction from generic plugins.
+        """
+        enable_ui_extraction = self.settings.get("plugin_js_ui_extraction", False)
+        
+        if not enable_ui_extraction:
+            return
+        
+        if self._project_profile:
+            should_activate = (
+                self._project_profile.has_shop_signals or
+                self._project_profile.has_quest_signals or
+                self._project_profile.is_ui_heavy
+            )
+            if not should_activate:
+                self.log_message.emit("debug", "Plugin JS UI extraction skipped: no shop/quest/UI-heavy signals")
+                return
+        
+        js_dir = self._find_child_case_insensitive(project_root, "js", must_be_dir=True)
+        if not js_dir:
+            js_dir = self._find_child_case_insensitive(os.path.dirname(project_root), "js", must_be_dir=True)
+        if not js_dir:
+            return
+        
+        plugin_js_dir = os.path.join(js_dir, "plugins")
+        if not os.path.isdir(plugin_js_dir):
+            return
+        
+        try:
+            with os.scandir(plugin_js_dir) as entries:
+                for entry in entries:
+                    if not entry.is_file() or not entry.name.lower().endswith('.js'):
+                        continue
+                    if self._is_safe_plugin_js_file(entry.name):
+                        files.append(entry.path)
+                        self.log_message.emit("debug", f"Added plugin JS for UI extraction: {entry.name}")
+        except OSError as error:
+            self.logger.warning(f"Failed to scan plugin JS directory: {error}")
+
+    def _is_safe_plugin_js_file(self, filename: str) -> bool:
+        """Check if plugin JS file should be scanned for safe UI strings."""
+        safe_patterns = [
+            r'shop', r'merchant', r'buy', r'sell', r'trade',
+            r'quest', r'mission', r'objective', r'journal',
+            r'ui_', r'uielement', r'menu',
+        ]
+        import re
+        filename_lower = filename.lower()
+        for pattern in safe_patterns:
+            if re.search(pattern, filename_lower):
+                return True
+        return False
 
     def _build_coverage_report(self, project_path: str, data_dir: str, collected_files: List[str]) -> Dict[str, Any]:
         """Build a coverage report for known text surfaces and audit-only JS files."""
@@ -749,12 +841,50 @@ class TranslationPipeline(QObject):
                 f"Coverage audit: promising JS allowlist candidates -> {formatted_promising}",
             )
 
+    def _log_engine_profile(self) -> None:
+        """Log engine detection profile with confidence score and evidence."""
+        if not self._project_profile:
+            return
+        
+        profile = self._project_profile
+        ep = profile.engine_profile
+        
+        confidence_pct = ep.confidence * 100
+        evidence_count = len(ep.evidence)
+        
+        self.log_message.emit("info", (
+            f"Engine profile: {ep.engine.value.upper()} "
+            f"(confidence: {confidence_pct:.0f}%, level: {ep.confidence_level}, "
+            f"evidence: {evidence_count})"
+        ))
+        
+        for evidence in ep.evidence[:5]:
+            self.log_message.emit("debug", (
+                f"  Evidence: [{evidence.source}] {evidence.description} "
+                f"(weight: {evidence.weight})"
+            ))
+        
+        if ep.risk_labels:
+            sorted_risks = ", ".join(ep.risk_labels[:5])
+            self.log_message.emit("info", f"  Risk signals: {sorted_risks}")
+        
+        if profile.visu_stella_plugins:
+            count = len(profile.visu_stella_plugins)
+            self.log_message.emit("info", f"  VisuStella plugins: {count}")
+        
+        self.log_message.emit("info", (
+            f"  Project signals: plugins={profile.plugin_count}, "
+            f"active={profile.active_plugin_count}, "
+            f"ui_heavy={profile.is_ui_heavy}, "
+            f"workers={profile.suggested_worker_count}, "
+            f"strategy={profile.suggested_batch_strategy}"
+        ))
+
     def _write_coverage_report(self, coverage_report: Dict[str, Any], output_path: str) -> None:
         """Write a JSON coverage report to disk."""
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as handle:
+        with safe_write(output_path, "w", encoding="utf-8") as handle:
             json.dump(coverage_report, handle, ensure_ascii=False, indent=2)
-        self.log_message.emit("info", f"Coverage report written to {output_path}")
 
     def _to_relative_project_path(self, project_path: str, file_path: str) -> str:
         """Return a stable project-relative path for reports."""
@@ -765,11 +895,16 @@ class TranslationPipeline(QObject):
         all_entries = []  # (file, path_key, text)
         parsed_files = {}  # file -> (parser, entries)
         
-        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import ThreadPoolExecutor, wait as _cf_wait, ALL_COMPLETED
         import threading
         
         lock = threading.Lock()
-        max_workers = min(os.cpu_count() or 4, 8) # Don't overwhelm IO but use cores
+        
+        # Determine worker count based on project profile
+        if self._project_profile:
+            max_workers = self._project_profile.suggested_worker_count
+        else:
+            max_workers = min(os.cpu_count() or 4, 8)
         
         def process_file(file_path):
             if self.should_stop:
@@ -779,35 +914,73 @@ class TranslationPipeline(QObject):
             if not parser:
                 return None
             
-            # Use a safe way to emit from thread
             filename = os.path.basename(file_path)
+            self.logger.debug(f"[extract] start: {filename}")
+            t_extract = time.monotonic()
             
             try:
                 entries = parser.extract_text(file_path)
+                elapsed = time.monotonic() - t_extract
                 if entries:
-                    # Keep valid single-character CJK/localized strings while still skipping blanks.
                     filtered = [
                         (path, text, tag)
                         for path, text, tag in entries
                         if self._should_keep_extracted_text(text)
                     ]
-                    return file_path, parser, filtered
+                    self.logger.debug(f"[extract] done: {filename} in {elapsed:.2f}s ({len(filtered)} entries)")
+                    return file_path, parser, filtered, getattr(parser, '_last_loaded_data', None)
+                self.logger.debug(f"[extract] done (empty): {filename} in {elapsed:.2f}s")
                 return None
             except Exception as e:
-                self.logger.error(f"Failed to parse {filename}: {e}")
+                elapsed = time.monotonic() - t_extract
+                self.logger.error(f"[extract] failed: {filename} in {elapsed:.2f}s — {e}")
                 return None
 
         self.log_message.emit("info", f"Starting parallel extraction with {max_workers} workers...")
-        
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            results = list(executor.map(process_file, files))
-            
+
+        # Use submit()+wait(timeout)+shutdown(wait=False) instead of executor.map() +
+        # context-manager to avoid hanging forever if any worker thread gets stuck
+        # (e.g. a corrupt Marshal file or a very large plugin JSON).
+        _EXTRACT_PER_FILE_SEC = 30
+        _EXTRACT_TOTAL_SEC = min(_EXTRACT_PER_FILE_SEC * max(len(files), 1), 300)
+
+        _extract_executor = ThreadPoolExecutor(max_workers=max_workers)
+        try:
+            _extract_futures = {_extract_executor.submit(process_file, fp): fp for fp in files}
+            _done, _not_done = _cf_wait(_extract_futures, timeout=_EXTRACT_TOTAL_SEC,
+                                        return_when=ALL_COMPLETED)
+            if _not_done:
+                _hung = [os.path.basename(_extract_futures[f]) for f in _not_done]
+                self.logger.error(
+                    f"Extraction timeout ({_EXTRACT_TOTAL_SEC}s): {len(_not_done)} file(s) stuck "
+                    f"— {_hung[:10]}"
+                )
+                self.log_message.emit(
+                    "warning",
+                    f"{len(_not_done)} file(s) timed out during extraction and were skipped."
+                )
+            results = []
+            for _future in _done:
+                try:
+                    results.append(_future.result())
+                except Exception as _e:
+                    self.logger.error(f"Extraction future error: {_e}")
+                    results.append(None)
+            for _ in _not_done:
+                results.append(None)
+        finally:
+            _extract_executor.shutdown(wait=False, cancel_futures=True)
+
         for res in results:
             if res:
-                f_path, parser, entries = res
-                # Normalize file path for consistent dict keys
+                f_path, parser, entries, raw_data = res
                 norm_path = os.path.normpath(f_path)
                 parsed_files[norm_path] = (parser, entries)
+                
+                # Store raw data for Ruby files to avoid double-loading
+                if raw_data is not None:
+                    self._parsed_data_cache[norm_path] = raw_data
+                
                 for path, text, tag in entries:
                     all_entries.append((norm_path, path, text, tag))
         
@@ -883,6 +1056,9 @@ class TranslationPipeline(QObject):
             if self.glossary:
                 protected_text, glossary_map = self.glossary.protect_terms(text)
             
+            # RPGM Code Protection: Handled by Translator
+            rpgn_codes = []
+            
             # Prepare Final Request
             # Add language codes and glossary_map to metadata
             # IMPORTANT: Store original unprotected text in metadata so translator can use it for cache consistency
@@ -890,6 +1066,7 @@ class TranslationPipeline(QObject):
             meta['source_lang'] = source_lang
             meta['target_lang'] = target_lang
             meta['original_text'] = text  # Store before protection for cache
+            meta['rpgn_codes'] = rpgn_codes  # Store RPGM codes for restoration
             
             # We strictly use Dict structure as expected by new Translator
             final_requests.append({
@@ -916,12 +1093,6 @@ class TranslationPipeline(QObject):
         self.log_message.emit("info", f"Execution Plan: Phase 1 (DB): {len(phase1_requests)} reqs | Phase 2 (Maps/Events): {len(phase2_requests)} reqs")
 
         # 2. Async Execution (Result Pattern)
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
         async def process_all():
             processed_count = 0
             total_reqs = len(final_requests)
@@ -929,7 +1100,11 @@ class TranslationPipeline(QObject):
             def on_progress(count):
                 nonlocal processed_count
                 processed_count += count
-                self.progress_updated.emit(processed_count, total_reqs, f"Translating... {processed_count}/{total_reqs}")
+                current_time = time.time() * 1000
+                if current_time - self._last_progress_update >= self._progress_throttle_ms:
+                    self._last_progress_update = current_time
+                    visible_count = min(processed_count, total_reqs)
+                    self.progress_updated.emit(visible_count, total_reqs, f"Translating... {visible_count}/{total_reqs}")
 
             success_total, fail_total = 0, 0
             dynamic_glossary = {}
@@ -945,6 +1120,7 @@ class TranslationPipeline(QObject):
                         glossary_map = meta.get('glossary_map', {})
                         if self.glossary and glossary_map:
                             translated_text = self.glossary.restore_terms(translated_text, glossary_map)
+                        # Restoration handled by Translator
                         if self.cache and res.original_text:
                             self.cache.set(res.original_text, translated_text, source_lang, target_lang)
 
@@ -1014,6 +1190,8 @@ class TranslationPipeline(QObject):
                     glossary_map = {}
                     if self.glossary:
                         protected_text, glossary_map = self.glossary.protect_terms(text)
+                    # RPGM Code Protection: Handled by Translator
+                    rpgn_codes = []
 
                     retry_requests.append({
                         'text': protected_text,
@@ -1025,7 +1203,8 @@ class TranslationPipeline(QObject):
                             'glossary_map': glossary_map,
                             'source_lang': source_lang,
                             'target_lang': target_lang,
-                            'original_text': text
+                            'original_text': text,
+                            'rpgn_codes': rpgn_codes
                         }
                     })
 
@@ -1040,6 +1219,7 @@ class TranslationPipeline(QObject):
                         glossary_map = meta.get('glossary_map', {})
                         if self.glossary and glossary_map:
                             translated_text = self.glossary.restore_terms(translated_text, glossary_map)
+                        # Restoration handled by Translator
 
                         if self.cache and res.original_text:
                             self.cache.set(res.original_text, translated_text, source_lang, target_lang)
@@ -1054,68 +1234,127 @@ class TranslationPipeline(QObject):
             # Cleanup
             await self.translator.close()
 
-        loop.run_until_complete(process_all())
+        asyncio.run(process_all())
         
         return results_map
 
     def _save_translations(self, parsed_files: Dict, results_map: Dict):
         """Apply translations and save files using parallel processing."""
-        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import ThreadPoolExecutor, wait as _cf_wait, ALL_COMPLETED
         
-        # Group by file
+        # Build updates map using Fallback Strategy:
+        # 1. New translations from current run (results_map)
+        # 2. Imported translations (self.importer)
         file_updates = {}
+        
+        # A. Fill from results_map (High Priority - current session changes)
         for (file_path, path), text in results_map.items():
             if file_path not in file_updates:
                 file_updates[file_path] = {}
             file_updates[file_path][path] = text
+            
+        # B. Fill missing entries from Importer (including Global Distinct rules)
+        for file_path, (parser, entries) in parsed_files.items():
+            if file_path not in file_updates:
+                file_updates[file_path] = {}
+            
+            for path, original_text, tag in entries:
+                # Only fill if not already translated in this run
+                if path not in file_updates[file_path]:
+                    translation = self.importer.get_translation(file_path, path, original_text)
+                    if translation:
+                        file_updates[file_path][path] = translation
         
         def save_file(file_path):
             if self.should_stop:
                 return
             
+            filename_early = os.path.basename(file_path)
+            self.logger.debug(f"[save] start: {filename_early}")
+            t_save = time.monotonic()
             changes = file_updates.get(file_path)
             if not changes or file_path not in parsed_files:
                 return
             
             parser, entries = parsed_files[file_path]
             filename = os.path.basename(file_path)
+            file_ext = os.path.splitext(file_path)[1].lower()
             
-            # Lookup table for fast tag checking
             tag_lookup = {path: tag for path, _t, tag in entries}
             
-            # Formatting Pre-Processing
             visu_wrap = self.settings.get("visustella_wordwrap", False)
             auto_wrap = self.settings.get("auto_wordwrap", False)
+            wrap_limit_std = self.settings.get("wordwrap_limit_standard", 54)
+            wrap_limit_portrait = self.settings.get("wordwrap_limit_portrait", 44)
             
             for p, text in changes.items():
-                if tag_lookup.get(p) == "message_dialogue":
+                tag = tag_lookup.get(p, "")
+                if tag.startswith("message_dialogue"):
                     if visu_wrap:
                         if not text.startswith("<WordWrap>"):
                             changes[p] = "<WordWrap>" + text
                     elif auto_wrap and "\n" not in text:
-                        if len(text) > 54:
-                            import textwrap
-                            changes[p] = "\n".join(textwrap.wrap(
-                                text, 
-                                width=54, 
-                                break_long_words=False, 
-                                break_on_hyphens=False
-                            ))
+                        # Use portrait limit if the tag indicates a picture is present
+                        width = wrap_limit_portrait if "hasPicture" in tag else wrap_limit_std
+                        
+                        # Calculate visible length (exclude RPG Maker escape codes)
+                        import re as _re
+                        _CODE_RE = _re.compile(r'\\[A-Za-z]+(?:\[[^\]]*\])?')
+                        visible_text = _CODE_RE.sub('', text)
+                        if len(visible_text) > width:
+                            # Code-aware wrapping: treat escape codes as zero-width atoms
+                            # Split text into (code, text) segments, wrap only visible text
+                            segments = _CODE_RE.split(text)
+                            codes = _CODE_RE.findall(text)
+                            # Rebuild with codes as atomic inserts
+                            flat_parts: list[tuple[str, bool]] = []  # (content, is_code)
+                            for i, seg in enumerate(segments):
+                                if seg:
+                                    flat_parts.append((seg, False))
+                                if i < len(codes):
+                                    flat_parts.append((codes[i], True))
+                            
+                            # Greedy line-break: accumulate visible chars, break at word boundaries
+                            lines: list[str] = []
+                            current_line = ""
+                            current_visible = 0
+                            for part, is_code in flat_parts:
+                                if is_code:
+                                    current_line += part  # Zero visible width
+                                else:
+                                    words = part.split(' ')
+                                    for wi, word in enumerate(words):
+                                        space = ' ' if (current_visible > 0 and wi > 0) or (current_visible > 0 and current_line and not current_line.endswith(' ')) else ''
+                                        if wi > 0:
+                                            space = ' '
+                                        word_len = len(word)
+                                        if current_visible + len(space) + word_len > width and current_visible > 0:
+                                            lines.append(current_line.rstrip())
+                                            current_line = word
+                                            current_visible = word_len
+                                        else:
+                                            current_line += space + word if current_visible > 0 or wi > 0 else word
+                                            current_visible += len(space) + word_len
+                            if current_line.strip():
+                                lines.append(current_line.rstrip())
+                            if lines:
+                                changes[p] = "\n".join(lines)
             
             try:
-                # Create backup first
-                if self.backup_manager:
-                    backup_path = self.backup_manager.create_backup(file_path)
-                    if not backup_path:
-                        self.logger.warning(f"Backup failed for {filename}, skipping")
-                        return
+                # Get pre-loaded data for Ruby files to avoid double-loading
+                cached_data = self._parsed_data_cache.get(file_path)
                 
-                # Apply translations
-                new_data = parser.apply_translation(file_path, changes)
+                # Apply translations (backup deferred until after success)
+                if file_ext in ('.rvdata2', '.rxdata', '.rvdata') and cached_data is not None:
+                    new_data = parser.apply_translation(file_path, changes, original_data=cached_data)
+                else:
+                    new_data = parser.apply_translation(file_path, changes)
+                
                 if new_data is None:
                     parser_failure_reason = getattr(parser, "last_apply_error", None)
                     if parser_failure_reason and "write disabled" in parser_failure_reason.lower():
                         self.log_message.emit("info", f"{filename}: script writing disabled, preserving original file")
+                        self.logger.debug(f"[save] skipped (write disabled): {filename} in {time.monotonic() - t_save:.2f}s")
                         return filename
                     if parser_failure_reason:
                         self.log_message.emit("warning", f"{filename}: {parser_failure_reason}")
@@ -1124,8 +1363,6 @@ class TranslationPipeline(QObject):
                     )
                 
                 # Write file
-                file_ext = os.path.splitext(file_path)[1].lower()
-
                 if file_ext == '.json':
                     with safe_write(file_path, 'w', encoding='utf-8') as f:
                         json.dump(new_data, f, ensure_ascii=False)
@@ -1135,17 +1372,15 @@ class TranslationPipeline(QObject):
                         if isinstance(new_data, str):
                             f.write(new_data)
                         else:
-                            # Fallback if parser somehow returns raw list/dict
                             prefix = getattr(parser, '_js_prefix', "var $plugins = \n")
                             suffix = getattr(parser, '_js_suffix', ";\n")
                             f.write(prefix)
-                            json.dump(new_data, f, ensure_ascii=False, indent=0)
+                            json.dump(new_data, f, ensure_ascii=False)
                             f.write(suffix)
 
                 elif file_ext == '.txt':
                     if not isinstance(new_data, str):
                         raise ValueError(f"Expected text output for {filename}, got {type(new_data).__name__}")
-                    # Preserve parser-provided newline sequences exactly.
                     with safe_write(file_path, 'w', encoding='utf-8', newline='') as f:
                         f.write(new_data)
 
@@ -1162,25 +1397,106 @@ class TranslationPipeline(QObject):
                         f.write(new_data)
                           
                 elif file_ext in ('.rvdata2', '.rxdata', '.rvdata'):
-                    import rubymarshal.writer
-                    with safe_write(file_path, 'wb') as f:
-                        rubymarshal.writer.write(f, new_data)
+                    if isinstance(new_data, bytes):
+                        # Binary-patched data — write directly
+                        with safe_write(file_path, 'wb') as f:
+                            f.write(new_data)
+                    else:
+                        # Legacy path (script containers) — use rubymarshal.writer
+                        import rubymarshal.writer
+                        with safe_write(file_path, 'wb') as f:
+                            rubymarshal.writer.write(f, new_data)
+                
+                self.logger.debug(f"[save] done: {filename} in {time.monotonic() - t_save:.2f}s")
                 return filename
                 
             except Exception as e:
-                self.logger.error(f"Failed to save {filename}: {e}")
-                # Try to restore from backup
-                if self.backup_manager:
-                    backups = self.backup_manager.get_backups_for_file(file_path)
-                    if backups:
-                        self.backup_manager.restore_backup(backups[-1], file_path)
+                self.logger.error(f"[save] failed: {filename} in {time.monotonic() - t_save:.2f}s — {e}")
                 return None
 
+        # Create backups sequentially BEFORE launching parallel workers.
+        # Doing backup inside workers caused NTFS directory serialization with
+        # 8 concurrent shutil.copy2 calls to the same folder, effectively
+        # serializing all workers while also starving each other — producing
+        # 10+ minute hangs on large projects.  Sequential backup is safe
+        # because the backup is only a read + copy; the translated write
+        # happens afterward in the parallel phase.
+        if self.backup_manager:
+            self.log_message.emit("info", f"Creating backups for {len(file_updates)} files...")
+            for file_path in file_updates.keys():
+                if file_path in parsed_files:
+                    result = self.backup_manager.create_backup(file_path)
+                    if not result:
+                        self.logger.warning(
+                            f"Backup failed for {os.path.basename(file_path)} — "
+                            "save will proceed anyway"
+                        )
+
         self.log_message.emit("info", f"Saving {len(file_updates)} files in parallel...")
+
+        # Worker selection based on project profile
+        if self._project_profile:
+            strategy = self._project_profile.suggested_batch_strategy
+            if strategy == "conservative":
+                max_workers = 2
+            elif strategy == "capped":
+                max_workers = min(4, os.cpu_count() or 4)
+            else:
+                max_workers = min(os.cpu_count() or 4, 8)
+        else:
+            max_workers = min(os.cpu_count() or 4, 8)
         
-        max_workers = min(os.cpu_count() or 4, 8)
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            saved_filenames = list(executor.map(save_file, file_updates.keys()))
+        # Submit all save tasks with a per-batch wall-clock timeout.
+        # executor.map() / the context-manager shutdown(wait=True) block forever
+        # if any worker thread hangs (e.g. rubymarshal.writer on a cyclic object,
+        # an antivirus holding a temp file, or a corrupt Ruby Marshal stream).
+        # Using submit() + wait(timeout) + shutdown(wait=False) lets us detect and
+        # report stuck files instead of hanging the entire application.
+        # Cap total timeout at 10 minutes regardless of file count — 246 files × 60s
+        # would produce a ~4 hour timeout that looks like an infinite hang to the user.
+        # Raised from 300s (5 min) to 600s (10 min) to absorb antivirus scanning delays.
+        _PER_FILE_BUDGET_SEC = 30
+        _MAX_TOTAL_SEC = 600  # 10-minute hard ceiling (raised from 300 to absorb AV scanning)
+        _TOTAL_TIMEOUT_SEC = min(_PER_FILE_BUDGET_SEC * max(len(file_updates), 1), _MAX_TOTAL_SEC)
+
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        try:
+            # Submit .js files (plugins.js etc.) first so they are not starved at the
+            # tail of the timeout window when many JSON files are queued ahead of them.
+            sorted_paths = sorted(
+                file_updates.keys(),
+                key=lambda p: (0 if p.lower().endswith(".js") else 1),
+            )
+            future_to_path = {executor.submit(save_file, fp): fp for fp in sorted_paths}
+            done, not_done = _cf_wait(future_to_path, timeout=_TOTAL_TIMEOUT_SEC,
+                                      return_when=ALL_COMPLETED)
+
+            saved_filenames: list = []
+            for future in done:
+                try:
+                    saved_filenames.append(future.result())
+                except Exception as exc:
+                    fp = future_to_path[future]
+                    self.logger.error(f"Error saving {os.path.basename(fp)}: {exc}")
+                    saved_filenames.append(None)
+
+            if not_done:
+                hung_names = [os.path.basename(future_to_path[f]) for f in not_done]
+                self.logger.error(
+                    f"Save timeout ({_TOTAL_TIMEOUT_SEC}s): {len(not_done)} file(s) did not "
+                    f"complete — {hung_names[:10]}"
+                )
+                self.log_message.emit(
+                    "warning",
+                    f"{len(not_done)} file(s) timed out during save and were skipped. "
+                    "See the log for details."
+                )
+                for _ in not_done:
+                    saved_filenames.append(None)
+        finally:
+            # shutdown(wait=False) abandons any still-running threads instead of
+            # blocking the main thread until they finish (or hang forever).
+            executor.shutdown(wait=False, cancel_futures=True)
 
         success_count = len([f for f in saved_filenames if f])
 
@@ -1304,26 +1620,35 @@ class TranslationPipeline(QObject):
         }
         return names.get(language_symbol.lower(), language_symbol.upper())
 
-    def _export_entries(self, entries: List[Tuple], export_path: str):
-        """Export extracted entries to file."""
-        exporter = TranslationExporter()
-        
-        # Group by file
-        file_entries = {}
-        for file_path, path, text, tag in entries:
-            if file_path not in file_entries:
-                file_entries[file_path] = []
-            file_entries[file_path].append((path, text))
-        
-        for file_path, extractions in file_entries.items():
-            exporter.add_entries_from_file(file_path, extractions)
-        
-        if export_path.endswith('.json'):
-            exporter.export_json(export_path)
-        else:
-            exporter.export_csv(export_path)
-        
-        self.log_message.emit("info", f"Exported {len(entries)} entries")
+    def _export_entries(self, entries: List[Tuple], export_path: str, distinct: bool = False):
+        """Export extracted entries to file with support for distinct string mode."""
+        try:
+            # Ensure target directory exists
+            export_dir = os.path.dirname(export_path)
+            if export_dir and not os.path.exists(export_dir):
+                os.makedirs(export_dir, exist_ok=True)
+                
+            exporter = TranslationExporter()
+            
+            for file_path, path, text, tag in entries:
+                # Pass tag as context if available
+                exporter.add_entry(file_path, path, text, context=str(tag or ""))
+            
+            success = False
+            if export_path.endswith('.json'):
+                success = exporter.export_json(export_path, distinct=distinct)
+            else:
+                success = exporter.export_csv(export_path, distinct=distinct)
+            
+            if success:
+                mode_str = " (Distinct Mode)" if distinct else ""
+                self.log_message.emit("info", f"Successfully exported {len(entries)} entries{mode_str} to: {export_path}")
+            else:
+                self.log_message.emit("error", f"Export failed! Please check if the file '{export_path}' is open in another program.")
+        except Exception as e:
+            error_msg = f"Critical Export Error: {str(e)}"
+            self.logger.error(error_msg)
+            self.log_message.emit("error", error_msg)
 
     def _import_translations(self, import_path: str) -> Dict:
         """Import translations from file."""

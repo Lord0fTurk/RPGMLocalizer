@@ -1,11 +1,13 @@
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QFileDialog
-from qfluentwidgets import (ScrollArea, SettingCardGroup, PushSettingCard, FluentIcon as FIF)
-from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QFileDialog, QHBoxLayout
+from qfluentwidgets import (ScrollArea, SettingCardGroup, PushSettingCard, FluentIcon as FIF, PrimaryPushButton, SwitchSettingCard)
+from PyQt6.QtCore import Qt, pyqtSignal as Signal
 
 class ExportInterface(ScrollArea):
     """
     Interface for Exporting and Importing translations.
     """
+    start_requested = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("ExportInterface")
@@ -38,17 +40,24 @@ class ExportInterface(ScrollArea):
         )
         self.card_export.clicked.connect(self._select_export_path)
         
-        from qfluentwidgets import SwitchSettingCard
         self.chk_export_only = SwitchSettingCard(
             FIF.SAVE,
             "Export only",
-            "Extract text without writing back.",
+            "Extract text without writing back to the game.",
             parent=self.exportGroup
         )
-        self.chk_export_only.setChecked(False)
+        self.chk_export_only.setChecked(True)
+        
+        self.chk_distinct_export = SwitchSettingCard(
+            FIF.DOCUMENT,
+            "Distinct entries only",
+            "Group identical strings to reduce translator workload.",
+            parent=self.exportGroup
+        )
         
         self.exportGroup.addSettingCard(self.card_export)
         self.exportGroup.addSettingCard(self.chk_export_only)
+        self.exportGroup.addSettingCard(self.chk_distinct_export)
         
         # Import Group
         self.importGroup = SettingCardGroup("Import", self.scrollWidget)
@@ -64,16 +73,43 @@ class ExportInterface(ScrollArea):
         
         self.importGroup.addSettingCard(self.card_import)
 
+        # Action Group
+        self.actionGroup = SettingCardGroup("Action", self.scrollWidget)
+        self.btn_execute = PrimaryPushButton("Execute Transfer", self.scrollWidget, FIF.PLAY)
+        self.btn_execute.clicked.connect(self._handle_execute_click)
+        
+        # Add local reference to MainWindow to receive finish signals (if set)
+        self._is_running = False
+        
         # Layout
         self.expandLayout.addWidget(self.hintGroup)
         self.expandLayout.addWidget(self.exportGroup)
         self.expandLayout.addWidget(self.importGroup)
+        self.expandLayout.addSpacing(20)
+        self.expandLayout.addWidget(self.btn_execute)
         self.expandLayout.addStretch(1)
         
         self.setWidget(self.scrollWidget)
         self.setWidgetResizable(True)
         self.setStyleSheet("QWidget{background-color: transparent;}")
         
+    def _handle_execute_click(self):
+        """Disable button and start pipeline."""
+        self.set_processing_state(True)
+        self.start_requested.emit()
+
+    def set_processing_state(self, is_running: bool):
+        """Update button state to show/hide loading indicator."""
+        self._is_running = is_running
+        self.btn_execute.setEnabled(not is_running)
+        # Using qfluentwidgets' internal loading state if supported or custom text
+        if is_running:
+            self.btn_execute.setText("Processing...")
+            # If the button had an icon, we can clear it or change to a spinner
+        else:
+            self.btn_execute.setText("Execute Transfer")
+            self.btn_execute.setIcon(FIF.PLAY)
+
     def _select_export_path(self):
         path, _ = QFileDialog.getSaveFileName(
             self, "Export Translations", "translations.csv", "CSV Files (*.csv);;JSON Files (*.json)"

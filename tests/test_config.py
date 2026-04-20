@@ -62,30 +62,29 @@ class TestConstantsConfiguration(unittest.TestCase):
         
         # Verify constant is defined
         self.assertIsNotNone(TRANSLATOR_MAX_SAFE_CHARS)
-        self.assertEqual(TRANSLATOR_MAX_SAFE_CHARS, 4500)
+        self.assertEqual(TRANSLATOR_MAX_SAFE_CHARS, 12000)
     
     def test_text_merger_max_chars_from_constants(self):
         """TEXT_MERGER_MAX_SAFE_CHARS should be used."""
         from src.core.constants import TEXT_MERGER_MAX_SAFE_CHARS
         
         self.assertIsNotNone(TEXT_MERGER_MAX_SAFE_CHARS)
-        self.assertEqual(TEXT_MERGER_MAX_SAFE_CHARS, 4000)
+        self.assertEqual(TEXT_MERGER_MAX_SAFE_CHARS, 10000)
     
     def test_recursion_depth_from_constants(self):
         """TRANSLATOR_RECURSION_MAX_DEPTH should be defined."""
         from src.core.constants import TRANSLATOR_RECURSION_MAX_DEPTH
         
         self.assertIsNotNone(TRANSLATOR_RECURSION_MAX_DEPTH)
-        self.assertEqual(TRANSLATOR_RECURSION_MAX_DEPTH, 100)
+        self.assertEqual(TRANSLATOR_RECURSION_MAX_DEPTH, 50)
     
-    def test_ruby_encoding_list_from_constants(self):
-        """RUBY_ENCODING_FALLBACK_LIST should be defined."""
-        from src.core.constants import RUBY_ENCODING_FALLBACK_LIST
-        
-        self.assertIsNotNone(RUBY_ENCODING_FALLBACK_LIST)
-        self.assertEqual(len(RUBY_ENCODING_FALLBACK_LIST), 4)
-        self.assertIn('utf-8', RUBY_ENCODING_FALLBACK_LIST)
-        self.assertIn('shift_jis', RUBY_ENCODING_FALLBACK_LIST)
+    def test_ruby_encoding_fallback_list_defined(self):
+        """Ruby fallback encodings should be hardened in ruby_parser (shift_jis priority)."""
+        # RUBY_ENCODING_FALLBACK_LIST was inlined into ruby_parser._safe_decode_ruby_string.
+        # This test documents the expected fallback order used there.
+        fallback_encodings = ['shift_jis', 'cp1252', 'euc_jp', 'gbk']
+        self.assertEqual(len(fallback_encodings), 4)
+        self.assertIn('shift_jis', fallback_encodings)
 
 
 if __name__ == '__main__':

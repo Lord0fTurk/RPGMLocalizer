@@ -3,6 +3,7 @@ Deterministic object-mapping extractor for safe RPG Maker JSON surfaces.
 """
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Callable, List, Sequence, Tuple
 
@@ -12,8 +13,10 @@ from .json_field_rules import (
     get_event_command_rule,
     get_field_rules_for_file,
     is_structured_json_file,
+    get_context_selector_for_file,
 )
 
+logger = logging.getLogger(__name__)
 
 ExtractionEntry = Tuple[str, str, str]
 LegacyEventExtractor = Callable[[dict[str, Any], str, List[ExtractionEntry]], None]
@@ -31,12 +34,14 @@ class StructuredJsonExtractor:
         legacy_event_extractor: LegacyEventExtractor | None = None,
         legacy_script_extractor: LegacyScriptExtractor | None = None,
         legacy_mz_plugin_extractor: LegacyMZPluginExtractor | None = None,
+        is_known_asset_identifier: Callable[[str], bool] | None = None,
     ) -> None:
         self._escape_path_key = escape_path_key
         self._is_safe_to_translate = is_safe_to_translate
         self._legacy_event_extractor = legacy_event_extractor
         self._legacy_script_extractor = legacy_script_extractor
         self._legacy_mz_plugin_extractor = legacy_mz_plugin_extractor
+        self._is_known_asset_identifier = is_known_asset_identifier
 
     def supports_file(self, file_path: str) -> bool:
         """Return True when structured object mapping is supported."""
@@ -48,11 +53,25 @@ class StructuredJsonExtractor:
         data: Any,
         entries: List[ExtractionEntry] | None = None,
     ) -> List[ExtractionEntry]:
-        """Extract player-visible text from known safe JSON surfaces."""
+        """Extract player-visible text with enriched context aliases."""
         if not self.supports_file(file_path):
             return []
 
         target_entries = entries if entries is not None else []
+        self._current_context_map: dict[str, str] = {}
+        
+        # Pre-scan for identity fields if this is a top-level array file (e.g., Actors.json)
+        selector = get_context_selector_for_file(file_path)
+        if selector and isinstance(data, list):
+            for i, item in enumerate(data):
+                if isinstance(item, dict):
+                    name = item.get(selector)
+                    if isinstance(name, str) and name.strip():
+                        self._current_context_map[str(i)] = name
+
+        # Map display name pre-scan
+        if isinstance(data, dict) and "displayName" in data:
+            self._current_context_map["ROOT"] = str(data["displayName"])
 
         for rule in get_field_rules_for_file(file_path):
             self._extract_rule_matches(data, (), rule, target_entries)
@@ -69,6 +88,16 @@ class StructuredJsonExtractor:
                 self._extract_map_events(data, target_entries)
 
         return target_entries
+
+    def _get_context_for_path(self, path_parts: tuple[str, ...]) -> str:
+        """Derive a human-readable context string from path parts and identity map."""
+        if not path_parts:
+            return self._current_context_map.get("ROOT", "")
+            
+        root_key = path_parts[0]
+        if root_key in self._current_context_map:
+            return self._current_context_map[root_key]
+        return ""
 
     def _extract_rule_matches(
         self,
@@ -90,7 +119,15 @@ class StructuredJsonExtractor:
     ) -> None:
         if not selector:
             if isinstance(node, str) and node.strip() and self._is_safe_to_translate(node, is_dialogue):
-                entries.append((".".join(path_parts), node, tag))
+                if self._is_known_asset_identifier and self._is_known_asset_identifier(node):
+                    logger.debug(
+                        "Structured extractor skipped asset-matching value %r at %s",
+                        node, ".".join(path_parts),
+                    )
+                    return
+                context = self._get_context_for_path(path_parts)
+                final_tag = f"{tag} | {context}" if context else tag
+                entries.append((".".join(path_parts), node, final_tag))
             return
 
         token = selector[0]
@@ -126,6 +163,12 @@ class StructuredJsonExtractor:
         for event_index, event in enumerate(events):
             if not isinstance(event, dict):
                 continue
+            
+            # Context: Event Name
+            event_name = event.get("name")
+            if event_name:
+                self._current_context_map[f"events.{event_index}"] = str(event_name)
+
             pages = event.get("pages")
             if not isinstance(pages, list):
                 continue
@@ -145,6 +188,12 @@ class StructuredJsonExtractor:
         for event_index, event in enumerate(data):
             if not isinstance(event, dict):
                 continue
+            
+            # Context: Common Event Name
+            ce_name = event.get("name")
+            if ce_name:
+                self._current_context_map[str(event_index)] = str(ce_name)
+
             commands = event.get("list")
             if not isinstance(commands, list):
                 continue
@@ -236,7 +285,27 @@ class StructuredJsonExtractor:
                 continue
             if not self._is_safe_to_translate(value, rule.is_dialogue):
                 continue
-            entries.append((f"{command_path}.{'.'.join(target_path)}", value, rule.tag))
+            if self._is_known_asset_identifier and self._is_known_asset_identifier(value):
+                logger.debug(
+                    "Structured extractor skipped asset-matching event command value %r at %s",
+                    value, command_path,
+                )
+                continue
+            
+            # Derive context from parent path segments (e.g., events.1)
+            path_parts = command_path.split('.')
+            context = ""
+            if len(path_parts) >= 2:
+                # Try events.1 style
+                context = self._current_context_map.get(f"{path_parts[0]}.{path_parts[1]}", "")
+            if not context and path_parts:
+                # Fallback to root index (CommonEvents style)
+                context = self._current_context_map.get(path_parts[0], "")
+            if not context:
+                 context = self._current_context_map.get("ROOT", "")
+
+            final_tag = f"{rule.tag} | {context}" if context else rule.tag
+            entries.append((f"{command_path}.{'.'.join(target_path)}", value, final_tag))
 
     def _resolve_parameter_targets(
         self,

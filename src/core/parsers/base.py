@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod, ABCMeta
 from typing import List, Any, Dict, Tuple
 from PyQt6.QtCore import QObject, pyqtSignal as Signal
+import re
 
 
 class ParserMeta(type(QObject), ABCMeta):
@@ -14,7 +15,6 @@ class BaseParser(QObject, metaclass=ParserMeta):
 
     def __init__(self, regex_blacklist: List[str] = None):
         super().__init__()
-        import re
         self.blacklist_patterns = []
         if regex_blacklist:
             for pattern in regex_blacklist:
@@ -53,8 +53,6 @@ class BaseParser(QObject, metaclass=ParserMeta):
         if not stripped:
             return False
 
-        import re
-
         pattern = (
             r"(?:\s*"
             r"(?:\\[A-Za-z]+(?:\[[^\]\r\n]*\])?"
@@ -72,8 +70,6 @@ class BaseParser(QObject, metaclass=ParserMeta):
         stripped = text.strip()
         if not stripped or self.contains_only_control_codes(stripped):
             return False
-
-        import re
 
         if stripped.startswith(("<", "::", "//", "/*", "*/", "@")):
             return False
@@ -151,16 +147,13 @@ class BaseParser(QObject, metaclass=ParserMeta):
             return False
 
         # 3. Ignore paths (contain slashes and no spaces)
-        # BUT: Allow backslashes if the string contains non-ASCII characters (likely Japanese with control codes like \C[0])
-        has_non_ascii = any(ord(c) > 127 for c in trimmed)
-        # Forward slashes: always indicate paths
-        if '/' in trimmed and ' ' not in trimmed:
-            return False
-        # Backslashes in non-dialogue mode: likely Windows paths
-        # In dialogue mode: RPG Maker escape codes (\^, \C[N], \V[N]) use backslashes,
-        # so we must not reject dialogue just because it contains backslashes.
-        if '\\' in trimmed and not has_non_ascii and ' ' not in trimmed and not is_dialogue:
-            return False
+        if ('/' in trimmed or '\\' in trimmed) and ' ' not in trimmed:
+            # Special case for RPG Maker escape codes (\C[0], \V[n], \^) which are NOT paths.
+            # Dialogue text is never a file path, so bypass this check entirely for dialogue.
+            if '\\' in trimmed and ('[' in trimmed or len(trimmed) < 4 or is_dialogue):
+                pass
+            else:
+                return False
         
         # 4. Ignore Asset Names and Resource Keys
         if ' ' not in trimmed:
@@ -169,12 +162,21 @@ class BaseParser(QObject, metaclass=ParserMeta):
                 return False
                 
             # Allow if it contains non-ASCII characters (likely localized text even if single word/no spaces)
+            has_non_ascii = any(ord(c) > 127 for c in trimmed)
             if has_non_ascii:
                 return True
                 
-            # If it has underscores or Mixed_Case, likely a key/variable - SKIP
+            # If it has underscores, block code-like identifiers (UPPER_SNAKE or
+            # lower_snake) but allow mixed-case display labels (e.g. "Flame_Sword",
+            # "Max_HP") which are common in RPG Maker item/skill names.
             if '_' in trimmed:
-                return False
+                alpha_chars = [c for c in trimmed if c.isalpha()]
+                if not alpha_chars:
+                    return False
+                has_upper = any(c.isupper() for c in alpha_chars)
+                has_lower = any(c.islower() for c in alpha_chars)
+                if not (has_upper and has_lower):
+                    return False
             
             # Check for asset IDs (starts with text, ends with numbers e.g., pla1, actor1)
             # But allow if is_dialogue is true (e.g., "Attack1" might be a skill name)
@@ -187,7 +189,7 @@ class BaseParser(QObject, metaclass=ParserMeta):
                     return False
             
             # Short ASCII strings that look like IDs (e.g., 'v1', 'id')
-            if len(trimmed) < 2 and trimmed.isascii():
+            if len(trimmed) < 2 and not trimmed.isalpha() and trimmed.isascii():
                 return False
 
         # 5. Ignore pure numbers or special symbols

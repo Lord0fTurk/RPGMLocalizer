@@ -203,7 +203,13 @@ class TestSoundObjectInMZPluginArgs(unittest.TestCase):
         self.assertNotIn("Cursor1", self._get_values(entries))
 
     def test_357_text_arg_still_extracted(self):
-        """Real translatable text in 357 args must still be extracted."""
+        """Real translatable text in 357 args dict must still be extracted.
+
+        In RPG Maker MZ, plugin commands carry player-visible text in the args
+        dict (params[3]), not in params[2] (which is the editor's command-label).
+        The args dict key 'text' has TEXT_HINTS membership so it is classified as
+        a 'text' surface and extracted correctly.
+        """
         data = {
             "events": [
                 {
@@ -215,8 +221,8 @@ class TestSoundObjectInMZPluginArgs(unittest.TestCase):
                                     "parameters": [
                                         "TextPlugin",
                                         "ShowText",
-                                        "Welcome to the dungeon!",
-                                        {},
+                                        "Show Text",  # editor label — NOT extracted
+                                        {"text": "Welcome to the dungeon!"},
                                     ],
                                 },
                                 {"code": 0, "parameters": []},
@@ -228,6 +234,7 @@ class TestSoundObjectInMZPluginArgs(unittest.TestCase):
         }
         entries = _extract(data, "map001.json")
         self.assertIn("Welcome to the dungeon!", self._get_values(entries))
+        self.assertNotIn("Show Text", self._get_values(entries))
 
 
 class TestSoundObjectInPluginsJs(unittest.TestCase):

@@ -1,170 +1,128 @@
 """
-Unit tests for placeholder protection and restoration.
-Tests XRPYX system for preserving RPG Maker control codes.
+Unit tests for syntax_guard_rpgm — the motor-aware token shield system.
+Tests ⟦RPGM...⟧ token protection and 4-phase fuzzy restoration for RPG Maker codes.
 """
 import unittest
-from src.utils.placeholder import protect_rpgm_syntax, restore_rpgm_syntax
+from src.core.syntax_guard_rpgm import protect_for_translation, restore_from_translation
 
 
 class TestPlaceholderProtection(unittest.TestCase):
-    """Test RPG Maker syntax protection."""
-    
+    """Test RPG Maker syntax protection via syntax_guard_rpgm."""
+
     def test_variable_code_protection(self):
-        """Variable codes like \\V[1] should be protected."""
+        """Variable codes like \\V[1] should be protected (bracket portion tokenized)."""
         text = "You have \\V[1] gold"
-        protected, placeholders = protect_rpgm_syntax(text)
-        
-        # Should contain a placeholder instead of \\V[1]
+        protected, token_map = protect_for_translation(text)
+
+        # [1] bracket portion is tokenized — full \V[1] no longer present
         self.assertNotIn("\\V[1]", protected)
-        self.assertTrue(len(placeholders) > 0)
-    
+        self.assertTrue(len(token_map) > 0)
+
+        restored = restore_from_translation(protected, token_map)
+        self.assertEqual(restored, text)
+
     def test_name_code_protection(self):
-        """Name codes like \\N[1] should be protected."""
+        """Name codes like \\N[1] should be protected (bracket portion tokenized)."""
         text = "\\N[1] is the hero"
-        protected, placeholders = protect_rpgm_syntax(text)
-        
+        protected, token_map = protect_for_translation(text)
+
         self.assertNotIn("\\N[1]", protected)
-        self.assertTrue(len(placeholders) > 0)
-    
+        self.assertTrue(len(token_map) > 0)
+
+        restored = restore_from_translation(protected, token_map)
+        self.assertEqual(restored, text)
+
     def test_color_code_protection(self):
-        """Color codes like \\C[1] should be protected."""
+        """Color codes like \\C[1] should be protected (bracket portion tokenized)."""
         text = "\\C[1]Red text\\C[0]"
-        protected, placeholders = protect_rpgm_syntax(text)
-        
+        protected, token_map = protect_for_translation(text)
+
         self.assertNotIn("\\C[1]", protected)
-        self.assertTrue(len(placeholders) > 0)
+        self.assertTrue(len(token_map) > 0)
 
-    def test_brace_placeholder_protection(self) -> None:
-        """Simple brace placeholders like {name} should be protected."""
-        text = "\\i[4]{name}"
-        protected, placeholders = protect_rpgm_syntax(text)
+    def test_icon_code_protection(self) -> None:
+        """Icon codes like \\i[4] should be fully protected."""
+        text = "\\i[4] Sword of Destiny"
+        protected, token_map = protect_for_translation(text)
 
-        self.assertNotIn("{name}", protected)
-        self.assertTrue(len(placeholders) > 0)
+        self.assertNotIn("\\i[4]", protected)
+        self.assertIn("⟦", protected)
 
-    def test_percent_placeholder_protection(self) -> None:
-        """Numbered percent placeholders like %1 should be protected."""
-        text = "Loading %1"
-        protected, placeholders = protect_rpgm_syntax(text)
+        restored = restore_from_translation(protected, token_map)
+        self.assertEqual(restored, text)
 
-        self.assertNotIn("%1", protected)
-        self.assertTrue(len(placeholders) > 0)
+    def test_wait_code_protection(self) -> None:
+        """Wait code \\^ should be protected."""
+        text = "Hello!\\^"
+        protected, token_map = protect_for_translation(text)
 
-    def test_printf_style_placeholder_protection(self) -> None:
-        """Printf-style placeholders like %s and %0.2f should be protected."""
-        text = "HP: %d / %s, Rate: %0.2f"
-        protected, placeholders = protect_rpgm_syntax(text)
+        self.assertNotIn("\\^", protected)
+        self.assertTrue(len(token_map) > 0)
 
-        self.assertNotIn("%d", protected)
-        self.assertNotIn("%s", protected)
-        self.assertNotIn("%0.2f", protected)
-        self.assertTrue(len(placeholders) >= 3)
-    
+        restored = restore_from_translation(protected, token_map)
+        self.assertEqual(restored, text)
+
     def test_empty_string_returns_empty(self):
         """Empty string should return empty."""
         text = ""
-        protected, placeholders = protect_rpgm_syntax(text)
-        
+        protected, token_map = protect_for_translation(text)
+
         self.assertEqual(protected, "")
-        self.assertEqual(placeholders, {})
-    
-    def test_no_codes_no_placeholders(self):
-        """Plain text with no codes shouldn't create placeholders."""
+        self.assertEqual(token_map, {})
+
+    def test_no_codes_no_tokens(self):
+        """Plain text with no RPG Maker codes should not create tokens."""
         text = "Simple text without codes"
-        protected, placeholders = protect_rpgm_syntax(text)
-        
+        protected, token_map = protect_for_translation(text)
+
         self.assertEqual(protected, text)
-        self.assertEqual(placeholders, {})
+        self.assertEqual(token_map, {})
 
     def test_note_and_meta_text_are_not_protected(self) -> None:
-        """Plain note/meta prose should not be protected as technical code."""
+        """Plain note/meta prose should not be tokenized."""
         note_text = "note: This is a reminder"
         meta_text = "meta: Visible text"
 
-        protected_note, placeholders_note = protect_rpgm_syntax(note_text)
-        protected_meta, placeholders_meta = protect_rpgm_syntax(meta_text)
+        protected_note, map_note = protect_for_translation(note_text)
+        protected_meta, map_meta = protect_for_translation(meta_text)
 
         self.assertEqual(protected_note, note_text)
-        self.assertEqual(placeholders_note, {})
+        self.assertEqual(map_note, {})
         self.assertEqual(protected_meta, meta_text)
-        self.assertEqual(placeholders_meta, {})
+        self.assertEqual(map_meta, {})
 
 
 class TestPlaceholderRestoration(unittest.TestCase):
-    """Test placeholder restoration."""
-    
+    """Test token restoration via syntax_guard_rpgm."""
+
     def test_simple_code_restoration(self):
         """Protected codes should be restored."""
         original = "You have \\V[1] gold"
-        protected, placeholders = protect_rpgm_syntax(original)
-        
-        # Simulate translation (text doesn't change in this case)
-        translated = protected
-        
-        restored = restore_rpgm_syntax(translated, placeholders)
+        protected, token_map = protect_for_translation(original)
+
+        restored = restore_from_translation(protected, token_map)
         self.assertEqual(restored, original)
-    
+
     def test_multiple_codes_restoration(self):
         """Multiple codes should be restored correctly."""
-        original = "\\N[1] has \\V[5] items"
-        protected, placeholders = protect_rpgm_syntax(original)
-        translated = protected
-        restored = restore_rpgm_syntax(translated, placeholders)
-        
-        self.assertEqual(restored, original)
-
-    def test_brace_placeholder_restoration(self) -> None:
-        """Brace placeholders should survive translation and restore cleanly."""
-        original = "\\i[4]{name}"
-        protected, placeholders = protect_rpgm_syntax(original)
-        translated = protected
-        restored = restore_rpgm_syntax(translated, placeholders)
+        original = "\\N[1] has \\i[5] items and \\C[4]power\\C[0]"
+        protected, token_map = protect_for_translation(original)
+        restored = restore_from_translation(protected, token_map)
 
         self.assertEqual(restored, original)
 
-    def test_percent_placeholder_restoration(self) -> None:
-        """Percent placeholders should survive translation and restore cleanly."""
-        original = "Loading %1"
-        protected, placeholders = protect_rpgm_syntax(original)
-        translated = protected
-        restored = restore_rpgm_syntax(translated, placeholders)
+    def test_wait_code_restoration(self) -> None:
+        """Wait code \\^ should survive protection and restore cleanly."""
+        original = "Look out!\\^"
+        protected, token_map = protect_for_translation(original)
+        restored = restore_from_translation(protected, token_map)
 
         self.assertEqual(restored, original)
 
-    def test_printf_style_placeholder_restoration(self) -> None:
-        """Printf-style placeholders should survive translation and restore cleanly."""
-        original = "HP: %d / %s, Rate: %0.2f"
-        protected, placeholders = protect_rpgm_syntax(original)
-        translated = protected
-        restored = restore_rpgm_syntax(translated, placeholders)
-
-        self.assertEqual(restored, original)
-
-    def test_mixed_placeholder_stress_restoration(self) -> None:
-        """Mixed RPG Maker placeholders should survive together without collisions."""
-        original = "\\i[4]{name} - Loading %1 - HP: %d - Rate: %0.2f - \\C[4]Ready\\C[0]"
-        protected, placeholders = protect_rpgm_syntax(original)
-        translated = protected
-        restored = restore_rpgm_syntax(translated, placeholders)
-
-        self.assertEqual(restored, original)
-
-    def test_extreme_mixed_placeholder_stress_restoration(self) -> None:
-        """Multiple placeholder families should restore without interfering."""
-        original = (
-            "\\i[4]{name} - Loading %1 - HP: %d - Rate: %0.2f - "
-            "\\C[4]Ready\\C[0] - #{questId} - ${playerName}"
-        )
-        protected, placeholders = protect_rpgm_syntax(original)
-        translated = protected
-        restored = restore_rpgm_syntax(translated, placeholders)
-
-        self.assertEqual(restored, original)
-    
-    def test_no_placeholders_returns_text_unchanged(self):
-        """Text with no placeholders should be unchanged."""
+    def test_no_tokens_returns_text_unchanged(self):
+        """Text with no tokens should be unchanged after restore."""
         text = "Some translated text"
-        result = restore_rpgm_syntax(text, {})
+        result = restore_from_translation(text, {})
         self.assertEqual(result, text)
 
 

@@ -41,7 +41,9 @@ class ExtractionSurfaceRegistry:
         "option",
         "button",
         "choice",
-        "status",
+        # "status" intentionally excluded: VisuStella plugin args like "Status:str"
+        # hold technical enum values ("complete", "failed", "remove") that must not
+        # be translated. The actual Status Screen label lives in system.json terms.
         "hud",
         "title",
         "help",
@@ -61,9 +63,16 @@ class ExtractionSurfaceRegistry:
         "picture",
         "face",
         "character",
+        "battler",
+        "graphic",
+        "animation",
+        "animation1",
+        "animation2",
         "tileset",
         "parallax",
         "battleback",
+        "battleback1",
+        "battleback2",
         "sprite",
         "icon",
         "file",

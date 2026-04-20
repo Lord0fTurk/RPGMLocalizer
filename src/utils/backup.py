@@ -4,6 +4,7 @@ Creates backups before any write operation to prevent data loss.
 """
 import os
 import shutil
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
@@ -29,6 +30,7 @@ class BackupManager:
         """
         self.backup_dir = self._resolve_backup_dir(backup_dir)
         self.backup_log: List[tuple] = []  # (original, backup_path, timestamp)
+        self._lock = threading.Lock()  # Serializes concurrent create_backup calls
 
     def _resolve_backup_dir(self, backup_dir: Optional[str]) -> Optional[str]:
         """Resolve explicit backup directories in a cross-platform-safe way."""
@@ -53,48 +55,49 @@ class BackupManager:
             logger.error(f"Cannot backup non-existent file: {file_path}")
             return None
         
-        try:
-            # Determine backup directory
-            if self.backup_dir:
-                backup_base = self.backup_dir
-            else:
-                file_dir = os.path.dirname(file_path)
-                backup_base = os.path.join(file_dir, '.rpgm_backup')
-            
-            # Create backup directory if needed
-            os.makedirs(backup_base, exist_ok=True)
-            
-            # Generate backup filename
-            filename = os.path.basename(file_path)
-            if use_timestamp:
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                name, ext = os.path.splitext(filename)
-                backup_name = f"{name}_{timestamp}{ext}"
-            else:
-                backup_name = f"{filename}.bak"
-            
-            backup_path = os.path.join(backup_base, backup_name)
-            
-            # Don't overwrite existing backup with same name
-            if os.path.exists(backup_path):
-                counter = 1
-                while os.path.exists(backup_path):
-                    name, ext = os.path.splitext(backup_name)
-                    backup_path = os.path.join(backup_base, f"{name}_{counter}{ext}")
-                    counter += 1
-            
-            # Copy file
-            shutil.copy2(file_path, backup_path)
-            
-            # Log the backup
-            self.backup_log.append((file_path, backup_path, datetime.now()))
-            logger.info(f"Created backup: {backup_path}")
-            
-            return backup_path
-            
-        except Exception as e:
-            logger.error(f"Failed to create backup for {file_path}: {e}")
-            return None
+        with self._lock:
+            try:
+                # Determine backup directory
+                if self.backup_dir:
+                    backup_base = self.backup_dir
+                else:
+                    file_dir = os.path.dirname(file_path)
+                    backup_base = os.path.join(file_dir, '.rpgm_backup')
+                
+                # Create backup directory if needed
+                os.makedirs(backup_base, exist_ok=True)
+                
+                # Generate backup filename
+                filename = os.path.basename(file_path)
+                if use_timestamp:
+                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    name, ext = os.path.splitext(filename)
+                    backup_name = f"{name}_{timestamp}{ext}"
+                else:
+                    backup_name = f"{filename}.bak"
+                
+                backup_path = os.path.join(backup_base, backup_name)
+                
+                # Don't overwrite existing backup with same name
+                if os.path.exists(backup_path):
+                    counter = 1
+                    while os.path.exists(backup_path):
+                        name, ext = os.path.splitext(backup_name)
+                        backup_path = os.path.join(backup_base, f"{name}_{counter}{ext}")
+                        counter += 1
+                
+                # Copy file
+                shutil.copy2(file_path, backup_path)
+                
+                # Log the backup
+                self.backup_log.append((file_path, backup_path, datetime.now()))
+                logger.info(f"Created backup: {backup_path}")
+                
+                return backup_path
+                
+            except Exception as e:
+                logger.error(f"Failed to create backup for {file_path}: {e}")
+                return None
     
     def restore_backup(self, backup_path: str, original_path: Optional[str] = None) -> bool:
         """
@@ -158,21 +161,22 @@ class BackupManager:
         file_backups: dict = {}  # original_name -> list of (path, mtime)
         
         # Collect all backups
-        for entry in os.scandir(self.backup_dir):
-            if entry.is_file():
-                mtime = datetime.fromtimestamp(entry.stat().st_mtime)
-                # Extract original filename (remove timestamp suffix)
-                name = entry.name
-                # Pattern: name_YYYYMMDD_HHMMSS.ext
-                parts = name.rsplit('_', 2)
-                if len(parts) >= 2:
-                    base_name = parts[0]
-                else:
-                    base_name = name
-                
-                if base_name not in file_backups:
-                    file_backups[base_name] = []
-                file_backups[base_name].append((entry.path, mtime))
+        with os.scandir(self.backup_dir) as entries:
+            for entry in entries:
+                if entry.is_file():
+                    mtime = datetime.fromtimestamp(entry.stat().st_mtime)
+                    # Extract original filename (remove timestamp suffix)
+                    name = entry.name
+                    # Pattern: name_YYYYMMDD_HHMMSS.ext
+                    parts = name.rsplit('_', 2)
+                    if len(parts) >= 2:
+                        base_name = parts[0]
+                    else:
+                        base_name = name
+                    
+                    if base_name not in file_backups:
+                        file_backups[base_name] = []
+                    file_backups[base_name].append((entry.path, mtime))
         
         # Process each file's backups
         for base_name, backups in file_backups.items():

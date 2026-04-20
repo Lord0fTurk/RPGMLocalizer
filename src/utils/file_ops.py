@@ -22,14 +22,12 @@ def safe_write(filepath, mode='w', encoding='utf-8', **kwargs):
     dir_name = os.path.dirname(filepath)
     file_name = os.path.basename(filepath)
     
-    # Create temp file in the same directory to ensure atomic move works
-    # (os.replace across different filesystems might not be atomic)
-    temp_name = f".{file_name}.tmp"
+    # Avoid hidden files (leading dot) which can be problematic on some Mac/Network drives
+    temp_name = f"tmp_{file_name}_{os.urandom(4).hex()}.tmp"
     temp_path = os.path.join(dir_name, temp_name)
     
     f = None
     try:
-        # Open the temporary file
         if 'b' in mode:
             f = open(temp_path, mode, **kwargs)
         else:
@@ -37,13 +35,32 @@ def safe_write(filepath, mode='w', encoding='utf-8', **kwargs):
             
         yield f
         
-        # Close file before moving
         f.flush()
-        os.fsync(f.fileno())
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass # Some filesystems don't support fsync
         f.close()
-        f = None  # Prevent double closing in finally
+        f = None
         
-        # Atomic replace
+        # Safety check: Prevent replacing with an empty file if that wasn't intended
+        if os.path.getsize(temp_path) == 0 and os.path.exists(filepath) and os.path.getsize(filepath) > 0:
+            logger.error(f"Aborting safe_write to {filepath}: Temp file is empty but original is not.")
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise IOError(f"Aborting safe_write to {filepath}: temp file is empty but original is not.")
+
+        # Preserve original permissions if possible
+        if os.path.exists(filepath):
+            try:
+                shutil.copymode(filepath, temp_path)
+            except Exception:
+                pass
+
+        # Atomic replacement: os.replace uses MoveFileExW(MOVEFILE_REPLACE_EXISTING)
+        # on Windows, which is atomic even when the destination file already exists.
+        # shutil.move falls back to a non-atomic copy+delete on Windows when the
+        # destination exists, which can leave the file partially written on failure.
         os.replace(temp_path, filepath)
         
     except Exception as e:

@@ -4,11 +4,6 @@ import re
 import urllib.parse
 from typing import Set
 
-try:
-    from pathvalidate import is_valid_filepath
-except ImportError:  # pragma: no cover - optional dependency
-    is_valid_filepath = None
-
 
 def normalize_asset_text(text: str) -> str:
     """Normalize a candidate asset string for path checks."""
@@ -31,6 +26,11 @@ def normalize_asset_text(text: str) -> str:
     decoded = decoded.replace("\\", "/")
     decoded = re.sub(r"/{2,}", "/", decoded)
     return decoded
+
+
+def fuzzy_asset_normalize(text: str) -> str:
+    """Super-aggressive normalization for asset matching (strips spaces, underscores, dashes)."""
+    return text.replace(" ", "").replace("_", "").replace("-", "").lower()
 
 
 def contains_explicit_asset_reference(text: str, asset_file_extensions: tuple[str, ...]) -> bool:
@@ -86,13 +86,11 @@ def asset_identifier_candidates(text: str) -> Set[str]:
     def add_candidate(candidate: str) -> None:
         if not candidate:
             return
-        if is_valid_filepath is not None:
-            try:
-                if not is_valid_filepath(candidate):
-                    return
-            except Exception:
-                pass
         candidates.add(candidate)
+        # Add fuzzy variant
+        fuzzy = fuzzy_asset_normalize(candidate)
+        if fuzzy:
+            candidates.add(fuzzy)
 
     add_candidate(normalized)
     add_candidate(path.name)

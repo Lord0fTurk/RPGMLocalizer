@@ -56,22 +56,31 @@ class SettingsInterface(ScrollArea):
         
         self.chk_translate_comments = SwitchSettingCard(
             FIF.CHAT,
-            "Translate comments",
-            "Translate event comments (Code 108/408).",
+            "Translate Comments",
+            "Extract text from event comments (Code 108/408). Useful for story hints hidden in dev notes.",
             parent=self.parserGroup
         )
         self.chk_translate_comments.setChecked(False)
         
         self.chk_translate_notes = SwitchSettingCard(
             FIF.EDIT,
-            "Translate 'note' fields",
-            "Translate database note fields.",
+            "Translate 'Note' Fields",
+            "Translate database note fields. CAUTION: May break plugins that store logic here.",
             parent=self.parserGroup
         )
         self.chk_translate_notes.setChecked(False)
+
+        self.chk_plugin_js_ui_extraction = SwitchSettingCard(
+            FIF.CODE,
+            "Deep JS UI Extraction",
+            "Scan JS source files for UI text. Best for custom modern plugins.",
+            parent=self.parserGroup
+        )
+        self.chk_plugin_js_ui_extraction.setChecked(False)
         
         self.parserGroup.addSettingCard(self.chk_translate_comments)
         self.parserGroup.addSettingCard(self.chk_translate_notes)
+        self.parserGroup.addSettingCard(self.chk_plugin_js_ui_extraction)
         
         # Pipeline Settings Group
         self.pipelineGroup = SettingCardGroup("Pipeline", self.scrollWidget)
@@ -79,15 +88,15 @@ class SettingsInterface(ScrollArea):
         self.chk_backup = SwitchSettingCard(
             FIF.SAVE,
             "Create Backups",
-            "Create backups before saving.",
+            "Create a .bak copy before modification. Essential for safety and original file recovery.",
             parent=self.pipelineGroup
         )
         self.chk_backup.setChecked(True)
         
         self.chk_cache = SwitchSettingCard(
             FIF.SPEED_HIGH,
-            "Use Cache",
-            "Reuse previous translations.",
+            "Global Translation Cache",
+            "Reuse previous translations to save time and API quota.",
             parent=self.pipelineGroup
         )
         self.chk_cache.setChecked(True)
@@ -110,53 +119,83 @@ class SettingsInterface(ScrollArea):
         self.slider_batch_size = SliderSettingCard(
             icon=FIF.SPEED_HIGH,
             title="Batch Processing Size",
-            content="Entries merged per request.",
+            content="Entries merged per request. Higher is faster, but large batches may cause timeouts.",
             parent=self.performanceGroup
         )
-        self.slider_batch_size.setRange(1, 200)
-        self.slider_batch_size.setValue(50)
+        self.slider_batch_size.setRange(1, 500)
+        self.slider_batch_size.setValue(100)
         
         self.slider_concurrent = SliderSettingCard(
             icon=FIF.PEOPLE,
-            title="Concurrent Requests",
-            content="Parallel requests.",
+            title="Parallel Requests",
+            content="Simultaneous API calls. Increase for speed, decrease if blocked by rate limits.",
             parent=self.performanceGroup
         )
         self.slider_concurrent.setRange(5, 50)
         self.slider_concurrent.setValue(20)
+
+        self.slider_throttle = SliderSettingCard(
+            icon=FIF.TAG,
+            title="Progress Throttle (ms)",
+            content="UI update frequency.",
+            parent=self.performanceGroup
+        )
+        self.slider_throttle.setRange(0, 1000)
+        self.slider_throttle.setValue(100)
         
         self.performanceGroup.addSettingCard(self.slider_batch_size)
         self.performanceGroup.addSettingCard(self.slider_concurrent)
+        self.performanceGroup.addSettingCard(self.slider_throttle)
 
         # Formatting Group
         self.formattingGroup = SettingCardGroup("Text Flow", self.scrollWidget)
         
         self.chk_visustella_wordwrap = SwitchSettingCard(
             FIF.ALIGNMENT,
-            "Inject VisuStella <WordWrap>",
-            "Append <WordWrap> to translated dialogue.",
+            "VisuStella <WordWrap> Mode",
+            "Uses engine tags. Best for modern games with message plugins. Safest method.",
             parent=self.formattingGroup
         )
         self.chk_visustella_wordwrap.setChecked(False)
         
         self.chk_auto_wordwrap = SwitchSettingCard(
             FIF.ALIGNMENT,
-            "Vanilla Auto Word-Wrap",
-            "Insert line breaks for long text.",
+            "Physical Auto Word-Wrap",
+            "Hard-codes line breaks with \\n. Use ONLY for legacy engines (XP/VX Ace) without plugins.",
             parent=self.formattingGroup
         )
         self.chk_auto_wordwrap.setChecked(False)
+        
+        self.slider_wrap_standard = SliderSettingCard(
+            icon=FIF.ALIGNMENT,
+            title="Standard Wrap Limit",
+            content="Max characters allowed per line for standard message boxes.",
+            parent=self.formattingGroup
+        )
+        self.slider_wrap_standard.setRange(10, 100)
+        self.slider_wrap_standard.setValue(54)
+        
+        self.slider_wrap_portrait = SliderSettingCard(
+            icon=FIF.PEOPLE,
+            title="Portrait Wrap Limit",
+            content="Character limit for line-wrapping when a character picture is detected.",
+            parent=self.formattingGroup
+        )
+        self.slider_wrap_portrait.setRange(10, 100)
+        self.slider_wrap_portrait.setValue(44)
 
         self.formattingGroup.addSettingCard(self.chk_visustella_wordwrap)
         self.formattingGroup.addSettingCard(self.chk_auto_wordwrap)
+        self.formattingGroup.addSettingCard(self.slider_wrap_standard)
+        self.formattingGroup.addSettingCard(self.slider_wrap_portrait)
 
         # Network Group
         self.networkGroup = SettingCardGroup("Network", self.scrollWidget)
 
         self.chk_multi_endpoint = SwitchSettingCard(
             FIF.SPEED_HIGH,
-            "Use Multiple Google Mirrors",
-            "Rotate between Google endpoints.",
+            "Multi-Endpoint Bridge",
+            "Rotate between multiple Google mirrors to maximize stability and bypass rate limits.",
             parent=self.networkGroup
         )
         self.chk_multi_endpoint.setChecked(True)
@@ -207,8 +246,8 @@ class SettingsInterface(ScrollArea):
         
         self.chk_glossary = SwitchSettingCard(
             FIF.BOOK_SHELF,
-            "Use Glossary",
-            "Use term replacements.",
+            "Enable Project Glossary",
+            "Apply mandatory term replacements (e.g., Potion -> İksir) after translation.",
             parent=self.glossaryGroup
         )
         self.chk_glossary.setChecked(False)
@@ -228,7 +267,7 @@ class SettingsInterface(ScrollArea):
             "Create a sample glossary.",
             self.glossaryGroup
         )
-
+ 
         self.glossaryGroup.addSettingCard(self.chk_glossary)
         self.glossaryGroup.addSettingCard(self.card_glossary_path)
         self.glossaryGroup.addSettingCard(self.btn_create_sample)
@@ -240,8 +279,8 @@ class SettingsInterface(ScrollArea):
         self.card_regex = CardWidget(self.filterGroup)
         self.card_regex.setFixedHeight(200)  # Explicit height to ensure visibility
         self.v_regex = QVBoxLayout(self.card_regex)
-        self.lbl_regex_title = StrongBodyLabel("Regex Blacklist", self.card_regex)
-        self.lbl_regex_desc = CaptionLabel("Ignore patterns, one per line. Example: ^System_.*", self.card_regex)
+        self.lbl_regex_title = StrongBodyLabel("Global Extraction Blacklist", self.card_regex)
+        self.lbl_regex_desc = CaptionLabel("Skip matching strings (one per line). Use regular expressions (e.g. ^System_.*)", self.card_regex)
         self.txt_regex = TextEdit(self.card_regex)
         self.txt_regex.setPlaceholderText("^Skip_This_.*\n^<Internal_Code>.*\nActor\\d+")
         
@@ -324,15 +363,20 @@ class SettingsInterface(ScrollArea):
 
         self.chk_translate_comments.setChecked(settings.get("translate_comments", False))
         self.chk_translate_notes.setChecked(settings.get("translate_notes", False))
+        self.chk_plugin_js_ui_extraction.setChecked(settings.get("plugin_js_ui_extraction", False))
 
         self.chk_visustella_wordwrap.setChecked(settings.get("visustella_wordwrap", False))
         self.chk_auto_wordwrap.setChecked(settings.get("auto_wordwrap", False))
+        
+        self.slider_wrap_standard.setValue(settings.get("wordwrap_limit_standard", 54))
+        self.slider_wrap_portrait.setValue(settings.get("wordwrap_limit_portrait", 44))
 
         self.chk_backup.setChecked(settings.get("backup_enabled", True))
         self.chk_cache.setChecked(settings.get("use_cache", True))
 
         self.slider_batch_size.setValue(settings.get("batch_size", self.slider_batch_size.value()))
         self.slider_concurrent.setValue(settings.get("concurrent_requests", self.slider_concurrent.value()))
+        self.slider_throttle.setValue(settings.get("progress_throttle_ms", 100))
 
         self.chk_multi_endpoint.setChecked(settings.get("use_multi_endpoint", True))
         self.chk_lingva_fallback.setChecked(settings.get("enable_lingva_fallback", True))

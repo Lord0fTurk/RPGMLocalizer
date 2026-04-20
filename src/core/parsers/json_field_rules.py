@@ -54,13 +54,28 @@ STRUCTURED_DATABASE_FILENAMES = frozenset(
 PROTECTED_STRUCTURED_NOOP_FILENAMES = frozenset(
     {
         "animations.json",
-        "mapinfos.json",
+        # mapinfos.json intentionally removed: map display names are player-visible.
         "qsprite.json",
         "tilesets.json",
     }
 )
 
 STRUCTURED_MAP_PATTERN = re.compile(r"^map\d+\.json$", re.IGNORECASE)
+STRUCTURED_COMMON_EVENTS_PATTERN = re.compile(r"^commonevents\.json$", re.IGNORECASE)
+
+# Identity fields that provide context for entries in an array of objects
+# Map of filename -> field name that acts as the object's identity/name
+CONTEXT_FIELD_SELECTORS: dict[str, str] = {
+    "actors.json": "name",
+    "classes.json": "name",
+    "skills.json": "name",
+    "items.json": "name",
+    "weapons.json": "name",
+    "armors.json": "name",
+    "enemies.json": "name",
+    "states.json": "name",
+    "commonevents.json": "name",
+}
 
 
 DATABASE_FIELD_RULES: dict[str, tuple[FieldRule, ...]] = {
@@ -71,6 +86,7 @@ DATABASE_FIELD_RULES: dict[str, tuple[FieldRule, ...]] = {
     ),
     "classes.json": (
         FieldRule(("*", "name"), "name"),
+        FieldRule(("*", "description"), "dialogue_block", is_dialogue=True),
     ),
     "skills.json": (
         FieldRule(("*", "name"), "name"),
@@ -93,6 +109,11 @@ DATABASE_FIELD_RULES: dict[str, tuple[FieldRule, ...]] = {
         FieldRule(("*", "description"), "dialogue_block", is_dialogue=True),
     ),
     "enemies.json": (
+        FieldRule(("*", "name"), "name"),
+        FieldRule(("*", "description"), "dialogue_block", is_dialogue=True),
+    ),
+    "mapinfos.json": (
+        # Map display names shown in menus, save screens, etc.
         FieldRule(("*", "name"), "name"),
     ),
     "states.json": (
@@ -129,6 +150,8 @@ MAP_FIELD_RULES: tuple[FieldRule, ...] = (
 EVENT_COMMAND_RULES: dict[int, EventCommandRule] = {
     101: EventCommandRule(101, (4,), "name"),
     102: EventCommandRule(102, (0, "*"), "choice"),
+    # 103: Input Number - params[0] is variable ID (int), not translatable text
+    # 104: Select Item - params[0] is item type ID (int), not translatable text
     105: EventCommandRule(105, (2,), "system"),
     320: EventCommandRule(320, (1,), "name"),
     324: EventCommandRule(324, (1,), "name"),
@@ -161,3 +184,9 @@ def get_event_command_rule(code: int) -> EventCommandRule | None:
 def is_protected_structured_noop_file(file_path: str) -> bool:
     """Return True when the structured surface is intentionally extraction-free."""
     return os.path.basename(file_path).lower() in PROTECTED_STRUCTURED_NOOP_FILENAMES
+
+
+def get_context_selector_for_file(file_path: str) -> str | None:
+    """Return the field name that provides context for objects in this file."""
+    basename = os.path.basename(file_path).lower()
+    return CONTEXT_FIELD_SELECTORS.get(basename)

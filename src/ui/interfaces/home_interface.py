@@ -57,7 +57,10 @@ class HomeInterface(QWidget):
         
         self.h_project_input = QHBoxLayout()
         self.txt_path = LineEdit(self.card_project)
-        self.txt_path.setPlaceholderText("C:/Games/MyGame")
+        import sys as _sys
+        self.txt_path.setPlaceholderText(
+            "C:/Games/MyGame" if _sys.platform == "win32" else "~/Games/MyGame"
+        )
         self.btn_browse = PushButton("Browse", self.card_project, FIF.FOLDER)
         self.btn_browse.clicked.connect(self._browse_folder)
         
@@ -201,17 +204,17 @@ class HomeInterface(QWidget):
         self.card_scope = CardWidget(self)
         self.l_scope = QVBoxLayout(self.card_scope)
 
-        self.lbl_scope_title = StrongBodyLabel("Localization Scope", self.card_scope)
+        self.lbl_scope_title = StrongBodyLabel("Localization Scope & Safety", self.card_scope)
         self.lbl_scope_line1 = CaptionLabel(
-            "Best results come from standard RPG Maker project structures.",
+            "Standard MV and MZ structures typically yield near-perfect results.",
             self.card_scope,
         )
         self.lbl_scope_line2 = CaptionLabel(
-            "Custom plugin-driven structures may need manual review.",
+            "Legacy engines (XP, VX, Ace) with heavy custom plugins may require safety-first extraction heuristics to protect hidden asset paths.",
             self.card_scope,
         )
         self.lbl_scope_line3 = CaptionLabel(
-            "Use the coverage audit when you want to check for missed text surfaces.",
+            "Always ensure your project is fully decrypted and the 'Data' folder contains readable .json or .rvdata2 files before starting.",
             self.card_scope,
         )
 
@@ -335,9 +338,9 @@ class HomeInterface(QWidget):
             
             if encrypted and not has_data:
                 InfoBar.warning(
-                    title="Åifreli Oyun Tespit Edildi",
-                    content=f"Bu oyun ÅŸifreli dosyalara ({enc_files[0]} vb.) sahip ve aÃ§Ä±k 'Data' klasÃ¶rÃ¼ bulunamadÄ±.\n"
-                            "LÃ¼tfen Ã¶nce bir 'RPG Maker Decrypter' aracÄ± ile oyun dosyalarÄ±nÄ± aÃ§Ä±nÄ±z, aksi halde Ã§eviri yapÄ±lamaz.",
+                    title="Encrypted Game Detected",
+                    content=f"This game appears to contain encrypted files ({enc_files[0]} etc.) and no open 'Data' folder was found.\n"
+                            "Please decrypt the game files first with an 'RPG Maker Decrypter' tool, otherwise translation cannot continue.",
                     orient=Qt.Orientation.Horizontal,
                     isClosable=True,
                     position=InfoBarPosition.TOP_RIGHT,

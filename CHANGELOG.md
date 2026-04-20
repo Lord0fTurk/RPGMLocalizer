@@ -2,6 +2,142 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.5] - 2026-04-18
+
+### Fixed: Critical Pipeline & Save Bugs
+
+- **Save phase permanent hang** (`translation_pipeline.py`): `executor.map()` + context-manager exit called `shutdown(wait=True)`, blocking forever if any `save_file` worker stalled (cyclic Marshal object, antivirus lock, corrupt Ruby stream). Replaced with `executor.submit()` + `concurrent.futures.wait(timeout=60×N)` + `shutdown(wait=False, cancel_futures=True)` in `finally`. Timed-out files are reported as warnings; pipeline continues to summary.
+- **Save timeout formula unbounded** (`translation_pipeline.py`): `60s × N` formula produced ~4.1 hours for a 246-file project, indistinguishable from an infinite hang. Capped at `min(30s × N, 300s)` (5-minute hard ceiling).
+- **Extraction phase hang** (`translation_pipeline.py`): Parallel extraction used the same dangerous `executor.map()` + context-manager pattern as the old save phase. Replaced with `submit()` + `_cf_wait(timeout=min(30s×N, 300s))` + `shutdown(wait=False, cancel_futures=True)`; timed-out files are skipped with a warning log and the pipeline continues.
+- **Per-file timing diagnostics** (`translation_pipeline.py`): `[extract] start/done/failed` and `[save] start/done/skipped/failed` debug-level log lines with elapsed seconds now emitted for every file, making it trivial to identify the specific file causing a slow or stuck run from the log.
+- **Translator batch separator underestimation** (`translator.py`): `_prepare_slices` used 1-char `TOKEN_BATCH_SEPARATOR` for overhead but actual API join uses 9-char `SAFE_BATCH_SEPARATOR`, causing ~9x underestimation and HTTP 414 risk. Fixed.
+- **Endpoint racing race condition** (`translator.py`): Two coroutines completing in the same event-loop tick could both pass the `is_set()` check; second overwrote first result. Now `set()` is called first to atomically block others.
+- **Shield state bleed** (`syntax_guard_rpgm.py`): Shared mutable token map across batch items caused merge blocks to restore as single lines. Added per-text `shield_with_map()` / `unshield_with_map()`.
+- **Progress counter overflow**: Retry logic incremented `processed_count` once per attempt, not once per item, so the UI progress bar could display impossible values like `%646` on batches with frequent retries. Clamped with `min(processed_count, total_reqs)` before emitting the signal.
+- **Erase Picture code mismatch**: Code 232 was mis-labeled "Erase Picture" (actual: Move Picture); real Erase Picture is 235. Because the bust-tracking flag was set on Show Picture (code 231) and cleared on "235", but the wrong code was being checked, the flag never reset — meaning every dialogue line after the first bust image was treated as a portrait dialogue for the rest of the map, silently applying the narrow portrait wrap limit to all subsequent full-width text.
+- **Phase 0/0.1 fuzzy suffix collision** (`syntax_guard_rpgm.py`): Suffix matching now uses `TYPE_ID` (e.g., `_COLOR_0`) instead of bare `_ID`, preventing cross-type token collisions.
+- **Structured extractor translates asset-matching system terms** (`structured_json_extractor.py`, `json_parser.py`): `StructuredJsonExtractor` had no asset-registry awareness — `System.json` `terms.commands` values like `"Item"` were extracted and translated even when the project contained a matching asset file (`img/menus/main/commands/Item.png`). Custom menu plugins that use command names as image filenames then crash with "Failed to load: img/menus/main/commands/Öge.png". Added `is_known_asset_identifier` callback to the structured extractor; both `_walk_selector` (database fields) and `_extract_event_command_fields` (Code 401 etc.) now check the asset registry before extracting. Apply-phase `_should_block_asset_like_translation_update` also strengthened: any short, space-free original value matching a known project asset is now blocked regardless of path context.
+- **Event command dialogue blocked by plugin parameter check** (`json_parser.py`): `_is_plugin_parameter_path()` returned `True` for all paths containing `.parameters.`, including event command paths like `events.N.pages.N.list.N.parameters.0`. This caused `_is_technical_string` to run on dialogue text, blocking 1,244 entries (97.3% false positive rate) because common English words like "let", "new", "return" matched JS keyword substrings. Fixed by excluding `.list.N.parameters` event command paths from plugin parameter detection.
+- **JS keyword false positives on dialogue text** (`json_parser.py`, `specialized_plugins.py`): `_is_technical_string()` and `_is_technical()` used simple substring matching for ambiguous JS keywords (`'let '`, `'new '`, `'this.'`, `'return '`) that appear in everyday English dialogue ("let me help", "new clothes", "return his feelings", "organize this."). Replaced with syntax-aware regex patterns that require JS context: `let x =`, `new ClassName(`, `this.property`, `return <identifier>`.
+- **YEP_QuestJournal quest data not extracted** (`specialized_plugins.py`): `YEP_QuestJournalParser` treated `"Quest N"` parameter values as flat strings, but they contain triple-nested JSON (object → array → quoted string). Rewritten to recursively parse all 3 layers via `@JSON` path nesting. Now extracts quest titles, descriptions, objectives, rewards, subtext, type labels, and top-level UI text (Available/Completed/Failed/No Data Text, Quest Data Format).
+
+### Fixed: Application Lifecycle
+
+- **Process hangs after window close** (`main_window.py`, `main.py`): Closing the application window left the Python process running indefinitely in the terminal. Root cause: `closeEvent` only saved settings without stopping the pipeline `QThread` or its `ThreadPoolExecutor` workers (non-daemon threads block `sys.exit`). Fixed with a 3-layer shutdown: (1) `closeEvent` now stops the pipeline, halts the `ConsoleLog` flush timer, calls `QThread.quit()` with a 3-second grace period followed by `terminate()` if unresponsive; (2) `QApplication.aboutToQuit` safety net detects surviving non-daemon threads and calls `os._exit(0)` to guarantee process termination; (3) thread/pipeline references are nulled to prevent `RuntimeError` on C++ destructor order.
+
+### Fixed: Linux & macOS Compatibility
+
+- **Window centering crash on headless Linux** (`main_window.py`): `QApplication.screens()[0]` raised `IndexError` on headless Linux sessions (CI, SSH without `$DISPLAY`, Wayland with no output) where the screen list is empty. Now guarded with an empty-list check; window centering is skipped gracefully when no screen is available.
+- **Windows-only font fallback chains** (`styles.py`, `console_log.py`): `Segoe UI` and `Consolas` are Windows-bundled fonts with no equivalent on Linux/macOS, causing Qt to fall back to a poor generic default. Added platform-native fallback chains: `Segoe UI → -apple-system → Noto Sans → Liberation Sans → sans-serif` for body text; `Consolas → SF Mono → Liberation Mono → DejaVu Sans Mono → monospace` for monospace text.
+- **Windows-only placeholder path** (`home_interface.py`): Project path placeholder showed `C:/Games/MyGame` on all platforms. Now platform-aware: `~/Games/MyGame` on Linux/macOS.
+
+### Fixed: False Positive Extraction (215+ entries eliminated)
+
+- **CSS named colors / font names** (`json_parser.py`): `_CSS_NAMED_COLORS` (80+ names) and `_KNOWN_GAME_FONTS` frozensets added to `_is_technical_string()`. Color and font plugin parameters blocked unconditionally.
+- **RPGM engine enum strings** (`json_parser.py`, `specialized_plugins.py`): `RPGM_ENUM_STRINGS` frozenset (30+ values: `"Normal"`, `"Physical"`, `"All Allies"`, …) guards both the generic plugin parameter extractor and the VisuMZ struct walker.
+- **Absolute technical keys expanded**: `'color'` and `'mode'` moved from `NON_TRANSLATABLE_KEY_HINTS` to `ABSOLUTE_TECHNICAL_KEY_HINTS` (no length bypass). Added `enable`, `disable`, `visible`, `show`, `hide`, `layer`, `condition`, `regex`, `pattern`.
+- **`:func` JS function body parameters**: Early guard `if key.endswith(':func'): return False` in `json_parser.py` and `specialized_plugins.py`. JS code strings >200 chars also detected by keyword heuristic. Eliminated 6 false-positive entries.
+- **Visual separator strings** (`json_parser.py`): `re.fullmatch(r'[-=~*_]{4,}', ...)` blocks all-dash/equals VisuStella separator plugin parameters. Eliminated 209 false-positive entries.
+- **Bare hex color codes** (`json_parser.py`): `re.fullmatch(r'[0-9a-fA-F]{6}', ...)` blocks unprefix'd 6-digit hex strings in Code 401 message text.
+- **Code 357 `params[2]` / Code 657 `params[0]`** (`json_parser.py`): MZ plugin command editor labels and auto-generated continuation summaries are no longer extracted — neither is player-visible at runtime.
+- **`"status"` removed from `MENU_HINTS`**: Prevented VisuStella quest status enum values (`"complete"`, `"completed"`) from being extracted and silently breaking quest progression if translated.
+- **Note tag `SKIP_VALUE_TAGS` expanded** (`note_tag_parser.py`): 20+ technical value-tag names added (`param`, `xparam`, `level`, `switch`, `variable`, `blend`, `opacity`, `x`, `y`, `z`, …). Config-block heuristic: if ≥60% of lines match `Key: simple_value`, block as technical plugin config.
+- **Single-word plugin command labels**: `_is_single_word_plugin_command()` helper blocks single-word `label`/`commandName` values matching RPGM enum strings or pure ASCII identifiers.
+
+### Fixed: Write-Back & File Safety
+
+- **`safe_write` atomic replacement** (`file_ops.py`): Replaced `shutil.move()` with `os.replace()` (maps to `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` on Windows — always atomic). Zero-byte guard now raises `IOError` instead of silently returning.
+- **JS source write-back drops quote characters** (`json_parser.py`): `_apply_to_js_source` now calls `replace_string_at()` (preserves original quote delimiters) instead of `_escape_for_js()` (inner content only), fixing JS syntax errors like `drawText(Merhaba)`.
+- **`plugins.js` declaration regex** (`json_parser.py`): Broadened from `var` only to `(?:var|let|const)` for modern MZ plugins. Some MZ project setups (notably tool-generated configs) ship with `const $plugins =` or `let $plugins =`; these fell through the parser silently — zero text was extracted and no error was raised.
+- **`plugins.js` write-back indent** (`translation_pipeline.py`): Removed `indent=2` to produce compact JSON matching the RPG Maker MZ expected format. Pretty-printing inflated a typical 1.9 MB `plugins.js` to ~5.5 MB; RPG Maker MZ loads this file synchronously on startup and the overhead was measurable on lower-end hardware.
+- **`js_tokenizer.py` escape sequences**: Added `\u2028`, `\u2029`, and `\0` escaping in `_escape_for_js()` to handle CJK translator output in JS string literals. U+2028 (Line Separator) and U+2029 (Paragraph Separator) are legal in JSON strings but illegal unescaped inside JS string literals per the ECMAScript spec; when a CJK translation engine emitted them literally, the resulting `plugins.js` or raw JS file was a syntax error that crashed the game on startup.
+- **Locale file double-apply** (`json_parser.py`): Removed the redundant re-application loop in the `is_locale_file` branch that silently failed on `@`-prefixed paths. On a second translation run the loop re-applied the translation dictionary to already-translated text, producing double-translated strings (e.g. "Saldır" → "Saldır" → "Atak et") that were written to disk without any error.
+- **Binary patcher duplicate range** (`marshal_binary_patcher.py`): Added deduplication for `TYPE_LINK` shared objects; overlapping ranges now skipped with `debug` log instead of cancelling the entire file. `TYPE_LINK` is Ruby Marshal's object-reference mechanism — the same `RubyString` instance can appear multiple times in the object graph (e.g. a shared actor name used in multiple events). Without deduplication, each reference generated an independent patch range pointing to the same byte offset, and applying multiple patches to the same region corrupted the binary output.
+
+### Fixed: Parser & Lexer Bugs
+
+- **Event codes 118/119 (Label / Jump to Label)** (`json_parser.py`): Removed active extraction block — translating labels breaks `Jump to Label` control flow.
+- **Lexer `⟦⟧` token pattern** (`lexer.py`): `⟦[0-9A-Z_]+⟧` → `⟦[0-9A-Za-z_]+⟧` to accept lowercase hex in real tokens (e.g., `⟦RPGM79eb1b_COLOR_0⟧`). Matched in `translator.py` bypass regex too.
+- **`[[` normalization scope** (`syntax_guard_rpgm.py`): Phase 3 `[[`→`⟦` normalization now only fires adjacent to existing tokens; `[[item]]` game syntax no longer corrupted.
+- **`PROTECT_RE` missing escape codes** (`syntax_guard_rpgm.py`): Added `\C[n]`, `\I[n]`, `\W[n]`/`\w[n]`, `\FB`/`\fb`, `\FI`/`\fi`, `\^`, `\!`, `\.` to the compiled pattern.
+- **`_RPGM_CODE_PATTERNS` typo** (`syntax_guard_rpgm.py`): `\\d`/`\\s` in raw strings were literal two-character sequences `\d` / `\s` instead of regex metacharacters, so patterns intended to match digit sequences (e.g. the numeric argument in `\C[4]`) silently matched nothing. Numeric-argument RPG Maker codes were therefore not shielded and were passed to the translator unprotected, where Google would often drop or translate the number.
+- **Ruby parser self-comparison** (`ruby_parser.py`): When `original_data=None`, data was assigned to both variables by reference — `original = data; modified = data` — making the asset-mutation guard compare an object to itself, which always reported "no change". As a result, asset filename mutations like `Wolf.png → Kurt.png` passed the guard unchecked and were written to the Ruby file. Now uses `_deep_copy_ruby_data()` to produce a true independent snapshot before modifications.
+- **`note_tag_parser.py` `rebuild_note` free-text corruption**: Replacement loop anchored to original `note_text` instead of already-modified `result` string, preventing double-replacement. The practical symptom was that any free-text block appearing after a protected note-tag section was inserted at a stale byte offset — once the string had already grown from earlier replacements, the insertion landed mid-token or was silently discarded, corrupting the reconstructed note field.
+- **`_CODE_TAG_SUBWORDS`** (`note_tag_parser.py`): Replaced space-padded `' js'`/`'js '` with bare `'js'` to catch compound names like `<battleJs>`, `<conditionJs>`. Removed `'pre-'`, `'post-'`, `'code'` (were blocking legitimate player tags like `<Pre-Battle Dialogue>`).
+- **RMXP Code 101**: Code 101 is RPG Maker XP/VX's "Show Message" header command — it carries the face graphic slot and speaker name config, not dialogue text; the actual player-visible lines live in Code 401 (message body). Extraction was previously targeting Code 101 parameters instead of Code 401, causing all XP/VX dialogue text to be silently missed. Corrected to Code 401, recovering significant text loss in XP projects.
+- **Underscore block narrowed** (`note_tag_parser.py`): Now only blocks strings with digits or pure `UPPER_SNAKE_CASE`; display names like `Flame_Sword` pass through.
+- **JS AST extractor logger import missing**: Added `import logging` + `logger = getLogger(__name__)`.
+- **JS AST extractor negative callee hints**: Added `console.log/warn/error`, `eval`, `json.parse/stringify`, `datamanager.loaddatafile`.
+
+### Added: Ruby Era Binary Patcher (`marshal_binary_patcher.py`)
+
+- New ~700-line module bypasses `rubymarshal.writer` (8 documented bugs including GC-unsafe `id()`-based link tracking and forced Shift-JIS→UTF-8 re-encoding).
+- **`OffsetTrackingReader`**: Subclass of `rubymarshal.reader.Reader` recording exact byte spans `(blob_start, blob_end)` and `(attrs_start, attrs_end)` for every `RubyString` during deserialization.
+- **Encoding-aware patching**: Fits replacement in same encoding (Shift-JIS) where possible; patches `E: true/false` attribute suffix when encoding changes.
+- **Reverse-offset-order application**: Patches applied end→start so earlier offsets remain valid.
+- **`Scripts.rvdata2` exempt**: Zlib-compressed containers fall through to legacy `rubymarshal.writer`.
+- **`ruby_parser.py` / `translation_pipeline.py` integration**: Binary patcher tried first when raw bytes are cached; `save_file` writes `bytes` output directly.
+- **40 new tests** in `test_marshal_binary_patcher.py` + **7 write-back integration tests** in `TestRubyMarshalWriteBackIntegration`.
+
+### Added: RenLocalizer-Grade Unicode Token Shield (`syntax_guard_rpgm`)
+
+- **`⟦RPGM{hash}_{type}_{id}⟧` token system**: Pure Musical Angle Bracket tokens survive Google text-mode translation without HTML overhead. 28x faster than HTMLShield (0.12 ms vs 3.36 ms per sample); no BeautifulSoup dependency.
+- **4-Phase Fuzzy Recovery**:
+  - Phase 0: Space-mangled token restoration with case-insensitive suffix matching.
+  - Phase 0.1: Bracket-substituted mutation recovery (`[RPGM...]`, `{RPGM...}`, `(RPGM...)`).
+  - Phase 1: Direct longest-first token → code mapping.
+  - Phase 2: Proportional injection fallback (±20 char word-boundary window) for completely lost tokens.
+- **Motor-aware branching**: Pure tokens for Google (text-mode); `<span translate="no">⟦token⟧</span>` wrapping for HTML-supporting engines (DeepL, LibreTranslate) via `use_html_protection=True`.
+- **Merge separator hardened**: Replaced legacy separators with `⟦_M_⟧` / `⟦_B_⟧` mapped in Lark Lexer grammar — natively immune to engine stripping.
+
+### Optimized: Translator Concurrency & Reliability
+
+- **Concurrency reduced**: `DEFAULT_CONCURRENCY` 20→12, `DEFAULT_RACING_ENDPOINTS` 3→2 to lower 429/identity-response rate on free Google mirrors.
+- **Structured timeout** (`aiohttp.ClientTimeout(total=45, sock_connect=5, sock_read=30)`).
+- **Per-endpoint semaphore**: `asyncio.Semaphore(2)` in `_endpoint_semaphores` prevents any single mirror from receiving >2 concurrent requests.
+- **Soft-429 / identity-response detection**: If translated result equals source text verbatim, endpoint is marked failed and next mirror tried.
+- **CJK-aware slicing**: `chars_limit × 0.25` (min 200) cap for CJK source languages to stay within URL-safe GET limits.
+- **Lingva mirror priority**: Hetzner-hosted instances listed first; Vercel-hosted as fallback.
+- **TextMerger separator overhead**: Fixed `TOKEN_MERGE_SEPARATOR` (1 char) → `SAFE_MERGE_SEPARATOR` (9 chars) for correct batch size prediction.
+- **User-Agent rotation** (`translator.py`): Session was created with the bare `aiohttp/x.y` UA, which is trivially fingerprinted by Google's bot-detection and triggers soft-429 (identity responses) almost immediately. Added `_USER_AGENTS` pool (Chrome/Win, Chrome/Mac, Chrome/Linux, Firefox/Win) rotated randomly at each session creation. Also adds `Connection: keep-alive` header.
+- **Racing endpoints 2 → 1** (`constants.py`): Simultaneously racing 2 mirrors doubled IP-load and caused cascade bans where all mirrors returned identity responses together. Scaled back to 1 (same approach used in RenLocalizer after the same issue). The per-endpoint semaphore still allows ≤2 concurrent requests per mirror from different batch slices.
+- **Mirror ban time 3600s → 120s** (`constants.py`): A 1-hour ban made temporarily rate-limited mirrors sit idle far longer than needed. 2-minute cooldown matches RenLocalizer's proven value and allows rapid recovery after a transient soft-429.
+- **Global IP cooldown** (`translator.py`): Added `_global_cooldown_until` shared timestamp. When any mirror returns an identity response (+10s) or a hard 429 (+20s), ALL mirrors pause for the remaining cooldown before the next request. Prevents the cascade pattern where mirrors pile up requests immediately after a rate-limit signal.
+- **Lingva empty-string filter**: Added `if p.strip()` filter consistent with Google path to prevent count mismatches on leading/trailing separators.
+
+### Improved: Plugin & Parser Coverage
+
+- **VisuMZ struct walker depth** (`specialized_plugins.py`): Hard `depth > 4` limit raised to `depth > 10`; VisuStella plugins commonly reach 5–7 nesting levels.
+- **`vocab_context` for single-word UI labels** (`specialized_plugins.py`): Auto-detected from extraction path; single capitalized words (`"Attack"`, `"Guard"`, `"Equip"`) and abbreviations (`"TP"`, `"M.Atk"`) now accepted.
+- **`Community_Permissive` plugin family profile**: Added to `plugin_family_registry.py` covering `Irina_*`, `Ramza_*`, `Hakuen_*`, `Eli_*`, `Aerosys_*`, `Ossra_*`, and 6 more families.
+- **Note tag `TEXT_VALUE_TAGS` expanded**: `biography`, `help`, `profile`, `actor description`, `flavor text`, `lore`, and more player-visible VisuStella/YEP tags added.
+- **`CODE_BLOCK_TAG_KEYWORDS`** (new frozenset): VisuStella/YEP tags whose block content is always JS/Ruby code (`custom apply effect`, `action sequence`, `pre-damage`, `post-apply`, …) — unconditionally skipped.
+- **Ruby allowlist**: `commonevents` and `troops` added to `RUBY_FILE_ATTR_ALLOWLIST`; Code 402 (choice branch label) now extracted; Code 105 scroll-text header is documented `pass`.
+- **Asset protection**: `RubyParser` asset scanner includes `Graphics/` and `Audio/` sub-directories with deep-path suffix generation to block nested asset path translation.
+- **Auto Word-Wrap code-aware**: `textwrap.wrap` replaced with a code-aware algorithm treating `\X[n]` sequences as zero-width atoms; no more mid-code line breaks.
+- **Portrait detection**: Multi-source face intelligence (engine built-ins, bust tracking via Show Picture codes, plugin face codes `\f[..]`, `\face[..]`, `<face:..>`); portrait-aware word-wrap switches character limit automatically.
+- **TextMerger**: `scroll_text` now merged alongside `dialogue_block` and `message_dialogue`. `name`/`description` DB fields travel as singletons.
+- **`NON_TRANSLATABLE_KEY_HINTS` / `EXACT_KEYS` / `TOKEN_HINTS`**: Extended with `formula`, `region`, `tag`, `flag`, `route`, `blend`, `angle`, `zoom`, `offset`, `anchor`, `repeat`, `loop`, `count`, `index`, `frame`, `wait`, `type`, `key`, `ext`, `vol`, `pos`, `dir`, `freq`.
+
+### Added: New Translation Surfaces
+
+- **Hendrix Localization CSV**: Full extraction and write-back for the `HendrixLocalization` plugin's `game_messages.csv` format. The file stores all game strings in a single CSV with one column per language; the pipeline reads the `Original` column, writes translations into the target-language column (creating it if absent), and patches `plugins.js` to register the new language code so it becomes selectable in-game without manual plugin configuration.
+- **`TS_ADVsystem` scenario files** (`.sl`): Full extraction and write-back for TS_ADVsystem screenplay-style scene files. These files are XOR-encoded with a project-specific key stored in `plugins.js`; the parser reads the key from the plugin config, decodes each `.sl` file, extracts dialogue and narration lines while leaving macro commands, labels, and comment blocks untouched, then re-encodes on write-back. Detection is automatic when the `TS_Decode` plugin is active.
+- **JS AST extractor positive callee hints**: Added `drawitemname`, `drawactorname`, `settext`; plugin JS UI extraction activates only when project has shop/quest/heavy UI signals (`plugin_js_ui_extraction` defaults OFF).
+
+### Added: Engine Detection, Structured JSON & Infrastructure
+
+- **Confidence-based engine profiling**: `package.json` + `rpg_*.js`/`rmmz_*.js` detection with weighted evidence scores; `visumz_heavy`, `plugin_overload`, `generic_mz_plugin_heavy` risk labels; pure Ruby projects profiled without requiring a `js/` directory.
+- **Structured JSON extractor** (`StructuredJsonExtractor`): Deterministic path-based extraction for core MV/MZ database files; heuristic recursive walker for plugin parameters. Prior to this, even `Actors.json`, `Skills.json`, and `System.json` went through the generic recursive walker which had no concept of which fields were player-visible — every string-typed value was a candidate. The new extractor uses explicit field→role mappings (e.g. `name`, `description`, `message1-4` for each file type) so extraction is predictable and safe without relying on heuristics for the core database surface.
+- **Asset safety registry**: Scans `audio/` and `img/` folders to build allowlist of filenames that must never be translated.
+- **Smart Export/Import**: Distinct-mode export (unique strings only), contextual metadata enrichment (Actor names, Map titles, Event identifiers), global translation mapping, robust field-name CSV engine.
+- **UI buffered console** (`MainWindow`): `QTimer` 150 ms flush batches log signals; 600-line document cap; `debug`-level signals filtered from UI; HTML-escaped log content.
+- **ValidationResult dataclass** (`validation.py`): Success/failure/warning factory methods, `add_error()`/`add_warning()` fluent API.
+- **BackupManager**: Backup deferred to after successful parse; `_parsed_data_cache` avoids double-loading Ruby files during apply.
+- **`charset-normalizer`** replaces manual encoding fallback list for Ruby byte decoding (cp932, utf-8, euc-jp).
+- **Ruby structured safety**: File-based allowlist rules; `Animations.rvdata2`, `Tilesets.rvdata2`, `MapInfos.rvdata2` default to no-op extraction; memo-aware clone path prevents recursion crashes on cyclic Marshal structures.
+- **13 pre-existing test failures fixed** (AttributeError on `_last_face_name`, `TranslationImporter` init, `\^` tokenization, stale constant values, removed `RUBY_ENCODING_FALLBACK_LIST`, phantom placeholder API). Full suite: **402 passed, 0 failures**.
+
 ## [v0.6.4] - 2026-04-08
 
 ### Improved: RPG Maker Coverage and Ruby Marshal Safety
@@ -403,6 +539,53 @@ All notable changes to this project will be documented in this file.
 #### Fixed: Windows-Style ` - Copy` Data Duplicates No Longer Pollute Collection
 - Duplicate data files such as `CommonEvents - Copy.json` and `CommonEvents - Copy (2).json` are now skipped during normal file collection.
 - This prevents large standard projects with manual backup copies from doubling extracted text or reintroducing stale data into the translation run.
+
+### Fixed: Plugin Parameter Extraction Accuracy (Post-0.6.5 Hardening)
+
+#### Fixed: `NON_TRANSLATABLE_KEY_HINTS` Used Substring Matching Instead of Word-Boundary Tokenization
+- `_should_extract_generic_plugin_parameter` passed `key_lower` (lowercased key) to `_tokenize_key_hints`, destroying camelCase word boundaries (`enableLabel` → `{'enablelabel'}` instead of `{'enable', 'label'}`).
+- Fixed to pass the original-case key so camelCase tokens are preserved; a precomputed `_NON_TRANSLATABLE_KEY_HINTS_SET` frozenset was added for O(1) lookups.
+- Added a `TEXT_KEY_INDICATORS` override: compound keys whose camelCase tokens include a text indicator (e.g. `showText`, `enableLabel`, `hideMessage`, `countdownText`) are no longer blocked by a non-translatable hint on another token.
+- The same override was applied to `ABSOLUTE_TECHNICAL_KEY_HINTS` so `formulaDesc` is not permanently blocked by the `formula` hint when `desc` is a text indicator.
+
+#### Fixed: `_tokenize_key_hints` Called With Lowercased Key — camelCase Boundaries Lost
+- Both the `NON_TRANSLATABLE_KEY_HINTS` and `ABSOLUTE_TECHNICAL_KEY_HINTS` checks called `_tokenize_key_hints(key_lower)` instead of `_tokenize_key_hints(key)`, silently flattening all camelCase splits.
+
+#### Fixed: `CODE_KEY_SUFFIXES` Covered Only `:func` — Other Code Formats Slipped Through
+- Expanded from `(':func',)` to `(':func', ':eval', ':json', ':code', ':js')`.
+- `_should_extract_plugin_parameter_value`, `_should_extract_generic_plugin_parameter`, and `specialized_plugins._key_is_text` all now block the full suffix set.
+
+#### Fixed: `_should_extract_mz_plugin_arg` Had No CODE_KEY_SUFFIXES Guard
+- `MessageText:json`, `DamageFormula:eval`, `Script:js` etc. were classified by their prefix ("MessageText" → surface "text") and incorrectly extracted.
+- Added a `CODE_KEY_SUFFIXES` early-exit guard before surface classification in `_should_extract_mz_plugin_arg`.
+- Eliminates "Translation failed or empty" log spam for these structured-data keys.
+
+#### Fixed: `is_safe_to_translate` Blocked All Underscore-Containing Values
+- Blanket `if '_' in trimmed: return False` blocked display names like `Flame_Sword` and `Max_HP`.
+- Now only blocks pure `UPPER_SNAKE_CASE` (all letters uppercase) or `lower_snake_case` (all letters lowercase).
+- Mixed-case display labels with underscores (`is_dialogue=True`) pass through correctly.
+
+#### Fixed: `_is_technical_string` Math-Expression Heuristic Matched Display Text
+- Expressions like `"ON / OFF"` and `"Goodbye!"` were flagged as math expressions because the pattern did not require at least one digit.
+- Added digit presence as a requirement; pure-letter operator strings are no longer blocked.
+
+#### Improved: `TEXT_KEY_INDICATORS` Extended With Story/UI Vocabulary
+- Added 18 new indicators: `biography`, `backstory`, `summary`, `lore`, `flavor`, `prompt`, `greeting`, `farewell`, `announcement`, `instruction`, `warning`, `phrase`, `sentence`, `paragraph`, `intro`, `outro`, `vocab`, `term`.
+- Improves extraction coverage for VisuStella biography/lore fields and custom plugin UI parameter names.
+
+#### Improved: `vocab_context` Propagated in VisuMZ Struct Walkers
+- `VisuMZ_MessageCoreParser.extract_parameters` and `VisuMZ_ItemsEquipsCoreParser` now pass `vocab_context=True` to `_looks_translatable`, enabling single-word UI labels (`"Attack"`, `"TP"`, `"M.Atk"`) to be extracted from these vocabulary-heavy plugin families.
+
+### Fixed: Save Phase & Log Noise
+
+#### Fixed: `plugins.js` Starved at Save Timeout Tail
+- When many JSON files were queued in the thread pool, `plugins.js` (a `.js` file) could end up submitted last and hit the total timeout before being processed, especially under antivirus file-locking.
+- `.js` files are now sorted to the front of the submission queue via a `key=lambda` sort so they are always submitted first.
+- Hard ceiling raised from 300 s to 600 s to absorb transient OS-level scanning delays.
+
+#### Fixed: YEP_QuestJournal `Type` Field Produced Log Spam Without Effect
+- `YEP_QuestJournalParser` extracted `Quest N → Type` values (e.g. `"Side Quests"`) but `NON_TRANSLATABLE_EXACT_KEYS` contains `"type"`, so the write was silently discarded every run, producing a `"Skipping risky asset-like translation update"` warning for every quest.
+- Removed `'Type'` from `_QUEST_LABEL_FIELDS`. `'From'` and `'Location'` remain extractable.
 
 ## [v0.6.3] - 2026-03-19
 
@@ -1144,4 +1327,3 @@ Test files added:
 - Fixed issues with `Show Text` commands where speaker names were not being detected.
 - Fixed crashes caused by network timeouts or invalid JSON responses from translation services.
 - Resolved UI freezing issues by moving heavy processing to background threads.
-

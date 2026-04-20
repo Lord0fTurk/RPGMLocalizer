@@ -8,6 +8,7 @@ identifies string tokens with their positions for safe extraction and replacemen
 Used by json_parser.py to find translatable text inside script calls.
 """
 import logging
+import re
 from typing import List, Tuple, Optional
 
 try:
@@ -166,6 +167,17 @@ class JSStringTokenizer:
         tree = getattr(parser, "parse")(source_bytes)
         tokens: List[Tuple[int, int, str, str]] = []
 
+        # Build a byte-offset → char-offset mapping to handle multi-byte UTF-8
+        # characters. tree-sitter returns byte offsets; Python str indexing uses
+        # char offsets. Without this conversion, _is_in_comparison (and similar
+        # helpers) can raise IndexError on strings with non-ASCII characters.
+        byte_to_char: list[int] = []
+        for char_idx, ch in enumerate(js_code):
+            byte_len = len(ch.encode("utf-8"))
+            byte_to_char.extend([char_idx] * byte_len)
+        # Sentinel: one past the last char maps to len(js_code)
+        byte_to_char.append(len(js_code))
+
         for node in self._iter_string_nodes(tree.root_node):
             raw_text = source_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="ignore")
             if not raw_text:
@@ -180,7 +192,11 @@ class JSStringTokenizer:
                 quote = raw_text[0] if raw_text and raw_text[0] in ('"', "'") else '"'
                 value = self._decode_literal_value(raw_text, quote)
 
-            tokens.append((node.start_byte, node.end_byte, value, quote))
+            # Convert byte offsets → char offsets
+            char_start = byte_to_char[node.start_byte] if node.start_byte < len(byte_to_char) else len(js_code)
+            char_end = byte_to_char[node.end_byte] if node.end_byte < len(byte_to_char) else len(js_code)
+
+            tokens.append((char_start, char_end, value, quote))
 
         return tokens
 
@@ -316,6 +332,11 @@ class JSStringTokenizer:
         result = result.replace('\n', '\\n')
         result = result.replace('\r', '\\r')
         result = result.replace('\t', '\\t')
+        # JS line terminators that would break string literals
+        result = result.replace('\u2028', '\\u2028')
+        result = result.replace('\u2029', '\\u2029')
+        # Rare control characters
+        result = result.replace('\0', '\\0')
         return result
     
     def _is_technical_string(self, value: str) -> bool:
@@ -362,8 +383,13 @@ class JSStringTokenizer:
         if v_lower.startswith(('rgb(', 'rgba(')):
             return True
         
-        # Variable/function names (camelCase, snake_case, PascalCase without spaces)
-        if '_' in v and ' ' not in v:
+        # Variable/function names: snake_case only when all chars are ASCII alnum + underscore
+        # (avoids blocking non-ASCII text like "köy_yolu_açıklaması")
+        if '_' in v and ' ' not in v and re.match(r'^[A-Za-z0-9_]+$', v):
+            return True
+        
+        # camelCase identifier (lowerCamelCase or UpperCamelCase, no spaces, no non-ASCII)
+        if re.match(r'^[A-Za-z][A-Za-z0-9]*(?:[A-Z][a-z0-9]+)+$', v):
             return True
         
         # RPG Maker asset names (starts with $ or !)
@@ -515,6 +541,7 @@ class JSStringTokenizer:
         """
         Check if a string literal appears to be in a comparison expression.
         Looks at the characters before the opening quote for ==, !=, ===, !==
+        and also detects switch-case labels (case "value":).
         """
         # Look backwards from string_start, skipping whitespace
         i = string_start - 1
@@ -531,5 +558,10 @@ class JSStringTokenizer:
         # ==, !=  (2 chars)
         if i >= 1 and js_code[i-1:i+1] in ('==', '!='):
             return True
-        
+
+        # Switch-case label: case "value": — the keyword before the string
+        prefix = js_code[max(0, string_start - 16):string_start].lower().strip()
+        if prefix.endswith('case'):
+            return True
+
         return False

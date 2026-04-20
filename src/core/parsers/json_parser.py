@@ -24,6 +24,163 @@ from .technical_invariants import JsonAssetInvariantVerifier, JsonTechnicalInvar
 
 logger = logging.getLogger(__name__)
 
+# =============================================================================
+# JSON Serialization Settings
+# =============================================================================
+
+JSON_WRITE_COMPACT: Dict[str, Any] = {
+    'ensure_ascii': False,
+    'indent': None,
+    'separators': (',', ':'),
+    'sort_keys': False,
+}
+
+JSON_WRITE_PRETTY: Dict[str, Any] = {
+    'ensure_ascii': False,
+    'indent': 2,
+    'separators': (',', ': '),
+    'sort_keys': False,
+}
+
+JSON_WRITE_PLUGINS: Dict[str, Any] = {
+    'ensure_ascii': False,
+    'indent': None,
+    'separators': (',', ':'),
+    'sort_keys': False,
+}
+
+
+def json_write(data: Any, compact: bool = True) -> str:
+    """Serialize data to JSON with consistent settings."""
+    settings = JSON_WRITE_COMPACT if compact else JSON_WRITE_PRETTY
+    return json.dumps(data, **settings)
+
+
+def json_write_plugins(data: Any) -> str:
+    """Serialize plugins.js data with settings suitable for JS files."""
+    return json.dumps(data, **JSON_WRITE_PLUGINS)
+
+
+# =============================================================================
+# RPG Maker Code Protection for JSON Storage
+# =============================================================================
+
+_RPGM_SPACE_FIX_RE = re.compile(r'(\\+)\s+([a-zA-Z{}])')
+_RPGM_CODE_PLACEHOLDER_RE = re.compile(r'\x00RPGM(\d+)\x00')
+
+_RPGM_CODE_PATTERNS = [
+    r'\\+[VvCcNnPpGgIiSs]\[[\d\s,]*\]',        # Standard RM codes (\C[0], \\C[0])
+    r'\\+[Ff][SsBbIi](?:\[[\d\s,\-]*\])?',      # Font settings (\FS[n], \FB, etc.)
+    r'\\+[Pp][XxYy]\[[\d\s,.\-]*\]',            # Position codes (\PX[n], \PY[n])
+    r'\\+(?:MSGCore|pop|WordWrap)\[[^\]]*\]',    # Common plugin codes
+    r'\\+[.!|^${}><]',                          # Control characters (\., \!, etc.)
+    r'\\+[{}]',                                 # Ruby script escaped braces (\\{, \\})
+    r'%(?:[\d.\-+]*[sdifS])',                   # Ruby/C-style printf formatters (%s, %d, %04d)
+    r'\\\^',                                    # Wait for input (\\^)
+    r'\\{[A-Za-z_][A-Za-z0-9_]{0,40}\\}',      # Variable interpolation {name}
+    r'#\{[^}]+\}',                              # Ruby interpolation #{}
+    r'\$\{[^}]+\}',                             # Alternative interpolation ${}
+    r'<[^>]+>',                                 # HTML-like tags
+    r'\[\[[^\]]+\]\]',                          # Double bracket tags [[tag]]
+    r'\{\{[^}]+\}\}',                           # Double brace tags {{tag}}
+]
+
+
+def _protect_rpgm_codes(text: str) -> Tuple[str, List[str]]:
+    """
+    Protect RPG Maker escape codes before translation API processing.
+    
+    Replaces codes with null-byte delimited placeholders to prevent
+    corruption by translation APIs that insert spaces.
+    
+    Args:
+        text: Input text potentially containing RPG Maker codes
+        
+    Returns:
+        Tuple of (protected_text, code_list) where code_list contains
+        the extracted codes in order
+    """
+    if not text:
+        return text, []
+    
+    codes: List[str] = []
+    
+    def replacer(match):
+        codes.append(match.group(0))
+        return f'\x00RPGM{len(codes) - 1}\x00'
+    
+    pattern = '|'.join(_RPGM_CODE_PATTERNS)
+    protected = re.sub(pattern, replacer, text)
+    
+    return protected, codes
+
+
+def _restore_rpgm_codes(text: str, codes: List[str]) -> str:
+    """
+    Restore RPG Maker codes after translation processing.
+    
+    Replaces null-byte delimited placeholders with the original codes.
+    
+    Args:
+        text: Text with placeholder markers
+        codes: List of original RPG Maker codes
+        
+    Returns:
+        Text with codes restored
+    """
+    if not text or not codes:
+        return text
+    
+    def replacer(match):
+        idx = int(match.group(1))
+        if 0 <= idx < len(codes):
+            return codes[idx]
+        return match.group(0)
+    
+    return _RPGM_CODE_PLACEHOLDER_RE.sub(replacer, text)
+
+
+def sanitize_translation_for_json(text: str) -> str:
+    """
+    Sanitize translated text for safe JSON storage.
+    
+    Steps:
+    1. Fix common translation API space corruption
+    2. Validate no illegal JSON characters
+    3. Preserve structure
+    
+    Args:
+        text: Translated text to sanitize
+        
+    Returns:
+        Sanitized text safe for JSON storage
+    """
+    if not text:
+        return text
+    
+    result = text
+    
+    result = _RPGM_SPACE_FIX_RE.sub(lambda m: m.group(1) + m.group(2), result)
+    
+    if not _is_valid_json_string(result):
+        logger.warning(f"Potential JSON issue in sanitization: {result[:50]}...")
+    
+    return result
+
+
+def _is_valid_json_string(text: str) -> bool:
+    """Check if text is safe for JSON storage."""
+    try:
+        json.dumps(text)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+# =============================================================================
+# Asset Registry Cache
+# =============================================================================
+
 _ASSET_REGISTRY_CACHE: Dict[str, Set[str]] = {}
 _ASSET_REGISTRY_LOCK = threading.Lock()
 
@@ -53,6 +210,8 @@ class JsonParser(BaseParser):
         403: 'choice_cancel',       # When Cancel
         105: 'scroll_text_header',  # Scroll Text settings (MZ might have title)
         657: 'plugin_command_mz_cont',  # Plugin Command MZ continuation
+        231: 'show_picture',        # Show Picture (Portrait detection)
+        235: 'erase_picture',       # Erase Picture (Portrait detection) — code 232 is Move Picture
         # Commented out: Labels, Jump to Label, Control Variables can break branching logic when translated
         # 118: 'label',               
         # 119: 'jump_to_label',       
@@ -64,10 +223,10 @@ class JsonParser(BaseParser):
         'name', 'description', 'nickname', 'profile',
         'message1', 'message2', 'message3', 'message4',
         'gameTitle', 'title', 'message', 'help', 'text', 'msg', 'dialogue',
-        'label', 'format', 'string', 'prefix', 'suffix', 'commandName',
+        'label',       # UI button labels / option labels — commonly player-visible
+        'commandName', # Command/button display name in UI
         'displayName',  # Map display names
         'currencyUnit',  # Currency unit in System.json
-        'battleName',  # Battle background name (sometimes text)
     }
     
     # System terms and lists that should be translated
@@ -84,7 +243,8 @@ class JsonParser(BaseParser):
         'id', 'animationId', 'characterIndex', 'characterName',
         'faceName', 'faceIndex', 'tilesetId', 'battleback1Name',
         'battleback2Name', 'bgm', 'bgs', 'se', 'me', 'parallaxName',
-        'title1Name', 'title2Name',
+        'title1Name', 'title2Name', 'battleName',  # battleName = battle BG asset filename
+        'svBattlerName', 'walkingPicture',  # SV actor sprite / walking picture asset names
         'locale',  # Technical locale identifier such as en_US / tr_TR
         'note',  # Skip note by default (often contains plugin data)
     }
@@ -109,6 +269,10 @@ class JsonParser(BaseParser):
         'string', 'content', 'display', 'info',
         'quest', 'journal', 'log', 'story',
         'victory', 'defeat', 'battle', 'escape', 'objective', 'task',
+        'biography', 'backstory', 'summary', 'lore', 'flavor',
+        'prompt', 'greeting', 'farewell', 'announcement',
+        'instruction', 'warning', 'phrase', 'sentence', 'paragraph',
+        'intro', 'outro', 'vocab', 'term',
     ]
 
     # Asset-related key hints (likely file names / asset identifiers, not UI text)
@@ -151,20 +315,120 @@ class JsonParser(BaseParser):
         'icon', 'align', 'width', 'height',
         'orientation',
         'opacity', 'speed', 'interval', 'scale', 'rate',
-        'color', 'margin', 'padding', 'position', 'size',
-        'volume', 'pitch', 'pan', 'duration', 'row', 'column',
-        'precache', 'eval', 'script', 'code', 'regex',
+        'margin', 'padding', 'position', 'size',
+        'volume', 'pitch', 'duration', 'column',
+        'precache', 'regex',
+        # RPG Maker DB / event structural keys
+        'region', 'tag', 'flag',
+        'route', 'blend', 'angle', 'zoom',
+        'offset', 'anchor', 'repeat', 'loop', 'count',
+        'index', 'frame', 'wait',
+        # Boolean / visibility config keys (FP-8)
+        'enable', 'disable', 'visible', 'show', 'hide', 'layer',
     ]
+    # Precomputed set for fast token-based (word-boundary) matching.
+    _NON_TRANSLATABLE_KEY_HINTS_SET: frozenset[str] = frozenset(NON_TRANSLATABLE_KEY_HINTS)
+    # Keys that are ALWAYS technical regardless of value length — no 60-char bypass.
+    ABSOLUTE_TECHNICAL_KEY_HINTS = {
+        'eval', 'script', 'code', 'formula', 'js', 'func',
+        'condition', 'regex', 'pattern',
+        # Color/blend values are always technical (hex, rgb, named) — FP-7
+        'color', 'mode',
+    }
+    # Short technical tokens that must match as whole words/tokens to avoid
+    # false positives in compound keys (e.g. 'row' inside 'narrow', 'pan' in 'panel').
+    NON_TRANSLATABLE_KEY_TOKEN_HINTS = {
+        'row', 'pan',
+        # RPG Maker audio/motion short params
+        'vol', 'pos', 'dir', 'freq',
+    }
 
     # Exact matches for short technical keys to avoid false positives (like 'me' in 'menu')
     NON_TRANSLATABLE_EXACT_KEYS = {
-        'id', 'se', 'me', 'x', 'y', 'z'
+        'id', 'se', 'me', 'x', 'y', 'z',
+        # RPG Maker structural short keys
+        'type', 'key', 'ext',
     }
     INPUT_BINDING_TOKENS = {
         'ok', 'cancel', 'menu', 'shift', 'control', 'tab',
         'pageup', 'pagedown', 'up', 'down', 'left', 'right',
         'escape', 'none',
     }
+
+    # RPG Maker engine scope/trigger/blend enum strings (FP-6).
+    # These appear as plugin parameter values but are technical identifiers used
+    # by the engine for scope resolution, trigger conditions, and blend modes.
+    # They look like natural language (spaces present) but must NOT be translated.
+    RPGM_ENUM_STRINGS: frozenset[str] = frozenset({
+        # Skill/item scope identifiers
+        'none', 'one enemy', 'all enemies', 'one random enemy', 'two random enemies',
+        'three random enemies', 'four random enemies', 'one ally', 'all allies',
+        'one dead ally', 'all dead allies', 'the user', 'one ally (dead)',
+        'all allies (dead)', 'all party members', 'all battle members',
+        # Event trigger identifiers
+        'action button', 'player touch', 'event touch', 'autorun', 'parallel',
+        'map start', 'battle start', 'common event',
+        # Blend mode strings
+        'normal', 'additive', 'multiply', 'screen', 'overlay',
+        # Easing/motion strings
+        'linear', 'slow start', 'slow end', 'constant',
+        'instant', 'smooth', 'gradual',
+        # Alignment/position identifiers
+        'center', 'left', 'right', 'top', 'bottom', 'middle',
+        'horizontal', 'vertical',
+        # Difficulty / generic option identifiers
+        'hard', 'easy', 'normal mode', 'hard mode', 'easy mode',
+        # RPG Maker stat abbreviation strings (used as formula/scope identifiers)
+        'hp rate', 'mp rate', 'tp rate',
+        'gauge color 1', 'gauge color 2',
+        # Common plugin enum option strings
+        'dash speed', 'screen x', 'screen y',
+        'window skin', 'window color',
+    })
+
+    # Known RPG Maker / common game font names (FP-3).
+    # Single-word font name values in plugin parameters are NOT player-visible text.
+    _KNOWN_GAME_FONTS: frozenset[str] = frozenset({
+        'gamefont', 'meiryo', 'ms gothic', 'ms pgothic', 'ms mincho',
+        'msgothic', 'mspgothic', 'msmincho',
+        'gothic', 'mincho', 'noto sans', 'noto serif', 'noto sans cjk',
+        'arial', 'times new roman', 'calibri', 'verdana', 'tahoma',
+        'trebuchet ms', 'georgia', 'courier new', 'comic sans ms',
+        'impact', 'helvetica', 'palatino', 'garamond', 'bookman',
+    })
+
+    # CSS named colors (FP-4).
+    # Plugin parameters often store color values as named CSS colors.
+    # These must NOT be translated (they are color identifiers, not text).
+    _CSS_NAMED_COLORS: frozenset[str] = frozenset({
+        'red', 'blue', 'green', 'white', 'black', 'yellow', 'orange', 'purple',
+        'gray', 'grey', 'silver', 'gold', 'pink', 'brown', 'cyan', 'magenta',
+        'lime', 'maroon', 'navy', 'olive', 'teal', 'aqua', 'coral', 'salmon',
+        'turquoise', 'violet', 'indigo', 'crimson', 'fuchsia', 'ivory', 'khaki',
+        'lavender', 'beige', 'tan', 'chocolate', 'tomato', 'firebrick',
+        'transparent', 'inherit', 'initial', 'unset', 'currentcolor',
+        'aliceblue', 'antiquewhite', 'aquamarine', 'azure', 'bisque', 'blanchedalmond',
+        'blueviolet', 'burlywood', 'cadetblue', 'chartreuse', 'cornflowerblue',
+        'cornsilk', 'darkblue', 'darkcyan', 'darkgoldenrod', 'darkgray', 'darkgreen',
+        'darkkhaki', 'darkmagenta', 'darkolivegreen', 'darkorange', 'darkorchid',
+        'darkred', 'darksalmon', 'darkseagreen', 'darkslateblue', 'darkslategray',
+        'darkturquoise', 'darkviolet', 'deeppink', 'deepskyblue', 'dimgray',
+        'dodgerblue', 'floralwhite', 'forestgreen', 'gainsboro', 'ghostwhite',
+        'goldenrod', 'greenyellow', 'honeydew', 'hotpink', 'indianred',
+        'lawngreen', 'lemonchiffon', 'lightblue', 'lightcoral', 'lightcyan',
+        'lightgoldenrodyellow', 'lightgray', 'lightgreen', 'lightpink',
+        'lightsalmon', 'lightseagreen', 'lightskyblue', 'lightslategray',
+        'lightsteelblue', 'lightyellow', 'limegreen', 'linen', 'mediumaquamarine',
+        'mediumblue', 'mediumorchid', 'mediumpurple', 'mediumseagreen',
+        'mediumslateblue', 'mediumspringgreen', 'mediumturquoise', 'mediumvioletred',
+        'midnightblue', 'mintcream', 'mistyrose', 'moccasin', 'navajowhite',
+        'oldlace', 'olivedrab', 'orangered', 'orchid', 'palegoldenrod',
+        'palegreen', 'paleturquoise', 'palevioletred', 'papayawhip', 'peachpuff',
+        'peru', 'plum', 'powderblue', 'rosybrown', 'royalblue',
+        'saddlebrown', 'sandybrown', 'seagreen', 'seashell', 'sienna',
+        'skyblue', 'slateblue', 'slategray', 'snow', 'springgreen',
+        'steelblue', 'thistle', 'wheat', 'whitesmoke', 'yellowgreen',
+    })
 
     # Plugins whose parameters are entirely non-translatable (particle effects, etc.)
     # These plugins' args dicts are technical configuration, not player-visible text.
@@ -192,7 +456,7 @@ class JsonParser(BaseParser):
     LOCALE_LIKE_FILENAMES = {
         "translations.json",
     }
-    ASSET_SCAN_DIRS = ("audio", "img", "movies", "fonts")
+    ASSET_SCAN_DIRS = ("audio", "img", "movies", "fonts", "Graphics", "Audio")
     LEGACY_DATABASE_NAME_FILES = {
         "actors.json",
         "armors.json",
@@ -208,11 +472,22 @@ class JsonParser(BaseParser):
         """
         Args:
             translate_notes: If True, includes 'note' fields for translation.
+                Note fields often contain plugin directives (e.g. <notetag>) mixed
+                with player-visible text.  Enabling this increases coverage for games
+                that store quest/NPC descriptions in note tags, but also raises the
+                risk of corrupting plugin tags if syntax_guard patterns are incomplete.
+                Recommended: enable only when the game is known to use note fields
+                for player-visible content (e.g. CGMZ Extended Lore, YEP_QuestJournal).
             translate_comments: If True, includes comments (code 108/408).
         """
         super().__init__(**kwargs)
         self.translate_notes = translate_notes
         self.translate_comments = translate_comments
+        if translate_notes:
+            logger.info(
+                "translate_notes=True: note fields will be included. "
+                "Ensure syntax_guard patterns cover all plugin tags used by this game."
+            )
         self.extracted: List[Tuple[str, str, str]] = []
         self._js_tokenizer = JSStringTokenizer()
         self._js_safe_sink_extractor = JavaScriptAstAuditExtractor()
@@ -228,6 +503,7 @@ class JsonParser(BaseParser):
             legacy_event_extractor=self._extract_legacy_event_entries,
             legacy_script_extractor=self._extract_legacy_script_entries,
             legacy_mz_plugin_extractor=self._extract_legacy_mz_plugin_entries,
+            is_known_asset_identifier=self._matches_known_asset_identifier,
         )
         self._invariant_verifier = JsonTechnicalInvariantVerifier(self._escape_path_key)
         self._asset_invariant_verifier = JsonAssetInvariantVerifier(
@@ -236,6 +512,11 @@ class JsonParser(BaseParser):
         )
         if translate_notes:
             self._skip_fields.discard('note')
+        # Initialize face/speaker tracking so _process_list is safe to call directly
+        self._last_face_name: str = ""
+        self._last_speaker_name: str = ""
+        self._active_picture_bust: bool = False
+        self._current_file_basename: str = ""
 
     def _escape_path_key(self, key: str) -> str:
         """Escape dots in dict keys so path parsing is reversible."""
@@ -270,6 +551,8 @@ class JsonParser(BaseParser):
         
         self.extracted = []
         self._current_file_basename = os.path.basename(file_path).lower()
+        self._last_face_name = ""
+        self._last_speaker_name = ""
         
         if is_js:
             if is_main_plugins_js:
@@ -420,6 +703,9 @@ class JsonParser(BaseParser):
             safe_key = self._escape_path_key(key)
             param_path = f"{base_path}.{safe_key}"
             param_metadata = plugin_metadata.get_param(key)
+            # Skip pure group-header parameters — they carry no runtime text.
+            if param_metadata and param_metadata.is_group_header(plugin_metadata.params):
+                continue
             self._extract_plugin_parameter_value(value, param_path, key, param_metadata, plugin_metadata, family_profile)
 
     def _extract_plugin_parameter_value(
@@ -525,6 +811,11 @@ class JsonParser(BaseParser):
         if not isinstance(value, str) or not value.strip():
             return False
 
+        # VisuMZ/RPG Maker MZ code suffixes always contain JavaScript/formula bodies.
+        # Never translate them regardless of metadata classification.
+        if any(key.endswith(suffix) for suffix in self.CODE_KEY_SUFFIXES):
+            return False
+
         if self._matches_known_asset_identifier(value):
             return False
 
@@ -592,8 +883,24 @@ class JsonParser(BaseParser):
         if any(hint in key_lower for hint in self.ASSET_KEY_HINTS) and self._looks_like_asset_name(value):
             return False
 
-        if any(hint in key_lower for hint in self.NON_TRANSLATABLE_KEY_HINTS) or key_lower in self.NON_TRANSLATABLE_EXACT_KEYS:
-            if len(value) < 60 and '\n' not in value:
+        # Token-based key classification (word-boundary matching to avoid
+        # substring false positives like "show" blocking "showText").
+        # NOTE: Pass original-case key so camelCase boundaries are detected.
+        key_tokens = self._tokenize_key_hints(key)
+        # Text indicators override technical hints when both are present in the
+        # same compound key (e.g. "enableLabel" → "label" text wins over "enable").
+        has_text_hint = any(marker in key_lower for marker in self.TEXT_KEY_INDICATORS)
+
+        if (key_tokens & self._NON_TRANSLATABLE_KEY_HINTS_SET) or key_lower in self.NON_TRANSLATABLE_EXACT_KEYS:
+            if not has_text_hint and len(value) < 60 and '\n' not in value:
+                return False
+
+        # Absolute technical keys: never translatable regardless of value length
+        if (key_tokens & self.ABSOLUTE_TECHNICAL_KEY_HINTS) and not has_text_hint:
+            return False
+
+        if key_tokens & self.NON_TRANSLATABLE_KEY_TOKEN_HINTS:
+            if not has_text_hint and len(value) < 60 and '\n' not in value:
                 return False
 
         audio_key_patterns = [
@@ -607,9 +914,16 @@ class JsonParser(BaseParser):
                 return False
 
 
+        if self._is_js_expression_value(value):
+            return False
         if not self.is_safe_to_translate(value, is_dialogue=(key != 'note')):
             return False
         if self._is_technical_string(value):
+            return False
+        # RPG Maker engine enum strings (FP-6): scope/trigger/blend values that look like
+        # natural language (spaces present) but are technical identifiers used by the engine.
+        # Check BEFORE the generic '  ' in value → True fallback.
+        if value.lower() in self.RPGM_ENUM_STRINGS:
             return False
         if ' ' in value or any(ord(c) > 127 for c in value):
             return True
@@ -653,6 +967,25 @@ class JsonParser(BaseParser):
         if re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,30}\d{1,3}", stripped):
             return True
 
+        return False
+
+    def _is_single_word_plugin_command(self, value: str) -> bool:
+        """Return True when a string value looks like a single-word plugin command/identifier.
+
+        Used to guard DATABASE_FIELDS keys like 'label' and 'commandName' against
+        false-positives where the value is a dispatch identifier (e.g. "shop", "equip")
+        rather than a player-visible UI label (e.g. "Go to Shop").
+        """
+        stripped = value.strip()
+        # If it has spaces or non-ASCII, it's almost certainly player-visible text
+        if ' ' in stripped or any(ord(c) > 127 for c in stripped):
+            return False
+        # Single lowercase word (e.g. "shop", "fight", "equip")
+        if stripped.islower() and len(stripped) <= 24 and stripped.isalpha():
+            return True
+        # lowerCamelCase identifier (e.g. "defaultEquip", "commonEvent")
+        if re.fullmatch(r'[a-z][A-Za-z0-9]{1,30}', stripped):
+            return True
         return False
 
     def _should_extract_plugin_list_string(self, current_path: str, value: str) -> bool:
@@ -716,6 +1049,10 @@ class JsonParser(BaseParser):
 
         base_type = param_metadata.base_type()
         if base_type == "note":
+            return not self._has_metadata_defined_text_intent(param_metadata)
+        # For select/combo, only block when there is no strong text-intent signal in
+        # the metadata hints; some plugins use select for labelled UI text options.
+        if base_type in ("select", "combo"):
             return not self._has_metadata_defined_text_intent(param_metadata)
         if base_type in self.PLUGIN_METADATA_TECHNICAL_TYPES:
             return True
@@ -898,6 +1235,9 @@ class JsonParser(BaseParser):
         if tokens & exact_hints:
             return True
         if tokens & tech_hints:
+            return True
+        # Short token hints that must match as whole tokens to avoid substring FPs.
+        if tokens & self.NON_TRANSLATABLE_KEY_TOKEN_HINTS:
             return True
         return False
 
@@ -1199,6 +1539,12 @@ class JsonParser(BaseParser):
                             self._walk(value, new_path)
                         continue
                 elif isinstance(value, str):
+                    # FP-13: 'label' and 'commandName' can be plugin dispatch identifiers
+                    # (e.g. {"label": "shop"}).  Guard: skip single-word lowercase values
+                    # that look like command/identifier tokens, not player-visible text.
+                    if key in ('label', 'commandName') and self._is_single_word_plugin_command(value):
+                        self._walk(value, new_path)
+                        continue
                     should_extract = True
                 else:
                     self._walk(value, new_path)
@@ -1355,13 +1701,28 @@ class JsonParser(BaseParser):
         # Show Text (401) / Scroll Text (405) / Show Text Header (101 - MZ Speaker Name)
         if code in [401, 405]:
             if len(params) > 0 and self._is_extractable_runtime_text(params[0], is_dialogue=True):
-                target.append((f"{path}.parameters.0", params[0], "message_dialogue"))
+                tag = "message_dialogue"
+                # Autonomous Detection: Engine face OR active picture bust
+                has_face = self._last_face_name or getattr(self, '_active_picture_bust', False)
+                
+                # Plugin-aware detection: Search for common face tags in the text itself
+                # Yanfly, Galv, message codes: \f[n], \face[n], <face: n>, \n<
+                text_content = str(params[0])
+                has_tag = any(x in text_content for x in ["\\f[", "\\face[", "<face:", "\\msghnd", "\\n<"])
+                
+                if has_face or has_tag:
+                    tag += "/hasPicture"
+                target.append((f"{path}.parameters.0", params[0], tag))
 
         elif code == 101:
             # Code 101: Show Text Header.
             # in MZ: [faceName, faceIndex, background, positionType, speakerName]
+            if len(params) >= 1:
+                self._last_face_name = str(params[0]) if params[0] else ""
+            
             if len(params) >= 5:
                 speaker_name = params[4]
+                self._last_speaker_name = str(speaker_name) if speaker_name else ""
                 if self._is_extractable_runtime_text(speaker_name, is_dialogue=True):
                     target.append((f"{path}.parameters.4", speaker_name, "name"))
         
@@ -1387,11 +1748,11 @@ class JsonParser(BaseParser):
                 if self._is_extractable_runtime_text(params[1], is_dialogue=True):
                     target.append((f"{path}.parameters.1", params[1], "choice"))
 
-        # Label (118) / Jump to Label (119)
-        elif code in [118, 119]:
-            if len(params) > 0 and isinstance(params[0], str):
-                if self._is_extractable_runtime_text(params[0], is_dialogue=True):
-                    target.append((f"{path}.parameters.0", params[0], "system"))
+        # Label (118) / Jump to Label (119) — INTENTIONALLY SKIPPED.
+        # These are internal branch targets; translating them breaks Jump to Label matching.
+        # Kept as a commented-out reference only (see TEXT_EVENT_CODES comment).
+        # elif code in [118, 119]:
+        #     pass
                     
         # Control Variables (122) - Operand Script
         elif code == 122:
@@ -1416,6 +1777,12 @@ class JsonParser(BaseParser):
             if len(params) > 1 and self._is_extractable_runtime_text(params[1], is_dialogue=True):
                 target.append((f"{path}.parameters.1", params[1], "name"))
         
+        elif code == 231: # Show Picture (Bust detection)
+            self._active_picture_bust = True
+            
+        elif code == 235: # Erase Picture (code 232 is Move Picture)
+            self._active_picture_bust = False
+        
         # Plugin Command MV (356) - params[0] is command string
         elif code == 356:
             if len(params) > 0 and isinstance(params[0], str):
@@ -1423,20 +1790,20 @@ class JsonParser(BaseParser):
         
         # Plugin Command MZ (357) - structured differently
         elif code == 357:
-            # MZ plugin commands have structured params, look for 'text' fields
-            if len(params) >= 4:
-                # params format: [pluginName, commandName, commandText, {args}]
+            # MZ plugin commands have structured params, look for text fields in args only.
+            # params format: [pluginName, commandGroup, commandText, {args}]
+            # params[0]: plugin name (technical identifier)
+            # params[1]: command group/id (technical identifier, used for dispatch)
+            # params[2]: commandText — editor-only human-readable label, NEVER player-visible at runtime
+            # params[3]: args dict — may contain player-visible text values (e.g. Text:str)
+            if len(params) >= 1:
                 plugin_name = params[0] if isinstance(params[0], str) else ""
 
                 # Skip known non-translatable plugins (particle effects, etc.)
                 if self._is_non_translatable_plugin(plugin_name):
                     return
 
-                # Check commandText
-                if isinstance(params[2], str) and self._is_extractable_runtime_text(params[2], is_dialogue=True):
-                    target.append((f"{path}.parameters.2", params[2], "dialogue_block"))
-                    
-                # Also check args dict for common text fields
+                # Only check args dict for player-visible text fields; skip params[2] (editor label)
                 if len(params) > 3 and isinstance(params[3], dict):
                     args = params[3]
                     self._extract_mz_plugin_args(args, f"{path}.parameters.3", target)
@@ -1534,20 +1901,20 @@ class JsonParser(BaseParser):
         self._process_event_command_into(first, base_path, target)
         
         # Process 657 continuation lines
+        # Code 657 lines are auto-generated by the RPG Maker MZ editor as human-readable
+        # summaries of the plugin command's arguments (e.g. "Quest Keys = [\"Escape\"]",
+        # "Status = complete"). These are editor-only display labels and are NEVER
+        # executed or player-visible at runtime. Only dict args (structured data) may
+        # contain player-visible text and are worth inspecting.
         for j, cmd in enumerate(commands[1:], 1):
             cmd_path = f"{list_path}.{start_index + j}" if list_path else str(start_index + j)
             params = cmd.get("parameters", [])
             
-            # 657 can carry additional text args or structured data
             if not params:
                 continue
             
-            # If first param is a string, check if translatable
-            if isinstance(params[0], str):
-                if self._is_extractable_runtime_text(params[0], is_dialogue=True):
-                    target.append((f"{cmd_path}.parameters.0", params[0], "dialogue_block"))
-            
-            # If there's a dict arg (like 357's structured params), walk it
+            # Do NOT extract params[0] strings — they are always editor display labels.
+            # Only walk dict args for structured player-visible text.
             for p_idx, param in enumerate(params):
                 if isinstance(param, dict):
                     self._extract_mz_plugin_args(param, f"{cmd_path}.parameters.{p_idx}", target)
@@ -1585,6 +1952,10 @@ class JsonParser(BaseParser):
         tokenizer_strings = self._js_tokenizer.extract_translatable_strings(js_code)
         safe_entries, _engine = self._js_safe_sink_extractor.extract_safe_sink_entries_from_source(js_code)
         if not safe_entries:
+            logger.debug(
+                "No AST safe-sinks found in script block (%d chars); skipping string extraction.",
+                len(js_code),
+            )
             return []
 
         allowed = Counter(text for _path, text, _tag in safe_entries)
@@ -1646,6 +2017,13 @@ class JsonParser(BaseParser):
 
         cleaned = value.strip()
         if not cleaned:
+            return False
+
+        # Keys with code/data suffixes (e.g. "MessageText:json", "DamageFormula:eval",
+        # "Script:js") store structured data, not plain user-facing text.  The surface
+        # registry may still classify the prefix ("MessageText") as "text", so we must
+        # reject these *before* the surface check.
+        if any(key.endswith(suffix) for suffix in self.CODE_KEY_SUFFIXES):
             return False
 
         key_lower = key.lower()
@@ -1849,6 +2227,44 @@ class JsonParser(BaseParser):
         """Normalize strings for asset/path detection, including percent-decoded variants."""
         return normalize_asset_text(text)
 
+    def _is_js_expression_value(self, value: str) -> bool:
+        """Detect plugin parameter values that are JavaScript expressions, not translatable text.
+
+        Patterns like ``Input.isPressed('pagedown')`` or ``SceneManager.goto(Scene_Title)``
+        are JS code stored in plugin params and must never be translated — they are evaluated
+        at runtime by the engine.
+        """
+        if not isinstance(value, str):
+            return False
+        v = value.strip()
+
+        # JavaScript single-line or block comments indicate a JS function body.
+        # Translatable text never starts with '//' or '/*'.
+        if v.startswith('//') or v.startswith('/*'):
+            return True
+
+        # JS method call pattern: Identifier.method(...) or Identifier.method
+        # Covers: Input.isPressed('pagedown'), SceneManager.goto(...), etc.
+        import re as _re
+        # Object.method( call — high confidence JS expression
+        if _re.search(r'\b[A-Za-z_$][A-Za-z0-9_$]*\.[A-Za-z_$][A-Za-z0-9_$]*\s*\(', v):
+            return True
+
+        # Standalone JS keywords used as expressions: new Class(...), typeof x, etc.
+        if _re.match(r'\b(?:new|typeof|instanceof|void|delete)\b', v):
+            return True
+
+        # Contains JS operator patterns that would not appear in plain text
+        # e.g. &&, ||, ===, !==, =>, ++, --
+        if _re.search(r'(?:===|!==|&&|\|\||=>|\+\+|--)', v):
+            return True
+
+        # Function body style: starts with 'function' or contains '=>'
+        if v.startswith('function') or v.startswith('(function'):
+            return True
+
+        return False
+
     def _is_technical_string(self, text: str) -> bool:
         """Heuristic to check if a string is a file path, boolean-like, technical id, or JS code."""
         if not isinstance(text, str):
@@ -1875,17 +2291,45 @@ class JsonParser(BaseParser):
         if cleaned_text.replace(',', '').replace('.', '').replace(' ', '').lstrip('-').isdigit():
             return True
 
-        # CSS Colors: hex, rgb, rgba
+        # CSS Colors: hex (with or without #), rgb, rgba
         if cleaned_text.startswith('#') and len(cleaned_text) in [4, 5, 7, 9]:
             return True
+        # Bare hex color without '#' prefix (e.g. "bca3a7", "ff5bbc") — developer color notes
+        if re.fullmatch(r'[0-9a-fA-F]{6}', cleaned_text):
+            return True
         if text_lower.startswith(('rgb(', 'rgba(')):
+            return True
+        # CSS named colors (FP-4): "red", "blue", "transparent", etc.
+        if text_lower in self._CSS_NAMED_COLORS:
+            return True
+
+        # Visual separator strings: plugin group-break parameters (e.g. '---...---', '===...===')
+        # These are pure visual dividers in the editor — never player-visible text.
+        if re.fullmatch(r'[-=~*_]{4,}', cleaned_text):
+            return True
+
+        # CSS font-family declarations (e.g. "GameFont, sans-serif", "Meiryo, MS Gothic")
+        if re.fullmatch(r'[A-Za-z][A-Za-z0-9\s_-]*(?:\s*,\s*[A-Za-z][A-Za-z0-9\s_-]*)+', cleaned_text):
+            css_generic_fonts = {'serif', 'sans-serif', 'monospace', 'cursive', 'fantasy',
+                                 'system-ui', 'ui-serif', 'ui-sans-serif', 'ui-monospace'}
+            parts = [p.strip().lower() for p in cleaned_text.split(',')]
+            if any(p in css_generic_fonts for p in parts):
+                return True
+            # Also block comma-separated lists where ANY part is a known game font (FP-3)
+            if any(p in self._KNOWN_GAME_FONTS for p in parts):
+                return True
+        # Single known game font name (FP-3): "GameFont", "Meiryo", etc.
+        if text_lower in self._KNOWN_GAME_FONTS:
             return True
         
         # JavaScript code detection â€” NEVER translate JS code
         # Common JS patterns: return statements, function calls, variable declarations
+        # NOTE: Ambiguous English words (let, new, this, return) are handled
+        # separately below with syntax-aware regexes to avoid false positives
+        # on natural-language dialogue (e.g. "let me help", "new clothes").
         js_keywords = [
-            'return ', 'return;', 'function(', 'function (',
-            'const ', 'var ', 'let ', 'this.', 'new ',
+            'return;', 'function(', 'function (',
+            'const ', 'var ',
             '=>', '===', '!==', '&&', '||',
             '.call(', '.apply(', '.bind(',
             'Math.', 'Graphics.', 'Window_', 'Scene_', 'Game_',
@@ -1896,6 +2340,22 @@ class JsonParser(BaseParser):
             'ConfigManager[', 'config[',
         ]
         if any(kw in cleaned_text for kw in js_keywords):
+            return True
+
+        # Ambiguous JS keywords that overlap with common English words.
+        # Use syntax-aware patterns so "let me help" passes through but
+        # "let x = 5" is blocked.
+        js_ambiguous_patterns = [
+            # return <value>; or return at statement start followed by identifier
+            r'(?:^|[;\n{]\s*)return\s+[a-zA-Z_$]',
+            # let declaration: let x = ...
+            r'(?:^|[;\n{]\s*)let\s+[a-zA-Z_$]\w*\s*[=;,\[]',
+            # new Constructor( -- word after 'new' starts with uppercase
+            r'\bnew\s+[A-Z][a-zA-Z0-9_]*\s*[\(\[{]',
+            # this.property -- 'this.' followed by identifier char
+            r'\bthis\.[a-zA-Z_$]\w*',
+        ]
+        if any(re.search(pat, cleaned_text) for pat in js_ambiguous_patterns):
             return True
         
         # JS-like patterns: semicolons at end, curly braces, parentheses with dots
@@ -1929,9 +2389,14 @@ class JsonParser(BaseParser):
         if re.fullmatch(r'^[\d\s\.\+\-\*/\(\)a-zA-Z_\[\]><=!&|?:,%;]+$', cleaned_text):
             # Must contain at least one operator and one letter
             if re.search(r'[\+\-\*/><=!&|]', cleaned_text) and re.search(r'[a-zA-Z]', cleaned_text):
+                # Require at least one digit to distinguish from display text
+                # like "ON / OFF" or "Goodbye!" which match the char-class pattern
+                # but are clearly not math expressions.
+                if not re.search(r'\d', cleaned_text):
+                    pass  # No digit → skip, likely display text
                 # Ensure no English/natural language consecutive words (e.g. "Name = John Doe").
                 # Valid JS maths shouldn't have words separated ONLY by spaces.
-                if not re.search(r'\b[a-zA-Z_]\w*\s+[a-zA-Z_]\w*\b', cleaned_text):
+                elif not re.search(r'\b[a-zA-Z_]\w*\s+[a-zA-Z_]\w*\b', cleaned_text):
                     return True
                 
         return False
@@ -2018,16 +2483,32 @@ class JsonParser(BaseParser):
 
             for root, _dirs, files in os.walk(directory_path):
                 for filename in files:
-                    relative_path = os.path.relpath(os.path.join(root, filename), asset_root).replace("\\", "/").lower()
-                    basename = os.path.basename(relative_path)
-                    stem, _ext = os.path.splitext(basename)
-                    rel_stem, _ = os.path.splitext(relative_path)
-                    identifiers.add(relative_path)
+                    full_path = os.path.join(root, filename)
+                    rel_path = os.path.relpath(full_path, asset_root).replace("\\", "/").lower()
+                    rel_scan = os.path.relpath(full_path, directory_path).replace("\\", "/").lower()
+                    
+                    # Add various forms
+                    for path_variant in [rel_path, rel_scan]:
+                        identifiers.add(path_variant)
+                        stem, _ = os.path.splitext(path_variant)
+                        if stem:
+                            identifiers.add(stem)
+                        
+                        # Add suffixes for deep paths (e.g., img/pictures/Actor1_Face.png -> pictures/Actor1_Face)
+                        parts = path_variant.split('/')
+                        if len(parts) > 1:
+                            for i in range(1, len(parts)):
+                                suffix = "/".join(parts[i:])
+                                identifiers.add(suffix)
+                                s_stem, _ = os.path.splitext(suffix)
+                                if s_stem:
+                                    identifiers.add(s_stem)
+
+                    basename = os.path.basename(full_path).lower()
                     identifiers.add(basename)
-                    if stem:
-                        identifiers.add(stem)
-                    if rel_stem:
-                        identifiers.add(rel_stem)
+                    b_stem, _ = os.path.splitext(basename)
+                    if b_stem:
+                        identifiers.add(b_stem)
 
         with _ASSET_REGISTRY_LOCK:
             _ASSET_REGISTRY_CACHE[normalized_root] = identifiers
@@ -2112,8 +2593,6 @@ class JsonParser(BaseParser):
                     joined,
                 )
                 return None
-        
-        applied_count = 0
         
         # Sort keys to handle nested JSON properly 
         # (Though dict order doesn't guarantee depth, but we process paths directly)
@@ -2244,10 +2723,6 @@ class JsonParser(BaseParser):
             self._apply_note_tag_translation(data, base_path, updates, is_block=False)
                 
         if is_locale_file:
-            for key, trans_text in translations.items():
-                if not isinstance(trans_text, str) or not trans_text:
-                    continue
-                self._set_value_at_path(data, key, trans_text)
             if original_data is not None:
                 asset_violations = self._asset_invariant_verifier.find_mutated_assets(original_data, data)
                 if asset_violations:
@@ -2289,7 +2764,7 @@ class JsonParser(BaseParser):
                     return None
             # Preserve plugin parameters exactly unless the user explicitly translated them.
             # Reconstruct the plugin.js file
-            new_json_str = json.dumps(data, indent=None, ensure_ascii=False, separators=(',', ':'))
+            new_json_str = json_write_plugins(data)
             return self._js_prefix + new_json_str + self._js_suffix
         else:
             if original_data is not None:
@@ -2340,6 +2815,11 @@ class JsonParser(BaseParser):
         if surface == "technical_identifier":
             return True
 
+        # System.json terms.messages.* fields are always UI strings (e.g. "BGM Volume",
+        # "SE Volume", "File") — never block them regardless of key token matches.
+        if re.search(r'\bterms\.messages\b', path):
+            return False
+
         if self._is_plugin_parameter_path(path):
             if self._looks_like_plugin_registry_label(path, original_clean):
                 return True
@@ -2347,6 +2827,23 @@ class JsonParser(BaseParser):
                 return True
             if self._is_technical_string(original_clean):
                 return True
+
+        # Asset registry safety net: custom plugins commonly use structured
+        # data values (e.g. System.json terms.commands, skill-type names,
+        # weapon-type names) as image/audio filenames at runtime.  Block any
+        # short, space-free value that exactly matches a known project asset
+        # to prevent the translated value from becoming a broken file path.
+        # Multi-word phrases are unlikely asset filenames and pass through.
+        if (
+            ' ' not in original_clean
+            and len(original_clean) < 40
+            and self._matches_known_asset_identifier(original_clean)
+        ):
+            logger.debug(
+                "Blocked asset-matching translation at %s: %r",
+                path, original_clean,
+            )
+            return True
 
         path_asset_context = self._is_asset_context_path(path) or self._is_audio_key_context(path)
         if not path_asset_context:
@@ -2365,10 +2862,20 @@ class JsonParser(BaseParser):
         return False
 
     def _is_plugin_parameter_path(self, path: str) -> bool:
-        """Return True when path points inside plugins.js parameters."""
+        """Return True when path points inside plugins.js parameters.
+
+        Event commands use ``.list.<N>.parameters.<N>`` paths which must NOT
+        be treated as plugin parameters — they contain dialogue and choice
+        text, not plugin config values.
+        """
         if not isinstance(path, str):
             return False
-        return ".parameters." in path or path.endswith(".parameters")
+        if ".parameters." not in path and not path.endswith(".parameters"):
+            return False
+        # Event command paths: .list.N.parameters  — never plugin params
+        if re.search(r'\.list\.\d+\.parameters\b', path):
+            return False
+        return True
 
     def _looks_like_plugin_registry_label(self, path: str, value: str) -> bool:
         """Return True for plugin order labels that double as identifiers."""
@@ -2487,7 +2994,7 @@ class JsonParser(BaseParser):
             self._apply_nested_json_translation(nested_obj, inner_root, inner_trans)
         
         # Re-serialize and save back to parent object
-        new_json_str = json.dumps(nested_obj, ensure_ascii=False)
+        new_json_str = json_write(nested_obj, compact=True)
         self._set_value_at_path(data, root_path, new_json_str)
 
     def _apply_script_translation(self, data: Any, base_path: str, updates: list):
@@ -2539,8 +3046,11 @@ class JsonParser(BaseParser):
         
         merged = '\n'.join(lines)
         
-        # Re-extract translatable strings to get current positions
-        strings = self._js_tokenizer.extract_translatable_strings(merged)
+        # Re-extract translatable strings using the SAME AST-filtered pipeline
+        # as extraction (_process_script_block_into uses _filter_js_strings_by_safe_sinks).
+        # Using the raw tokenizer here would produce a different index set, causing
+        # @JS{idx} from extraction to point at the wrong string literal.
+        strings = self._filter_js_strings_by_safe_sinks(merged)
         
         # Apply replacements in reverse order (preserve positions)
         updates_sorted = sorted(updates, key=lambda x: x[1], reverse=True)
@@ -2811,7 +3321,7 @@ class JsonParser(BaseParser):
         """
         # Find the start: var $plugins = 
         # Using regex to find the variable assignment, but not the end
-        match = re.search(r'(var\s+\$plugins\s*=\s*)', content)
+        match = re.search(r'((?:var|let|const)\s+\$plugins\s*=\s*)', content)
         if not match:
             return None, None, None
             
@@ -2923,7 +3433,7 @@ class JsonParser(BaseParser):
             path = f"JS_SRC_{idx}"
             if path in translations and translations[path]:
                 trans_text = translations[path]
-                safe_trans = self._js_tokenizer._escape_for_js(trans_text, quote)
-                result = result[:start] + safe_trans + result[end:]
+                # Use replace_string_at to properly wrap escaped content with quotes
+                result = self._js_tokenizer.replace_string_at(result, start, end, quote, trans_text)
                 
         return result

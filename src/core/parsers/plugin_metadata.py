@@ -60,6 +60,27 @@ class PluginParameterMetadata:
         parts = [self.name, self.text, self.description, self.parent]
         return " ".join(part for part in parts if part).lower()
 
+    def is_group_header(self, all_params: "dict[str, PluginParameterMetadata]") -> bool:
+        """Return True when this parameter acts only as a visual group header.
+
+        A parameter is considered a pure group header when:
+        - It has no meaningful type (empty, 'text', or 'note' only used as
+          display labels in the editor), AND
+        - At least one other parameter references it via @parent, AND
+        - Its default value is empty (no real runtime value).
+        """
+        base = self.base_type()
+        if base not in ("", "text", "note"):
+            return False
+        if self.default_value.strip():
+            return False
+        name_lower = self.name.lower()
+        return any(
+            p.parent.lower() == name_lower
+            for p in all_params.values()
+            if p is not self and p.parent
+        )
+
 
 @dataclass(slots=True)
 class PluginFileMetadata:
@@ -114,9 +135,10 @@ class PluginMetadataStore:
 
         target_name = f"{plugin_name}.js".lower()
         try:
-            for entry in os.scandir(self._plugins_dir):
-                if entry.is_file() and entry.name.lower() == target_name:
-                    return entry.path
+            with os.scandir(self._plugins_dir) as entries:
+                for entry in entries:
+                    if entry.is_file() and entry.name.lower() == target_name:
+                        return entry.path
         except OSError:
             return None
         return None

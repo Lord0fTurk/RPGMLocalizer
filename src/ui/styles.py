@@ -2,7 +2,7 @@ DARK_THEME = """
 QWidget {
     background-color: #1e1e1e;
     color: #ffffff;
-    font-family: 'Segoe UI', sans-serif;
+    font-family: 'Segoe UI', -apple-system, 'Noto Sans', 'Liberation Sans', sans-serif;
     font-size: 14px;
 }
 
@@ -66,7 +66,7 @@ QProgressBar::chunk {
 QTextEdit {
     background-color: #1e1e1e;
     border: 1px solid #3d3d3d;
-    font-family: 'Consolas', monospace;
+    font-family: 'Consolas', 'SF Mono', 'Liberation Mono', 'DejaVu Sans Mono', monospace;
     font-size: 12px;
 }
 """

@@ -4,9 +4,12 @@ Audit-only JavaScript AST extractor for player-visible string candidates.
 from __future__ import annotations
 
 import ast
+import logging
 from dataclasses import dataclass
 from collections import Counter
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Iterable
+
+logger = logging.getLogger(__name__)
 
 from .js_tokenizer import JSStringTokenizer
 
@@ -19,7 +22,7 @@ except ImportError:  # pragma: no cover - exercised through fallback behavior
     tree_sitter_javascript = None
 
 
-AuditEntry = Tuple[str, str, str]
+AuditEntry = tuple[str, str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +49,11 @@ class JavaScriptAstAuditExtractor:
         "drawtext",
         "sethelptext",
         "sethelpwindowitem",
+        # Additional known UI-text sinks
+        "drawitemname",
+        "drawactorname",
+        "settext",
+        "$gamemessage.add",  # Core MV/MZ message display
     }
     NEGATIVE_CALLEE_HINTS = {
         "imagemanager.load",
@@ -54,6 +62,13 @@ class JavaScriptAstAuditExtractor:
         "pluginmanager.parameters",
         "storagemanager",
         "require",
+        "console.log",
+        "console.warn",
+        "console.error",
+        "eval",
+        "json.parse",
+        "json.stringify",
+        "datamanager.loaddatafile",
     }
     POSITIVE_KEY_HINTS = {
         "title",
@@ -106,7 +121,8 @@ class JavaScriptAstAuditExtractor:
         "locale",
     }
     SAFE_SINK_CALL_HINTS = {
-        "$gamemessage.add",
+        "showtext",
+        "showchoices",
         "addcommand",
         "addtext",
         "drawtext",
@@ -119,6 +135,7 @@ class JavaScriptAstAuditExtractor:
         "alert",
         "confirm",
         "prompt",
+        "$gamemessage.add",
     }
     SAFE_SINK_TEXT_HINTS = {
         "text",
@@ -141,23 +158,23 @@ class JavaScriptAstAuditExtractor:
         """Return the currently active extraction engine."""
         return "tree_sitter" if self._parser is not None else "tokenizer_fallback"
 
-    def extract_text(self, file_path: str) -> tuple[List[AuditEntry], str]:
+    def extract_text(self, file_path: str) -> tuple[list[AuditEntry], str]:
         """Extract audit-only string candidates from a JS file."""
         candidates, engine = self.extract_audit_candidates(file_path)
         return [(item.path, item.text, item.tag) for item in candidates], engine
 
-    def extract_audit_candidates(self, file_path: str) -> tuple[List[JavaScriptAuditCandidate], str]:
+    def extract_audit_candidates(self, file_path: str) -> tuple[list[JavaScriptAuditCandidate], str]:
         """Extract scored audit candidates from a JS file."""
         with open(file_path, "r", encoding="utf-8-sig") as handle:
             content = handle.read()
         return self.extract_audit_candidates_from_source(content)
 
-    def extract_text_from_source(self, js_code: str) -> tuple[List[AuditEntry], str]:
+    def extract_text_from_source(self, js_code: str) -> tuple[list[AuditEntry], str]:
         """Extract audit-only string candidates from JS source."""
         candidates, engine = self.extract_audit_candidates_from_source(js_code)
         return [(item.path, item.text, item.tag) for item in candidates], engine
 
-    def extract_safe_sink_entries_from_source(self, js_code: str) -> tuple[List[AuditEntry], str]:
+    def extract_safe_sink_entries_from_source(self, js_code: str) -> tuple[list[AuditEntry], str]:
         """Extract strings only from semantically safe JS sinks."""
         if not js_code.strip():
             return [], self.engine_name
@@ -168,7 +185,7 @@ class JavaScriptAstAuditExtractor:
         source_bytes = js_code.encode("utf-8")
         tree = self._parser.parse(source_bytes)
 
-        entries: List[AuditEntry] = []
+        entries: list[AuditEntry] = []
         seen_paths: set[str] = set()
 
         for node in self._iter_string_nodes(tree.root_node):
@@ -188,7 +205,7 @@ class JavaScriptAstAuditExtractor:
     def extract_audit_candidates_from_source(
         self,
         js_code: str,
-    ) -> tuple[List[JavaScriptAuditCandidate], str]:
+    ) -> tuple[list[JavaScriptAuditCandidate], str]:
         """Extract scored audit-only string candidates from JS source."""
         if not js_code.strip():
             return [], self.engine_name
@@ -199,7 +216,7 @@ class JavaScriptAstAuditExtractor:
         source_bytes = js_code.encode("utf-8")
         tree = self._parser.parse(source_bytes)
 
-        entries: List[JavaScriptAuditCandidate] = []
+        entries: list[JavaScriptAuditCandidate] = []
         seen_paths: set[str] = set()
 
         for node in self._iter_string_nodes(tree.root_node):
@@ -232,7 +249,7 @@ class JavaScriptAstAuditExtractor:
         self,
         candidates: Iterable[JavaScriptAuditCandidate],
         engine: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Summarize audit candidates into confidence buckets and write readiness."""
         candidate_list = list(candidates)
         bucket_counts = Counter(candidate.bucket for candidate in candidate_list)
@@ -258,7 +275,7 @@ class JavaScriptAstAuditExtractor:
             "top_score": max((candidate.score for candidate in candidate_list), default=None),
         }
 
-    def _extract_with_tokenizer(self, js_code: str) -> List[JavaScriptAuditCandidate]:
+    def _extract_with_tokenizer(self, js_code: str) -> list[JavaScriptAuditCandidate]:
         strings = self._tokenizer.extract_translatable_strings(js_code)
         return [
             JavaScriptAuditCandidate(
@@ -271,17 +288,22 @@ class JavaScriptAstAuditExtractor:
             for index, (_start, _end, value, _quote) in enumerate(strings)
         ]
 
-    def _extract_safe_strings_with_tokenizer(self, js_code: str) -> List[AuditEntry]:
+    def _extract_safe_strings_with_tokenizer(self, js_code: str) -> list[AuditEntry]:
         strings = self._tokenizer.extract_translatable_strings(js_code)
         return [
             (f"@SAFE_TOK{index}", value, "js_safe_sink_fallback")
             for index, (_start, _end, value, _quote) in enumerate(strings)
         ]
 
-    def _build_language(self):
+    def _build_language(self) -> Any | None:
+        """Build tree-sitter language for JavaScript AST analysis."""
         if Language is None or tree_sitter_javascript is None:
             return None
-        return Language(tree_sitter_javascript.language())
+        try:
+            return Language(tree_sitter_javascript.language())
+        except Exception as e:
+            logger.debug(f"Tree-sitter language build failed: {e}")
+            return None
 
     def _iter_string_nodes(self, node: Any) -> Iterable[Any]:
         if node.type == "string":
@@ -294,7 +316,7 @@ class JavaScriptAstAuditExtractor:
             yield from self._iter_string_nodes(child)
 
     def _decode_string_value(self, source_bytes: bytes, node: Any) -> str:
-        raw_text = source_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="ignore")
+        raw_text = source_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="ignore")
         if node.type == "template_string":
             return raw_text[1:-1]
 
@@ -341,7 +363,14 @@ class JavaScriptAstAuditExtractor:
             if any(hint in lower_callee for hint in self.POSITIVE_CALLEE_HINTS):
                 score += 5
             if lower_callee.endswith("addcommand"):
-                score += 5 if arg_index == 0 else -8
+                if arg_index == 0:
+                    score += 5   # label — player-visible menu text
+                elif arg_index == 1:
+                    score -= 8   # symbol — technical identifier
+                elif arg_index == 3:
+                    score += 2   # ext — sometimes player-visible (plugin-dependent)
+                else:
+                    score -= 4
             if lower_callee.endswith("printloadingerror"):
                 if arg_index in (0, 1):
                     score += 6
@@ -525,7 +554,7 @@ class JavaScriptAstAuditExtractor:
         return False
 
     def _node_text(self, node: Any, source_bytes: bytes) -> str:
-        raw_text = source_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="ignore")
+        raw_text = source_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="ignore")
         if node.type == "string":
             return self._decode_string_value(source_bytes, node)
         return raw_text

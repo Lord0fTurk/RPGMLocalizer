@@ -1,282 +1,234 @@
 """
-CSV Export/Import for translations.
-Allows translators to edit translations in spreadsheet software.
+CSV and JSON Export/Import engine for RPG Maker translations.
+Optimized for high-volume data, distinct string management, and cross-platform spreadsheet compatibility.
 """
 import csv
 import json
 import os
-from typing import List, Tuple, Dict, Optional
-from pathlib import Path
-from dataclasses import dataclass
 import logging
+from typing import List, Tuple, Dict, Optional, Set
+from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
-
 @dataclass
 class TranslationEntry:
-    """Represents a single translatable text entry."""
+    """Represents a single translatable text entry with full context."""
     file_path: str
     json_path: str
     original_text: str
     translated_text: str = ""
     status: str = "pending"  # pending, translated, reviewed, skipped
-
+    context: str = ""       # Optional context (e.g., actor name, map name)
 
 class TranslationExporter:
     """
-    Exports extracted text to CSV for external editing.
+    Exports extracted text to CSV or JSON for external editing.
+    Supports unique string grouping to reduce translator workload.
     """
     
-    CSV_COLUMNS = ['file', 'path', 'original', 'translated', 'status']
+    CSV_COLUMNS = ['file', 'path', 'original', 'translated', 'status', 'context']
     
     def __init__(self):
         self.entries: List[TranslationEntry] = []
     
-    def add_entries_from_file(self, file_path: str, extractions: List[Tuple[str, str]]):
+    def add_entry(self, file_path: str, json_path: str, text: str, context: str = ""):
+        """Add a single entry with full context."""
+        entry = TranslationEntry(
+            file_path=file_path,
+            json_path=json_path,
+            original_text=text,
+            context=context
+        )
+        self.entries.append(entry)
+
+    def add_entries_from_file(self, file_path: str, extractions: List[Tuple]):
         """
         Add extracted text entries from a file.
-        
-        Args:
-            file_path: Source file path
-            extractions: List of (json_path, text) tuples from parser
+        Backward compatible with legacy (path, text) tuples or (path, text, context) triples.
         """
-        for json_path, text in extractions:
-            entry = TranslationEntry(
-                file_path=file_path,
-                json_path=json_path,
-                original_text=text
-            )
-            self.entries.append(entry)
+        for extraction in extractions:
+            path = extraction[0]
+            text = extraction[1]
+            context = extraction[2] if len(extraction) > 2 else ""
+            self.add_entry(file_path, path, text, context)
     
-    def export_csv(self, output_path: str, include_header: bool = True) -> bool:
-        """
-        Export all entries to a CSV file.
-        
-        Args:
-            output_path: Path for the output CSV file
-            include_header: Whether to include column headers
+    def _prepare_export_data(self, distinct: bool = False) -> List[TranslationEntry]:
+        """Process entries for export, optionally merging duplicates."""
+        if not distinct:
+            return self.entries
             
-        Returns:
-            True if export succeeded
-        """
+        unique_map: Dict[str, TranslationEntry] = {}
+        for e in self.entries:
+            if e.original_text not in unique_map:
+                # Store the first occurrence as the representative
+                # We mark the path as [DISTINCT] to signal global application during import
+                unique_map[e.original_text] = TranslationEntry(
+                    file_path="[DISTINCT]",
+                    json_path="[DISTINCT]",
+                    original_text=e.original_text,
+                    context="Multiple occurrences merged"
+                )
+        return list(unique_map.values())
+
+    def export_csv(self, output_path: str, distinct: bool = False) -> bool:
+        """Export to CSV optimized for Excel/Google Sheets."""
+        data_to_export = self._prepare_export_data(distinct)
         try:
             with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
-                writer = csv.writer(f, quoting=csv.QUOTE_ALL)
+                writer = csv.DictWriter(f, fieldnames=self.CSV_COLUMNS, quoting=csv.QUOTE_ALL)
+                writer.writeheader()
                 
-                if include_header:
-                    writer.writerow(self.CSV_COLUMNS)
-                
-                for entry in self.entries:
-                    writer.writerow([
-                        entry.file_path,
-                        entry.json_path,
-                        entry.original_text,
-                        entry.translated_text,
-                        entry.status
-                    ])
+                for entry in data_to_export:
+                    writer.writerow({
+                        'file': entry.file_path,
+                        'path': entry.json_path,
+                        'original': entry.original_text,
+                        'translated': entry.translated_text,
+                        'status': entry.status,
+                        'context': entry.context
+                    })
             
-            logger.info(f"Exported {len(self.entries)} entries to {output_path}")
+            logger.info(f"Exported {len(data_to_export)} entries to CSV: {output_path}")
             return True
-            
         except Exception as e:
             logger.error(f"Failed to export CSV: {e}")
             return False
-    
-    def export_json(self, output_path: str) -> bool:
-        """
-        Export all entries to a JSON file.
-        More structured than CSV, preserves data types.
-        """
+
+    def export_json(self, output_path: str, distinct: bool = False) -> bool:
+        """Export to structured JSON."""
+        data_to_export = self._prepare_export_data(distinct)
         try:
-            data = {
-                'version': '1.0',
+            payload = {
+                'version': '1.1',
+                'type': 'distinct' if distinct else 'full',
                 'entries': [
                     {
                         'file': e.file_path,
                         'path': e.json_path,
                         'original': e.original_text,
                         'translated': e.translated_text,
-                        'status': e.status
+                        'status': e.status,
+                        'context': e.context
                     }
-                    for e in self.entries
+                    for e in data_to_export
                 ]
             }
             
             with open(output_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+                json.dump(payload, f, ensure_ascii=False, indent=2)
             
-            logger.info(f"Exported {len(self.entries)} entries to {output_path}")
+            logger.info(f"Exported {len(data_to_export)} entries to JSON: {output_path}")
             return True
-            
         except Exception as e:
             logger.error(f"Failed to export JSON: {e}")
             return False
-    
-    def get_stats(self) -> dict:
-        """Get export statistics."""
-        status_counts = {}
-        for entry in self.entries:
-            status_counts[entry.status] = status_counts.get(entry.status, 0) + 1
-        
-        return {
-            'total_entries': len(self.entries),
-            'unique_files': len(set(e.file_path for e in self.entries)),
-            'status_counts': status_counts
-        }
-
 
 class TranslationImporter:
     """
-    Imports translations from CSV or JSON files.
+    Robust importer that handles both localized (path-specific) and global (distinct) translations.
     """
     
     def __init__(self):
-        self.translations: Dict[str, Dict[str, str]] = {}  # file_path -> {json_path: translated}
+        self.file_specific: Dict[str, Dict[str, str]] = {}  # file -> {path: translation}
+        self.global_map: Dict[str, str] = {}               # original -> translation
         self.stats = {'imported': 0, 'skipped': 0, 'errors': 0}
 
-    def _normalize_status(self, status: object) -> str:
-        """Normalize incoming status values from CSV/JSON imports."""
-        if isinstance(status, str):
-            return status.strip().lower()
-        if status is None:
-            return "translated"
-        return str(status).strip().lower()
+    def import_file(self, input_path: str) -> bool:
+        """Universal importer supporting CSV and JSON."""
+        if input_path.endswith('.json'):
+            return self.import_json(input_path)
+        return self.import_csv(input_path)
 
-    def _normalize_translation_text(self, translated: object) -> Optional[str]:
-        """Return a usable translation string or None when the imported value is invalid."""
-        if not isinstance(translated, str):
-            return None
-        cleaned = translated.strip()
-        if not cleaned:
-            return None
-        return translated
-    
-    def import_csv(self, input_path: str, has_header: bool = True) -> bool:
-        """
-        Import translations from a CSV file.
-        
-        Args:
-            input_path: Path to the CSV file
-            has_header: Whether the CSV has a header row
-            
-        Returns:
-            True if import succeeded
-        """
+    def import_csv(self, input_path: str) -> bool:
+        """Robust CSV import using field names."""
         try:
             with open(input_path, 'r', encoding='utf-8-sig') as f:
-                reader = csv.reader(f)
-                
-                if has_header:
-                    next(reader)  # Skip header
-                
+                reader = csv.DictReader(f)
                 for row in reader:
-                    if len(row) < 4:
-                        self.stats['errors'] += 1
-                        continue
-                    
-                    file_path, json_path, original, translated = row[:4]
-                    status = row[4] if len(row) > 4 else 'translated'
-                    
-                    # Skip entries marked as skipped or without translation
-                    normalized_status = self._normalize_status(status)
-                    normalized_translation = self._normalize_translation_text(translated)
-                    if normalized_status == 'skipped' or normalized_translation is None:
-                        self.stats['skipped'] += 1
-                        continue
-                    
-                    # Store translation
-                    if file_path not in self.translations:
-                        self.translations[file_path] = {}
-                    
-                    self.translations[file_path][json_path] = normalized_translation
-                    self.stats['imported'] += 1
-            
-            logger.info(f"Imported {self.stats['imported']} translations from {input_path}")
+                    self._process_row(
+                        file_path=row.get('file'),
+                        json_path=row.get('path'),
+                        original=row.get('original'),
+                        translated=row.get('translated'),
+                        status=row.get('status', 'translated')
+                    )
             return True
-            
         except Exception as e:
             logger.error(f"Failed to import CSV: {e}")
             return False
-    
+
     def import_json(self, input_path: str) -> bool:
-        """
-        Import translations from a JSON file.
-        """
+        """JSON import for legacy and new versions."""
         try:
             with open(input_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             
             entries = data.get('entries', [])
-            
-            for entry in entries:
-                file_path = entry.get('file', '')
-                json_path = entry.get('path', '')
-                translated = entry.get('translated', '')
-                status = entry.get('status', 'translated')
-                
-                normalized_status = self._normalize_status(status)
-                normalized_translation = self._normalize_translation_text(translated)
-                if normalized_status == 'skipped' or normalized_translation is None:
-                    self.stats['skipped'] += 1
-                    continue
-                
-                if file_path not in self.translations:
-                    self.translations[file_path] = {}
-                
-                self.translations[file_path][json_path] = normalized_translation
-                self.stats['imported'] += 1
-            
-            logger.info(f"Imported {self.stats['imported']} translations from {input_path}")
+            for e in entries:
+                self._process_row(
+                    file_path=e.get('file'),
+                    json_path=e.get('path'),
+                    original=e.get('original'),
+                    translated=e.get('translated'),
+                    status=e.get('status', 'translated')
+                )
             return True
-            
         except Exception as e:
             logger.error(f"Failed to import JSON: {e}")
             return False
-    
+
+    def _process_row(self, file_path, json_path, original, translated, status):
+        """Process a single row from any source and route to specific or global map."""
+        # Sanity check: Translated MUST be a string
+        if not translated or not isinstance(translated, str):
+            self.stats['skipped'] += 1
+            return
+
+        # Support path-only translation mapping for legacy data compatibility
+        if not original and not json_path:
+            self.stats['skipped'] += 1
+            return
+
+        status = str(status).lower().strip()
+        if status == 'skipped':
+            self.stats['skipped'] += 1
+            return
+
+        # Handle Distinct/Global translations
+        if file_path == "[DISTINCT]" or json_path == "[DISTINCT]":
+            self.global_map[original] = translated
+            self.stats['imported'] += 1
+            return
+
+        # Handle file-specific translations
+        if file_path not in self.file_specific:
+            self.file_specific[file_path] = {}
+        
+        self.file_specific[file_path][json_path] = translated
+        self.stats['imported'] += 1
+
+    def get_translation(self, file_path: str, json_path: str, original_text: str) -> Optional[str]:
+        """
+        Lookup translation with Fallback strategy:
+        1. Exact file + path match
+        2. Global (Distinct) match
+        """
+        # Step 1: Specific path
+        if file_path in self.file_specific:
+            if json_path in self.file_specific[file_path]:
+                return self.file_specific[file_path][json_path]
+        
+        # Step 2: Global lookup
+        return self.global_map.get(original_text)
+
     def get_translations_for_file(self, file_path: str) -> Dict[str, str]:
-        """Get all translations for a specific file."""
-        return self.translations.get(file_path, {})
-    
-    def get_all_translations(self) -> Dict[str, Dict[str, str]]:
-        """Get all imported translations."""
-        return self.translations
-    
+        """Backward compatibility for tests: Get all translations for a specific file."""
+        return self.file_specific.get(file_path, {})
+
     def get_stats(self) -> dict:
-        """Get import statistics."""
         return {
             **self.stats,
-            'files_with_translations': len(self.translations)
+            'files_impacted': len(self.file_specific),
+            'global_rules': len(self.global_map)
         }
-
-
-def merge_translation_files(files: List[str], output_path: str) -> bool:
-    """
-    Merge multiple translation CSV/JSON files into one.
-    Later files take precedence for duplicate entries.
-    """
-    importer = TranslationImporter()
-    
-    for file_path in files:
-        if file_path.endswith('.json'):
-            importer.import_json(file_path)
-        else:
-            importer.import_csv(file_path)
-    
-    # Export merged result
-    exporter = TranslationExporter()
-    for file_path, translations in importer.get_all_translations().items():
-        for json_path, translated in translations.items():
-            entry = TranslationEntry(
-                file_path=file_path,
-                json_path=json_path,
-                original_text="",  # Original not preserved in merge
-                translated_text=translated,
-                status='translated'
-            )
-            exporter.entries.append(entry)
-    
-    if output_path.endswith('.json'):
-        return exporter.export_json(output_path)
-    else:
-        return exporter.export_csv(output_path)

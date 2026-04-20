@@ -1,70 +1,56 @@
-from dataclasses import dataclass, field
-from typing import Dict, Any, Optional
+# --- RPG Maker Specific Tokens (Multilayer Ghost Tokens) ---
+import re
 
-# --- Constants ---
+# Layer 1: Universal Line Break Protection (Managed by HTMLShield)
+TOKEN_LINE_BREAK = "\uE000"
+REGEX_LINE_SPLIT = r'\uE000'
 
-# Separator Tokens
-# CRITICAL: Must be stable through Google Translate web endpoints
-# Web-based translation (not API) requires simple, unique text patterns
-# Format: Pipes + unique ID = minimal corruption risk
-TOKEN_BATCH_SEPARATOR = "\n|||XYZ|||\n"
-# IMPORTANT: TOKEN_LINE_BREAK must NOT match any pattern in RPGM_PATTERNS (placeholder.py)
-# Previous formats:
-# - [[XRPYX_LB_XRPYX]]: matched by \[\[[^\]]+\]\] regex (corrupted by placeholder system)
-# - |||XRPYXLB|||: too long, Google sometimes adds spaces
-# - <XRPYX_LB>: XML tags don't work well with web-based translate endpoints
-# Current: Short pipe format for maximum stability
-TOKEN_LINE_BREAK = "|||XLB|||"
+# Layer 2: Pipeline Batching (Managed by TranslationPipeline)
+TOKEN_BATCH_SEPARATOR = "\uE001"
+# Unicode Token Shield: ⟦_S_⟧ separators (no HTML wrapping needed)
+SAFE_BATCH_SEPARATOR = '\n\n⟦_S_⟧\n\n'
+# Matches: ⟦_S_⟧, [_S_], 【_S_】, (_S_), {_S_} and spaced variants + legacy PUA
+REGEX_BATCH_SPLIT = r'\s*\n*\s*[\[(\{【⟦]\s*_\s*[sS]\s*_\s*[\])\}】⟧]\s*\n*\s*|\s*\uE001\s*'
 
-# Regex Patterns (Pre-compiled elsewhere, documented here)
-# Used to split batch responses from Google
-REGEX_BATCH_SPLIT = r'\s*\|\|\|XYZ\|\|\|\s*'
+# Layer 3: Cross-Event Merging (Managed by TextMerger)
+TOKEN_MERGE_SEPARATOR = "\uE002"
+SAFE_MERGE_SEPARATOR = '\n\n⟦_M_⟧\n\n'
+# Matches: ⟦_M_⟧, [_M_], 【_M_】, (_M_), {_M_} and spaced variants + legacy PUA
+REGEX_MERGE_SPLIT = r'\s*\n*\s*[\[(\{【⟦]\s*_\s*[mM]\s*_\s*[\])\}】⟧]\s*\n*\s*|\s*\uE002\s*'
 
-# Used to split merged dialogue lines
-REGEX_LINE_SPLIT = r'\s*\|\|\|XLB\|\|\|\s*'
+# Layer 4: Parser-Internal Bundling (Managed by RubyParser/JsonParser)
+TOKEN_INTERNAL_MERGE = "\uE003"
+SAFE_INTERNAL_MERGE = '\n\n⟦_I_⟧\n\n'
+# Matches: ⟦_I_⟧, [_I_], 【_I_】, (_I_), {_I_} and spaced variants + legacy PUA
+REGEX_INTERNAL_MERGE = r'\s*\n*\s*[\[(\{【⟦]\s*_\s*[iI]\s*_\s*[\])\}】⟧]\s*\n*\s*|\s*\uE003\s*'
 
-# Default Configuration
-DEFAULT_BATCH_SIZE = 50  # Merge threshold (Multi-Endpoints handle high concurrency natively)
-DEFAULT_CONCURRENCY = 20
-DEFAULT_TIMEOUT = 15
-DEFAULT_MAX_CHARS = 2000
-DEFAULT_USE_MULTI_ENDPOINT = True
-DEFAULT_ENABLE_LINGVA_FALLBACK = True
-DEFAULT_REQUEST_DELAY_MS = 150
+
+# --- General Configuration ---
+DEFAULT_BATCH_SIZE = 100
+DEFAULT_CONCURRENCY = 12  # Reduced from 20: lower IP-pressure on Google endpoints
 DEFAULT_TIMEOUT_SECONDS = 15
 DEFAULT_MAX_RETRIES = 3
+DEFAULT_REQUEST_DELAY_MS = 100
+DEFAULT_MAX_CHARS = 10000
+TEXT_MERGER_MAX_SAFE_CHARS = 10000
+
+# Security: GET requests have URL length limits (approx 2000-4000 chars)
+TRANSLATOR_GET_SAFE_LIMIT = 2000 
+TRANSLATOR_MAX_SAFE_CHARS = 12000
+TRANSLATOR_MAX_SLICE_CHARS = 2000  # Sync with GET limit
+TRANSLATOR_RECURSION_MAX_DEPTH = 50
+
+# --- Endpoint Racing & Mirror Configuration ---
+DEFAULT_USE_MULTI_ENDPOINT = True
+DEFAULT_ENABLE_LINGVA_FALLBACK = True
 DEFAULT_MIRROR_MAX_FAILURES = 5
-DEFAULT_MIRROR_BAN_TIME = 120
-DEFAULT_RACING_ENDPOINTS = 2
+DEFAULT_MIRROR_BAN_TIME = 120   # 2-minute cooldown (was 3600); mirrors recover quickly after a soft ban
+DEFAULT_RACING_ENDPOINTS = 1    # 1 endpoint at a time to prevent cascade bans (was 2)
 
-# Translator-specific limits
-TRANSLATOR_MAX_SAFE_CHARS = 4500  # Safe limit for single request batch
-TRANSLATOR_MAX_SLICE_CHARS = 2000  # Fallback slice limit
-TRANSLATOR_RECURSION_MAX_DEPTH = 100  # Max recursion depth for parsers
-
-# Text Merger Configuration
-TEXT_MERGER_MAX_SAFE_CHARS = 4000  # Safe limit for merged requests (slightly lower than TRANSLATOR_MAX_SAFE_CHARS)
-
-# Ruby Parser Configuration
-RUBY_ENCODING_FALLBACK_LIST = ['utf-8', 'shift_jis', 'cp1252', 'latin-1']
-RUBY_KEY_ENCODING_FALLBACK_LIST = ['utf-8', 'shift_jis', 'cp1252']
-
-# --- Data Transfer Objects (DTOs) ---
-
-@dataclass
-class TranslationTask:
-    """Represents a single unit of work for the translator."""
-    text: str
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    # Metadata includes: file, path, original, tag, is_merged, block_size, glossary_map
-
-@dataclass
-class TranslationResult:
-    """Represents the outcome of a translation task."""
-    original_text: str
-    translated_text: str
-    success: bool
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    error: Optional[str] = None
-    source_lang: str = "auto"
-    target_lang: str = "en"
+# --- Safety & Recognition ---
+# Non-translatable key patterns
+NON_TRANSLATABLE_KEYS = {
+    'name', 'id', 'symbol', 'icon_index', 'color', 
+    'switch_id', 'variable_id', 'common_event_id',
+    'animation_id', 'bgm', 'bgs', 'me', 'se'
+}

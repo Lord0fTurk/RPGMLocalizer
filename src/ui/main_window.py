@@ -3,7 +3,8 @@ from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
 from qfluentwidgets import (FluentWindow, NavigationItemPosition, FluentTranslator, 
-                            FluentIcon as FIF, SplashScreen, InfoBar, InfoBarPosition)
+                             FluentIcon as FIF, SplashScreen, InfoBar, InfoBarPosition,
+                             setTheme, Theme, MSFluentWindow)
 
 from src.core.translation_pipeline import TranslationPipeline
 from src.core.enums import PipelineStage
@@ -17,7 +18,7 @@ from src.ui.interfaces.glossary_interface import GlossaryInterface
 from src.ui.components.console_log import ConsoleLog
 from src.utils.paths import existing_resource_path
 
-class MainWindow(FluentWindow):
+class MainWindow(MSFluentWindow):
     def __init__(self):
         super(MainWindow, self).__init__()
         
@@ -58,6 +59,7 @@ class MainWindow(FluentWindow):
         # 5. Connect Signals
         self.homeInterface.start_requested.connect(self.start_pipeline)
         self.homeInterface.stop_requested.connect(self.stop_pipeline)
+        self.exportInterface.start_requested.connect(self.homeInterface._on_start)
         self.settingsInterface.btn_clear_cache.clicked.connect(self.clear_cache)
         self.glossaryInterface.glossary_selected.connect(self.settingsInterface.set_glossary_path)
 
@@ -65,19 +67,23 @@ class MainWindow(FluentWindow):
         self._load_persisted_settings()
 
     def initWindow(self):
-        self.resize(900, 700)
+        self.resize(1050, 750)  # Slightly larger for a more premium look
         self.setWindowTitle("RPGMLocalizer")
 
         icon_path = existing_resource_path("icon.png", "icon.ico")
         if icon_path:
             self.setWindowIcon(QIcon(icon_path))
         
-        # Center on screen
-        desktop = QApplication.screens()[0].availableGeometry()
-        w, h = desktop.width(), desktop.height()
-        self.move(w//2 - self.width()//2, h//2 - self.height()//2)
+        # Center on screen (guard against headless Linux with no screens)
+        screens = QApplication.screens()
+        if screens:
+            desktop = screens[0].availableGeometry()
+            w, h = desktop.width(), desktop.height()
+            self.move(w // 2 - self.width() // 2, h // 2 - self.height() // 2)
         
-        # Theme is set in main.py before widget creation
+        # Disable Mica effect inheritance to prevent color corruption on custom Windows themes
+        # This keeps the UI colors consistent and independent of the system theme.
+        self.setMicaEffectEnabled(False)
 
     def start_pipeline(self, data: dict):
         # Check if thread exists AND is still valid (not deleted)
@@ -95,10 +101,13 @@ class MainWindow(FluentWindow):
         # Parser Settings
         settings["translate_notes"] = self.settingsInterface.chk_translate_notes.isChecked()
         settings["translate_comments"] = self.settingsInterface.chk_translate_comments.isChecked()
+        settings["plugin_js_ui_extraction"] = self.settingsInterface.chk_plugin_js_ui_extraction.isChecked()
         
         # Formatting Settings
         settings["visustella_wordwrap"] = self.settingsInterface.chk_visustella_wordwrap.isChecked()
         settings["auto_wordwrap"] = self.settingsInterface.chk_auto_wordwrap.isChecked()
+        settings["wordwrap_limit_standard"] = self.settingsInterface.slider_wrap_standard.value()
+        settings["wordwrap_limit_portrait"] = self.settingsInterface.slider_wrap_portrait.value()
         
         # Pipeline Settings
         settings["backup_enabled"] = self.settingsInterface.chk_backup.isChecked()
@@ -107,6 +116,7 @@ class MainWindow(FluentWindow):
         # Glossary Settings
         if self.settingsInterface.chk_glossary.isChecked() and self.settingsInterface.glossary_path:
             settings["glossary_path"] = self.settingsInterface.glossary_path
+            settings["use_glossary"] = True
 
         # Filtering Settings
         regex_text = self.settingsInterface.txt_regex.toPlainText()
@@ -117,13 +127,14 @@ class MainWindow(FluentWindow):
         if self.exportInterface.export_path:
             settings["export_path"] = self.exportInterface.export_path
             settings["export_only"] = self.exportInterface.chk_export_only.isChecked()
+            settings["export_distinct"] = self.exportInterface.chk_distinct_export.isChecked()
         if self.exportInterface.import_path:
             settings["import_path"] = self.exportInterface.import_path
             
         # Performance Settings
-        # Custom SliderSettingCard exposes .value() directly
         settings["batch_size"] = self.settingsInterface.slider_batch_size.value()
         settings["concurrent_requests"] = self.settingsInterface.slider_concurrent.value()
+        settings["progress_throttle_ms"] = self.settingsInterface.slider_throttle.value()
 
         # Network Settings
         settings["use_multi_endpoint"] = self.settingsInterface.chk_multi_endpoint.isChecked()
@@ -155,7 +166,6 @@ class MainWindow(FluentWindow):
         # 4. Update UI State
         self.homeInterface.set_running(True)
         self.consoleInterface.clear()
-        # Switch to console automatically to show progress? Maybe not, keep on home.
         
         # 5. Start
         self.thread.start()
@@ -173,6 +183,32 @@ class MainWindow(FluentWindow):
             self._save_persisted_settings(self._collect_persisted_settings())
         except Exception:
             pass
+
+        # Stop the ConsoleLog flush timer to prevent late GUI access
+        try:
+            self.consoleInterface._flush_timer.stop()
+        except Exception:
+            pass
+
+        # Gracefully shut down the pipeline thread if it is still running
+        try:
+            if self.pipeline is not None:
+                self.pipeline.stop()
+        except (RuntimeError, AttributeError):
+            pass
+
+        try:
+            if self.thread is not None and self.thread.isRunning():
+                self.thread.quit()
+                if not self.thread.wait(3000):  # 3-second grace period
+                    self.thread.terminate()
+                    self.thread.wait(1000)
+        except (RuntimeError, AttributeError):
+            pass
+
+        self.thread = None
+        self.pipeline = None
+
         super().closeEvent(event)
 
     def _collect_persisted_settings(self) -> dict:
@@ -189,13 +225,17 @@ class MainWindow(FluentWindow):
 
         data["translate_notes"] = self.settingsInterface.chk_translate_notes.isChecked()
         data["translate_comments"] = self.settingsInterface.chk_translate_comments.isChecked()
+        data["plugin_js_ui_extraction"] = self.settingsInterface.chk_plugin_js_ui_extraction.isChecked()
         data["visustella_wordwrap"] = self.settingsInterface.chk_visustella_wordwrap.isChecked()
         data["auto_wordwrap"] = self.settingsInterface.chk_auto_wordwrap.isChecked()
+        data["wordwrap_limit_standard"] = self.settingsInterface.slider_wrap_standard.value()
+        data["wordwrap_limit_portrait"] = self.settingsInterface.slider_wrap_portrait.value()
         data["backup_enabled"] = self.settingsInterface.chk_backup.isChecked()
         data["use_cache"] = self.settingsInterface.chk_cache.isChecked()
 
         data["batch_size"] = self.settingsInterface.slider_batch_size.value()
         data["concurrent_requests"] = self.settingsInterface.slider_concurrent.value()
+        data["progress_throttle_ms"] = self.settingsInterface.slider_throttle.value()
 
         data["use_multi_endpoint"] = self.settingsInterface.chk_multi_endpoint.isChecked()
         data["enable_lingva_fallback"] = self.settingsInterface.chk_lingva_fallback.isChecked()
@@ -230,6 +270,7 @@ class MainWindow(FluentWindow):
 
     def on_finished(self, success, message):
         self.homeInterface.set_running(False)
+        self.exportInterface.set_processing_state(False)
         self.homeInterface.update_status(message if success else f"Error: {message}")
         
         level = "success" if success else "error"
@@ -247,7 +288,8 @@ class MainWindow(FluentWindow):
         self.on_log_message("info", f"Stage: {message}")
 
     def on_log_message(self, level, message):
-        self.consoleInterface.log(level, message)
+        if level != "debug":
+            self.consoleInterface.log(level, message)
         
     def clear_cache(self):
         from src.core.cache import get_cache
@@ -265,6 +307,7 @@ class MainWindow(FluentWindow):
                 orient=Qt.Orientation.Horizontal,
                 isClosable=True,
                 position=InfoBarPosition.TOP_RIGHT,
+                duration=3000,
                 parent=self
             )
         except Exception as e:

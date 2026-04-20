@@ -4,6 +4,7 @@ import os
 from typing import Any, Dict
 
 from src.utils.app_paths import get_settings_path
+from src.utils.file_ops import safe_write
 
 
 class SettingsStore:
@@ -27,7 +28,11 @@ class SettingsStore:
 
     def save(self, data: Dict[str, Any]) -> None:
         try:
-            with open(self.path, "w", encoding="utf-8") as f:
+            # Ensure the parent directory exists (first-run scenario)
+            dir_name = os.path.dirname(self.path)
+            if dir_name:
+                os.makedirs(dir_name, exist_ok=True)
+            with safe_write(self.path, mode="w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=True)
         except Exception as e:
             self.logger.warning(f"Failed to save settings: {e}")

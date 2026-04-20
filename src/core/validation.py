@@ -3,10 +3,52 @@ Validation module for RPGMLocalizer.
 Ensures translation integrity and safety before saving files.
 """
 import logging
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any, Tuple, Optional
+from dataclasses import dataclass, field
 from src.utils.placeholder import validate_restoration
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ValidationResult:
+    """
+    Result of a validation check with detailed status and error information.
+    
+    Attributes:
+        is_valid: Whether the validation passed
+        errors: List of error messages
+        warnings: List of warning messages
+        metadata: Additional validation metadata
+    """
+    is_valid: bool
+    errors: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    
+    @classmethod
+    def success(cls, metadata: Optional[Dict[str, Any]] = None) -> 'ValidationResult':
+        """Create a successful validation result."""
+        return cls(is_valid=True, metadata=metadata or {})
+    
+    @classmethod
+    def failure(cls, errors: List[str], metadata: Optional[Dict[str, Any]] = None) -> 'ValidationResult':
+        """Create a failed validation result."""
+        return cls(is_valid=False, errors=errors, metadata=metadata or {})
+    
+    @classmethod
+    def warning(cls, message: str, metadata: Optional[Dict[str, Any]] = None) -> 'ValidationResult':
+        """Create a result with a warning (still valid)."""
+        return cls(is_valid=True, warnings=[message], metadata=metadata or {})
+    
+    def add_error(self, error: str) -> None:
+        """Add an error message and mark as invalid."""
+        self.errors.append(error)
+        self.is_valid = False
+    
+    def add_warning(self, warning: str) -> None:
+        """Add a warning message."""
+        self.warnings.append(warning)
 
 class Validator:
     """Static validation utilities."""

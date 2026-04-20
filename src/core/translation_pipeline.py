@@ -15,7 +15,7 @@ import re
 import time
 from collections import Counter
 from enum import Enum
-from typing import Any
+from typing import Any, Dict, List, Optional, Tuple
 
 from PyQt6.QtCore import QObject, pyqtSignal as Signal
 

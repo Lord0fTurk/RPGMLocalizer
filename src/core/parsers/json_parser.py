@@ -10,7 +10,7 @@ import logging
 import copy
 import threading
 from collections import Counter
-from typing import List, Dict, Any, Set
+from typing import Dict, List, Any, Set, Tuple
 from .base import BaseParser
 from .asset_text import asset_identifier_candidates, contains_asset_tuple_reference, contains_explicit_asset_reference, normalize_asset_text
 from .specialized_plugins import get_specialized_parser

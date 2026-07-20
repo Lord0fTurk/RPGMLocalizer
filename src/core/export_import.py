@@ -9,6 +9,8 @@ import logging
 from typing import List, Tuple, Dict, Optional, Set
 from dataclasses import dataclass, field
 
+from src.utils.file_ops import safe_write
+
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -75,7 +77,7 @@ class TranslationExporter:
         """Export to CSV optimized for Excel/Google Sheets."""
         data_to_export = self._prepare_export_data(distinct)
         try:
-            with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
+            with safe_write(output_path, 'w', encoding='utf-8-sig', newline='') as f:
                 writer = csv.DictWriter(f, fieldnames=self.CSV_COLUMNS, quoting=csv.QUOTE_ALL)
                 writer.writeheader()
                 
@@ -115,7 +117,7 @@ class TranslationExporter:
                 ]
             }
             
-            with open(output_path, 'w', encoding='utf-8') as f:
+            with safe_write(output_path, 'w', encoding='utf-8') as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
             
             logger.info(f"Exported {len(data_to_export)} entries to JSON: {output_path}")

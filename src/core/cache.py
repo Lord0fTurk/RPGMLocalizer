@@ -10,6 +10,7 @@ from datetime import datetime
 import logging
 
 from src.utils.app_paths import get_cache_dir
+from src.utils.file_ops import safe_write
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +94,7 @@ class TranslationCache:
                 'entries': self.cache
             }
             
-            with open(cache_file, 'w', encoding='utf-8') as f:
+            with safe_write(cache_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False)
             
             self._modified = False

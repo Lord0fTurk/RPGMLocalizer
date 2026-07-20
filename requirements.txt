@@ -5,6 +5,9 @@ PyQt6-Fluent-Widgets[full]>=1.11.2
 # Ruby Marshal parsing for XP/VX/Ace
 rubymarshal>=1.2.10
 
+# Fast JSON serialization (Rust-based, ~7x faster than stdlib json)
+orjson>=3.11.0
+
 # Encoding detection for Ruby/legacy files
 charset-normalizer>=3.4.1
 

@@ -1,0 +1,60 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environment
+.venv/
+venv/
+env/
+.env/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Runtime / cache
+.rpgm_cache/
+.rpgm_staging/
+.rpgm_fonts/
+*.log
+
+# User settings (contains local paths, not for repo)
+settings.json
+
+# Build artifacts
+build/
+dist/
+*.spec.bak
+*.egg-info/
+*.egg
+
+# PyInstaller
+*.manifest
+warn*.txt
+
+# External / research projects (downloaded for analysis, not part of RPGMLocalizer)
+RenPG-Maker-main/
+RenLocalizer/
+
+# Scratch / debugging scripts
+scratch/
+bench_deepcopy.py
+test_res_utf8.txt
+
+# Test game data (optional — uncomment if you want to exclude)
+# TestOyun/
+# Oyunlar/
+
+# Unrelated binaries
+kilo.exe
+opencode.exe

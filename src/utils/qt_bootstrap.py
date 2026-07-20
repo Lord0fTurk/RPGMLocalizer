@@ -203,6 +203,18 @@ def bootstrap_qt_environment() -> dict[str, str]:
     """Configure Qt-related environment variables before importing PyQt6."""
     os.environ.setdefault("QT_API", "pyqt6")
 
+    # ----- System theme isolation -----
+    # Force Fusion style to completely bypass OS theme palette inheritance.
+    # Custom/high-contrast Windows themes can set all QPalette roles to white,
+    # producing a blank white screen.  Fusion uses its own palette internally.
+    os.environ.setdefault("QT_STYLE_OVERRIDE", "fusion")
+    # Disable the platform theme plugin so Qt never queries Windows / macOS
+    # for colours, fonts, or style hints.
+    os.environ.setdefault("QT_QPA_PLATFORMTHEME", "")
+    # Prevent Qt from applying Windows accessibility / high-contrast palettes.
+    if sys.platform == "win32":
+        os.environ.setdefault("QT_NO_ACCESSIBILITY", "0")  # keep a11y but block theme
+
     diagnostics = {
         "platform": sys.platform,
         "selected_mode": "native",

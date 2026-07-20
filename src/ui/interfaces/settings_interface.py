@@ -272,6 +272,30 @@ class SettingsInterface(ScrollArea):
         self.glossaryGroup.addSettingCard(self.card_glossary_path)
         self.glossaryGroup.addSettingCard(self.btn_create_sample)
 
+        # Font Group
+        self.fontGroup = SettingCardGroup("Font", self.scrollWidget)
+
+        self.chk_noto_font = SwitchSettingCard(
+            FIF.FONT,
+            "Use Noto Sans (Recommended)",
+            "Prepends Noto Sans (Latin + Cyrillic + Greek) to the game's font stack. "
+            "Missing glyphs (CJK, Arabic, etc.) still fall back to the original game font. "
+            "Safely fixes tofu (□□□) for European/Cyrillic target languages.",
+            parent=self.fontGroup,
+        )
+        self.chk_noto_font.setChecked(False)
+
+        self.card_font_path = PushSettingCard(
+            "Select Font",
+            FIF.FOLDER,
+            "Custom Font (.ttf/.otf)",
+            "None",
+            self.fontGroup,
+        )
+
+        self.fontGroup.addSettingCard(self.chk_noto_font)
+        self.fontGroup.addSettingCard(self.card_font_path)
+
         # Filtering Group
         self.filterGroup = SettingCardGroup("Filters", self.scrollWidget)
         
@@ -299,6 +323,7 @@ class SettingsInterface(ScrollArea):
         self.expandLayout.addWidget(self.formattingGroup)
         self.expandLayout.addWidget(self.networkGroup)
         self.expandLayout.addWidget(self.glossaryGroup)
+        self.expandLayout.addWidget(self.fontGroup)
         self.expandLayout.addWidget(self.filterGroup)
         self.expandLayout.addStretch(1)
         
@@ -312,8 +337,19 @@ class SettingsInterface(ScrollArea):
         # Connect signals
         self.card_glossary_path.clicked.connect(self._select_glossary)
         self.btn_create_sample.clicked.connect(self._create_sample)
+        self.card_font_path.clicked.connect(self._select_font)
 
         self.glossary_path = ""
+
+    def _select_font(self):
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Font File", "",
+            "Font Files (*.ttf *.otf);;TrueType (*.ttf);;OpenType (*.otf)",
+        )
+        if path:
+            self.card_font_path.setContent(path)
+            self.chk_noto_font.setChecked(False)
 
     def _select_glossary(self):
         from PyQt6.QtWidgets import QFileDialog
@@ -370,6 +406,11 @@ class SettingsInterface(ScrollArea):
         
         self.slider_wrap_standard.setValue(settings.get("wordwrap_limit_standard", 54))
         self.slider_wrap_portrait.setValue(settings.get("wordwrap_limit_portrait", 44))
+
+        self.chk_noto_font.setChecked(settings.get("font_use_noto", False))
+        font_path = settings.get("font_path", "")
+        if font_path:
+            self.card_font_path.setContent(font_path)
 
         self.chk_backup.setChecked(settings.get("backup_enabled", True))
         self.chk_cache.setChecked(settings.get("use_cache", True))

@@ -4,12 +4,13 @@ Handles extraction and injection of translatable text from JSON data files.
 """
 import json
 import os
+import orjson
 import re
 import logging
 import copy
 import threading
 from collections import Counter
-from typing import List, Dict, Any, Tuple, Set
+from typing import List, Dict, Any, Set
 from .base import BaseParser
 from .asset_text import asset_identifier_candidates, contains_asset_tuple_reference, contains_explicit_asset_reference, normalize_asset_text
 from .specialized_plugins import get_specialized_parser
@@ -52,129 +53,12 @@ JSON_WRITE_PLUGINS: Dict[str, Any] = {
 
 def json_write(data: Any, compact: bool = True) -> str:
     """Serialize data to JSON with consistent settings."""
-    settings = JSON_WRITE_COMPACT if compact else JSON_WRITE_PRETTY
-    return json.dumps(data, **settings)
+    return orjson.dumps(data).decode('utf-8')
 
 
 def json_write_plugins(data: Any) -> str:
     """Serialize plugins.js data with settings suitable for JS files."""
-    return json.dumps(data, **JSON_WRITE_PLUGINS)
-
-
-# =============================================================================
-# RPG Maker Code Protection for JSON Storage
-# =============================================================================
-
-_RPGM_SPACE_FIX_RE = re.compile(r'(\\+)\s+([a-zA-Z{}])')
-_RPGM_CODE_PLACEHOLDER_RE = re.compile(r'\x00RPGM(\d+)\x00')
-
-_RPGM_CODE_PATTERNS = [
-    r'\\+[VvCcNnPpGgIiSs]\[[\d\s,]*\]',        # Standard RM codes (\C[0], \\C[0])
-    r'\\+[Ff][SsBbIi](?:\[[\d\s,\-]*\])?',      # Font settings (\FS[n], \FB, etc.)
-    r'\\+[Pp][XxYy]\[[\d\s,.\-]*\]',            # Position codes (\PX[n], \PY[n])
-    r'\\+(?:MSGCore|pop|WordWrap)\[[^\]]*\]',    # Common plugin codes
-    r'\\+[.!|^${}><]',                          # Control characters (\., \!, etc.)
-    r'\\+[{}]',                                 # Ruby script escaped braces (\\{, \\})
-    r'%(?:[\d.\-+]*[sdifS])',                   # Ruby/C-style printf formatters (%s, %d, %04d)
-    r'\\\^',                                    # Wait for input (\\^)
-    r'\\{[A-Za-z_][A-Za-z0-9_]{0,40}\\}',      # Variable interpolation {name}
-    r'#\{[^}]+\}',                              # Ruby interpolation #{}
-    r'\$\{[^}]+\}',                             # Alternative interpolation ${}
-    r'<[^>]+>',                                 # HTML-like tags
-    r'\[\[[^\]]+\]\]',                          # Double bracket tags [[tag]]
-    r'\{\{[^}]+\}\}',                           # Double brace tags {{tag}}
-]
-
-
-def _protect_rpgm_codes(text: str) -> Tuple[str, List[str]]:
-    """
-    Protect RPG Maker escape codes before translation API processing.
-    
-    Replaces codes with null-byte delimited placeholders to prevent
-    corruption by translation APIs that insert spaces.
-    
-    Args:
-        text: Input text potentially containing RPG Maker codes
-        
-    Returns:
-        Tuple of (protected_text, code_list) where code_list contains
-        the extracted codes in order
-    """
-    if not text:
-        return text, []
-    
-    codes: List[str] = []
-    
-    def replacer(match):
-        codes.append(match.group(0))
-        return f'\x00RPGM{len(codes) - 1}\x00'
-    
-    pattern = '|'.join(_RPGM_CODE_PATTERNS)
-    protected = re.sub(pattern, replacer, text)
-    
-    return protected, codes
-
-
-def _restore_rpgm_codes(text: str, codes: List[str]) -> str:
-    """
-    Restore RPG Maker codes after translation processing.
-    
-    Replaces null-byte delimited placeholders with the original codes.
-    
-    Args:
-        text: Text with placeholder markers
-        codes: List of original RPG Maker codes
-        
-    Returns:
-        Text with codes restored
-    """
-    if not text or not codes:
-        return text
-    
-    def replacer(match):
-        idx = int(match.group(1))
-        if 0 <= idx < len(codes):
-            return codes[idx]
-        return match.group(0)
-    
-    return _RPGM_CODE_PLACEHOLDER_RE.sub(replacer, text)
-
-
-def sanitize_translation_for_json(text: str) -> str:
-    """
-    Sanitize translated text for safe JSON storage.
-    
-    Steps:
-    1. Fix common translation API space corruption
-    2. Validate no illegal JSON characters
-    3. Preserve structure
-    
-    Args:
-        text: Translated text to sanitize
-        
-    Returns:
-        Sanitized text safe for JSON storage
-    """
-    if not text:
-        return text
-    
-    result = text
-    
-    result = _RPGM_SPACE_FIX_RE.sub(lambda m: m.group(1) + m.group(2), result)
-    
-    if not _is_valid_json_string(result):
-        logger.warning(f"Potential JSON issue in sanitization: {result[:50]}...")
-    
-    return result
-
-
-def _is_valid_json_string(text: str) -> bool:
-    """Check if text is safe for JSON storage."""
-    try:
-        json.dumps(text)
-        return True
-    except (ValueError, TypeError):
-        return False
+    return orjson.dumps(data).decode('utf-8')
 
 
 # =============================================================================
@@ -509,6 +393,7 @@ class JsonParser(BaseParser):
             legacy_script_extractor=self._extract_legacy_script_entries,
             legacy_mz_plugin_extractor=self._extract_legacy_mz_plugin_entries,
             is_known_asset_identifier=self._matches_known_asset_identifier,
+            reset_event_context=self._reset_event_context,
         )
         self._invariant_verifier = JsonTechnicalInvariantVerifier(self._escape_path_key)
         self._asset_invariant_verifier = JsonAssetInvariantVerifier(
@@ -522,6 +407,11 @@ class JsonParser(BaseParser):
         self._last_speaker_name: str = ""
         self._active_picture_bust: bool = False
         self._current_file_basename: str = ""
+
+    def _reset_event_context(self) -> None:
+        """Reset per-event face/speaker state between events."""
+        self._last_face_name = ""
+        self._last_speaker_name = ""
 
     def _escape_path_key(self, key: str) -> str:
         """Escape dots in dict keys so path parsing is reversible."""
@@ -844,6 +734,11 @@ class JsonParser(BaseParser):
                 return True
             if family_profile and family_profile.allow_single_word_text and self._looks_like_family_text_value(key, value, family_profile):
                 return True
+            # Single ASCII word with a text-indicating key (e.g. textExit: "Exit")
+            if len(value) >= 3 and value.isascii() and value.isalpha():
+                k = key.lower() if isinstance(key, str) else ""
+                if any(marker in k for marker in self.TEXT_KEY_INDICATORS):
+                    return True
             hints = param_metadata.combined_hints()
             return any(marker in hints for marker in self.PLUGIN_METADATA_TEXT_HINTS) or '%' in value
 
@@ -1591,6 +1486,8 @@ class JsonParser(BaseParser):
 
     def _process_list(self, data: list, current_path: str):
         """Process a list node, including event commands with lookahead for multi-line blocks."""
+        self._last_face_name = ""
+        self._active_picture_bust = False
         in_code_block = False
         i = 0
         while i < len(data):
@@ -1878,8 +1775,32 @@ class JsonParser(BaseParser):
                 path = f"{base_path}.@SCRIPTMERGE{line_count}.@JS{idx}"
             else:
                 path = f"{base_path}.parameters.0.@JS{idx}"
-            
-            target.append((path, value, "dialogue_block"))
+
+            tag, value = self._detect_dialogue_prefix(value, path)
+            target.append((path, value, tag))
+
+    @staticmethod
+    def _detect_dialogue_prefix(value: str, path: str = "") -> tuple[str, str]:
+        """Detect dialogue-with-speaker patterns from script command conventions.
+
+        Some plugins store dialogue as ``"Speaker.Dialogue text"`` inside
+        ``$gameVariables.setValue(N, ...)`` calls.  This method strips the
+        speaker prefix from the value and returns a tag enriched with
+        speaker context so the merger can treat it as dialogue.
+
+        Returns (tag, cleaned_value).
+        """
+        import re as _re
+        m = _re.match(r'^([A-Z][A-Za-z]*\.[A-Z][A-Za-z]*)\.\s*(.+)$', value)
+        if not m:
+            m = _re.match(r'^([A-Z][a-z]+(?:\s[A-Z][a-z]+)?)\.\s*(.+)$', value)
+        if not m:
+            return ("dialogue_block", value)
+        speaker = m.group(1).replace(".", " ").strip()
+        clean = m.group(2)
+        if len(clean) < 3 and " " not in clean:
+            return ("dialogue_block", value)
+        return (f"dialogue_block | {speaker}", clean)
 
     def _process_mz_plugin_block(self, commands: list, list_path: str, start_index: int):
         """
@@ -2068,12 +1989,12 @@ class JsonParser(BaseParser):
         if family_profile and family_profile.allow_single_word_text and self._looks_like_family_text_value(key, cleaned, family_profile):
             return self._is_extractable_runtime_text(cleaned, is_dialogue=True)
 
-        if self._looks_like_textual_value(cleaned):
+        if self._looks_like_textual_value(cleaned, key):
             return self._is_extractable_runtime_text(cleaned, is_dialogue=True)
 
         return False
 
-    def _looks_like_textual_value(self, value: str) -> bool:
+    def _looks_like_textual_value(self, value: str, key: str | None = None) -> bool:
         """Return True when a value looks like prose rather than an identifier."""
         if not isinstance(value, str):
             return False
@@ -2084,7 +2005,15 @@ class JsonParser(BaseParser):
             return True
         if any(ord(char) > 127 for char in stripped):
             return True
-        return any(mark in stripped for mark in ("!", "?", ".", ":", ";", "%")) and len(stripped) >= 4
+        if any(mark in stripped for mark in ("!", "?", ".", ":", ";", "%")) and len(stripped) >= 4:
+            return True
+        # Single ASCII word with a text-indicating key: allow short UI labels
+        # like "Exit", "Save", "Auto" when the key hints at user-facing text.
+        if key and len(stripped) >= 3 and stripped.isascii() and stripped.isalpha():
+            k = key.lower() if isinstance(key, str) else ""
+            if any(marker in k for marker in self.TEXT_KEY_INDICATORS):
+                return True
+        return False
 
     def _looks_like_low_fp_display_text(self, key: str, value: str) -> bool:
         """Return True when a candidate looks like user-facing text with low FP risk."""
@@ -3097,7 +3026,11 @@ class JsonParser(BaseParser):
         if not segments:
             return
 
-        replacements = {segment_index: text for segment_index, text in updates if isinstance(text, str)}
+        replacements = {
+            segment_index: text
+            for segment_index, text in updates
+            if isinstance(text, str) and text.strip()
+        }
         if not replacements:
             return
 

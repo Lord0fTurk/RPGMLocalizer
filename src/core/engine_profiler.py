@@ -113,6 +113,21 @@ class ProjectProfile:
     suggested_worker_count: int
     suggested_batch_strategy: str
     has_wordwrap_plugins: bool = False
+    window_width: int = 0
+    window_height: int = 0
+    game_font_name: str | None = None
+
+    def estimated_char_limit(self) -> int:
+        """Estimate standard dialogue character limit from game resolution."""
+        if self.window_width <= 0:
+            return 54
+        return max(30, int((self.window_width * 0.88 - 32) / 13.5))
+
+    def estimated_portrait_char_limit(self) -> int:
+        """Estimate portrait (face-active) dialogue character limit from resolution."""
+        if self.window_width <= 0:
+            return 44
+        return max(24, int((self.window_width * 0.88 - 32 - 144) / 13.5))
 
 
 class EngineProfiler:
@@ -205,6 +220,8 @@ class EngineProfiler:
 
         worker_count = self._calculate_worker_count(plugin_data, engine_profile)
         batch_strategy = self._determine_batch_strategy(engine_profile, plugin_data)
+        window_w, window_h = self._detect_resolution()
+        game_font = self._detect_game_font()
 
         return ProjectProfile(
             project_path=self.project_path,
@@ -218,7 +235,10 @@ class EngineProfiler:
             has_quest_signals=has_quest,
             suggested_worker_count=worker_count,
             suggested_batch_strategy=batch_strategy,
-            has_wordwrap_plugins=self._detect_wordwrap_signals(plugin_data)
+            has_wordwrap_plugins=self._detect_wordwrap_signals(plugin_data),
+            window_width=window_w,
+            window_height=window_h,
+            game_font_name=game_font,
         )
 
     def detect_engine(self) -> EngineProfile:
@@ -665,6 +685,37 @@ class EngineProfiler:
             return any(pattern.search(content) for pattern in self.WORDWRAP_SIGNALS)
         except OSError:
             return False
+
+    def _detect_resolution(self) -> tuple[int, int]:
+        """Detect game window resolution from package.json.
+        
+        Returns (width, height) or (0, 0) if not found.
+        Standard RPG Maker resolutions:
+          MV default: 816×624
+          MZ default: 1104×624
+          Common mod: 1280×720
+          Full HD:    1920×1080
+        Ruby era (XP/VX/VXA) uses compiled exe — not detectable from data files.
+        """
+        package_json_path = self._find_package_json()
+        if not package_json_path:
+            return (0, 0)
+        try:
+            with open(package_json_path, "r", encoding="utf-8-sig") as f:
+                data = json.load(f)
+            window = data.get("window", {})
+            w = window.get("width", 0)
+            h = window.get("height", 0)
+            if isinstance(w, (int, float)) and isinstance(h, (int, float)) and w > 0 and h > 0:
+                return (int(w), int(h))
+        except (json.JSONDecodeError, OSError, KeyError):
+            pass
+        return (0, 0)
+
+    def _detect_game_font(self) -> str | None:
+        """Detect the active game font from gamefont.css or plugins."""
+        from src.core.font_manager import detect_game_font
+        return detect_game_font(self.project_path)
 
     def _confidence_level(self, confidence: float) -> str:
         """Get confidence level description."""

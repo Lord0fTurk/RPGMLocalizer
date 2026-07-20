@@ -35,6 +35,7 @@ class StructuredJsonExtractor:
         legacy_script_extractor: LegacyScriptExtractor | None = None,
         legacy_mz_plugin_extractor: LegacyMZPluginExtractor | None = None,
         is_known_asset_identifier: Callable[[str], bool] | None = None,
+        reset_event_context: Callable[[], None] | None = None,
     ) -> None:
         self._escape_path_key = escape_path_key
         self._is_safe_to_translate = is_safe_to_translate
@@ -42,6 +43,7 @@ class StructuredJsonExtractor:
         self._legacy_script_extractor = legacy_script_extractor
         self._legacy_mz_plugin_extractor = legacy_mz_plugin_extractor
         self._is_known_asset_identifier = is_known_asset_identifier
+        self._reset_event_context = reset_event_context
 
     def supports_file(self, file_path: str) -> bool:
         """Return True when structured object mapping is supported."""
@@ -172,14 +174,47 @@ class StructuredJsonExtractor:
             pages = event.get("pages")
             if not isinstance(pages, list):
                 continue
-            for page_index, page in enumerate(pages):
-                if not isinstance(page, dict):
-                    continue
-                commands = page.get("list")
-                if not isinstance(commands, list):
-                    continue
-                list_path = f"events.{event_index}.pages.{page_index}.list"
-                self._extract_event_list(commands, list_path, entries)
+            self._extract_pages_with_priority(pages, event_index, entries)
+
+    def _page_has_conditions(self, page: dict) -> bool:
+        """Check if an event page has any condition that gates activation."""
+        cond = page.get("conditions")
+        if not isinstance(cond, dict):
+            return False
+        return any(
+            cond.get(key, False)
+            for key in ("switch1Valid", "switch2Valid", "variableValid",
+                         "selfSwitchValid", "actorValid", "itemValid")
+        )
+
+    def _extract_pages_with_priority(
+        self, pages: list, parent_index: int, entries: List[ExtractionEntry],
+        path_prefix: str = "",
+    ) -> None:
+        """Extract event pages respecting RPG Maker's page priority.
+
+        RPG Maker evaluates pages from highest index downward.  The first
+        page whose conditions are met wins.  A page with *no* conditions is
+        always active and blocks all lower-index pages.
+
+        Strategy: walk pages in reverse order.  Extract every conditional
+        page, but stop after the first unconditional page (lower pages are
+        unreachable at runtime and would waste API quota).
+        """
+        for page_index in range(len(pages) - 1, -1, -1):
+            page = pages[page_index]
+            if not isinstance(page, dict):
+                continue
+            commands = page.get("list")
+            if not isinstance(commands, list):
+                continue
+            if path_prefix:
+                list_path = f"{path_prefix}.{page_index}.list"
+            else:
+                list_path = f"events.{parent_index}.pages.{page_index}.list"
+            self._extract_event_list(commands, list_path, entries)
+            if not self._page_has_conditions(page):
+                break  # unconditional page blocks all lower-index pages
 
     def _extract_common_events(self, data: Any, entries: List[ExtractionEntry]) -> None:
         if not isinstance(data, list):
@@ -209,16 +244,11 @@ class StructuredJsonExtractor:
             pages = troop.get("pages")
             if not isinstance(pages, list):
                 continue
-            for page_index, page in enumerate(pages):
-                if not isinstance(page, dict):
-                    continue
-                commands = page.get("list")
-                if not isinstance(commands, list):
-                    continue
-                list_path = f"{troop_index}.pages.{page_index}.list"
-                self._extract_event_list(commands, list_path, entries)
+            self._extract_pages_with_priority(pages, troop_index, entries, path_prefix=f"{troop_index}.pages")
 
     def _extract_event_list(self, commands: list[Any], list_path: str, entries: List[ExtractionEntry]) -> None:
+        if self._reset_event_context is not None:
+            self._reset_event_context()
         index = 0
         while index < len(commands):
             command = commands[index]

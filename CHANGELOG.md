@@ -2,6 +2,286 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0] - 2026-07-13
+
+### Breaking: Segment-Based Code Protection Replaces Token System
+
+The old `⟦RPGM{ns}_{TYPE}_{id}⟧` token-based protection with 4-phase fuzzy recovery
+has been replaced by **structural code/text separation**. RPG Maker control codes
+are now split into alternating TEXT/CODE segments **before** translation and
+re-inserted **after** — they are NEVER exposed to the translation API.
+
+**What changed:**
+- **NEW** `src/core/text_segmenter.py` — core module that splits RPGM strings into
+  TEXT/CODE segments, sends only clean text (joined by `|||TXTSEG|||`) to the
+  translator, and reassembles codes after translation.
+- **REWRITTEN** `src/core/syntax_guard_rpgm.py` — from 515 lines (4-phase fuzzy
+  recovery + regex tokenization) to ~80 lines as a thin backward-compat wrapper
+  around `text_segmenter.py`.
+- **REWRITTEN** `src/core/translator.py` — all RPGM code protection logic removed.
+  Translator no longer calls `protect_for_translation()` / `restore_from_translation()`.
+  Uses `segment_text()` + `reassemble()` directly. No more token maps, no more
+  HTMLShield fallback, no more 4-phase recovery.
+- **REMOVED** `src/utils/placeholder.py` — `fuzzy_repair_tokens()` and
+  `validate_restoration()` no longer needed by production code (kept for
+  `html_shield.py` backward-compat reference only).
+- **REMOVED** `src/core/parsers/json_parser._protect_rpgm_codes()` — dead code.
+- **SIMPLIFIED** `src/core/validation.py` — `validate_translation_entry()` is
+  now a no-op (codes can never be corrupted by the segmenter).
+
+**Why:** The old token system relied on Google correctly preserving `⟦...⟧`
+tokens through translation + 4 phases of fuzzy recovery. Every phase was a
+potential failure point. The new approach is **simpler, faster, safer**:
+codes are structurally separated from text and can NEVER be corrupted.
+
+### Fixed: Post-Batch Identity Retry RPGM Code Leak (Critical)
+
+- `translate_batch()` post-batch identity retry was sending `results[idx].original_text`
+  (containing RPG Maker codes like `\c[3]`, `\V[1]`, `[sad]`) directly to
+  `_try_translate()` without segmentation. This bypassed the entire v0.7.0
+  segment-based protection model — codes were exposed to the translation API.
+- **Solution:** `retry_one()` now segments the original text via `segment_text()`,
+  sends only clean TEXT segments (joined by `|||TXTSEG|||`) to the API, and
+  reassembles codes via `segmenter_reassemble()` on the result.
+
+### Fixed: Adaptive Concurrency Dead Code (Metrics Never Recorded)
+
+- `_record_metric()` was only called on successful non-identity responses with
+  a fixed dummy latency of `0.5`, making `fail_rate` always 0% and `avg_latency`
+  always ~0.5 — the adaptation loop never triggered.
+- **Solution:** Real latency is now measured via `time.time()` around the HTTP
+  call. Metrics are recorded for all outcomes: success (real latency + True),
+  identity (real latency + True), 429 (real latency + False), other non-200
+  (real latency + False), and exceptions (timeout + False).
+
+### Fixed: `|||TXTSEG|||` Whitespace Normalization Missing
+
+- Google sometimes inserts spaces into the `|||TXTSEG|||` segment separator
+  (e.g. `| | | T X T S E G | | |`), causing `_TSS_CANONICAL_RE.split()` to
+  fail and falling through to proportional positioning.
+- **Solution:** Added whitespace normalization regex for `|||TXTSEG|||`
+  alongside the existing `|||RPGMSEP_S/M/I|||` normalizations.
+
+### Fixed: `orjson` Missing From `requirements.txt`
+
+- `orjson` is imported by `json_parser.py` and `translation_pipeline.py` for
+  fast JSON serialization (v0.7.0 feature) but was not listed in `requirements.txt`.
+- **Solution:** Added `orjson>=3.11.0` to `requirements.txt`.
+
+### Fixed: `safe_write` Bypassed in Cache, Glossary, and Export/Import
+
+- `cache.py`, `glossary.py`, and `export_import.py` were using bare `open(...'w')`
+  for file writes instead of `safe_write`, risking data loss on write failure.
+- **Solution:** All four write paths now use `safe_write` context manager.
+
+### Fixed: Bare `except:` Clauses in `ruby_parser.py`
+
+- Four bare `except:` clauses (lines 1205, 1409, 1415, 1416) suppressed all
+  exceptions including `KeyboardInterrupt` and `SystemExit`.
+- **Solution:** Replaced with specific exception types (`UnicodeEncodeError`,
+  `UnicodeDecodeError`, `Exception`).
+
+### Fixed: Stale Comment in `text_segmenter.py` Proportional Fallback
+
+- The comment at `_proportional_reinsert()` claimed to use the "center of the
+  code's span" but the code used `code_pos` (the start position). Fixed comment.
+
+### Fixed: CHANGELOG Claimed `placeholder.py` Removed
+
+- CHANGELOG v0.7.0 stated `placeholder.py` was "REMOVED" but the file still
+  exists (kept for `html_shield.py` backward-compat). Updated to reflect
+  actual status.
+
+### Fixed: Word-Wrap Dead Code & Portrait Face Leak
+
+- **Resolution-aware scaling never activated** (`translation_pipeline.py`):
+  `"key" in self.settings` was always `True` because UI unconditionally writes
+  all keys — so `estimated_char_limit()` was dead code. Now uses value-vs-default
+  comparison (if slider is at default 54/44, use resolution estimate).
+- **Portrait face name leaked across events** (`json_parser.py`, `ruby_parser.py`,
+  `structured_json_extractor.py`): `_last_face_name` persisted from one event to
+  the next within the same file, causing all subsequent dialogue to be treated
+  as portrait dialogue. Added `_reset_event_context()` callback in structured
+  extractor; Ruby parser resets at `_walk_command_list()` start.
+- **`scroll_text` (code 405) excluded from word-wrap**: Tag filter only matched
+  `message_dialogue`. Extended to include `scroll_text`.
+- **Word-wrap spacing logic simplified**: Removed dead branch in `sp` calculation.
+- **Early return for disabled wrap**: `apply_wordwrap()` now returns immediately
+  when both `visustella_wordwrap` and `auto_wordwrap` are off.
+
+### Added: Resolution-Aware Word-Wrap
+
+- `engine_profiler.py`: `_detect_resolution()` reads `package.json` →
+  `window.width` / `window.height`. `ProjectProfile` gains `window_width`,
+  `window_height`, `estimated_char_limit()`, and `estimated_portrait_char_limit()`.
+- `translation_pipeline.py`: Word-wrap limits now auto-scale from detected game
+  resolution (e.g. 816 px → 50/40 chars, 1104 px → 67/57 chars).
+- Resolution and estimated limits are logged during pipeline startup.
+
+### Added: Event Page Priority (RPG Maker Page Hierarchy)
+
+- `structured_json_extractor.py`: `_page_has_conditions()` + `_extract_pages_with_priority()`
+  respect RPG Maker's page priority rule — pages are evaluated from highest
+  index downward, and the first unconditional page blocks all lower-index pages.
+  Saves API quota by skipping unreachable event text.
+- Applied to both Map events and Troop event pages.
+
+### Added: Magic Byte File-Type Detection
+
+- `asset_text.py`: `guess_extension_from_bytes()` detects PNG, JPG, GIF, OGG,
+  WAV, WebM, and MP4 from file header signatures — robust asset identification
+  even when encrypted files lack readable extensions.
+
+### Added: Script Command Speaker Prefix Heuristic
+
+- `json_parser.py`: `_detect_dialogue_prefix()` — detects `"Speaker.Dialogue text"`
+  patterns inside `$gameVariables.setValue()` calls. Extracts the speaker name
+  as context tag (e.g. `dialogue_block | Alice`) for accurate per-speaker tracking.
+
+### Changed: UI Theme — Ocean Glass (Turkuaz / Mavi / Koyu Cam)
+
+- **Complete visual redesign** with turquoise-ocean-dark glass colour palette:
+  accent `#00b4d8` (vivid turquoise), background `#0a1628` (deep navy),
+  text `#d6e6ff` (ice blue), surface `rgba(17,34,64,0.7)` (frosted glass).
+- `styles.py`: Replaced dead QSS with a clean, modern stylesheet targeting
+  scroll areas, tabs, splitters, tooltips, scroll bars, and console log.
+- `console_log.py`: Updated log colours (error `#e74c3c`, warning `#f0a500`,
+  success `#2ecc71`, info `#7b93b5`).
+- `main.py`: Accent changed from `#0078D4` (Fluent Blue) to `#00b4d8` (Turkuaz).
+- `main_window.py`: Global QSS applied via `setStyleSheet(THEME_QSS)`.
+- **Navigation**: "Support Developer" → "Patreon" (shorter, fits nav bar).
+
+### Added: Font Manager — Multi-Language Font Replacement
+
+- **NEW** `src/core/font_manager.py`: Complete font replacement pipeline.
+  - `measure_font_metrics()`: Reads TTF/OTF metrics (avg char width, ascent/descent)
+    without external dependencies — pure `struct`-based TTF header parsing.
+  - `download_noto_sans()`: Auto-downloads Noto Sans (Latin + Cyrillic + Greek)
+    from Google Fonts GitHub mirror with static fallback. Cached in `.rpgm_fonts/`.
+  - `install_font_to_game()`: Non-destructive font installation — copies TTF to
+    `fonts/`, prepends `@font-face` to `gamefont.css`. Original font definitions
+    are preserved as fallback (CJK and other scripts still work).
+  - `calculate_wrap_limits()`: Recalculates word-wrap character limits based on
+    measured font metrics so text doesn't overflow with the new font.
+- `engine_profiler.py`: `_detect_game_font()` discovers the active font from
+  gamefont.css. `ProjectProfile.game_font_name` carries detection result.
+- `translation_pipeline.py`: `_install_project_font()` runs before translation —
+  downloads Noto Sans (or copies user-selected font), installs it, and
+  recalibrates wrap limits automatically.
+- `settings_interface.py`: New **Font** settings group with "Use Noto Sans
+  (Recommended)" toggle and "Select Custom Font (.ttf/.otf)" button.
+
+### Fixed: System Theme Isolation — White Screen Prevention
+
+- **Qt Fusion style forced** (`qt_bootstrap.py`): `QT_STYLE_OVERRIDE=fusion` and
+  `QT_QPA_PLATFORMTHEME=` environment variables set before any Qt import —
+  completely bypasses OS theme palette inheritance. Custom/high-contrast Windows
+  themes can no longer inject all-white colours via `QPalette`.
+- **Forced dark palette** (`main.py`): After `QApplication` creation, all
+  `QPalette` roles (Window, Base, Text, Button, Highlight) are explicitly set
+  to dark colours — defence-in-depth against edge-case palette leaks.
+
+### Fixed: MV Plugin Command Empty Translation Guard
+
+- `_apply_mv_plugin_command_translation()` now skips empty/whitespace-only
+  translation strings (`if isinstance(text, str) and text.strip()`), preventing
+  empty replacements from deleting plugin command text.
+
+### Fixed: Sequential Save Replaces ThreadPoolExecutor (10min Hang Fix)
+
+- `_save_translations()` in `translation_pipeline.py` was using
+  `ThreadPoolExecutor` with 8 parallel workers. On Windows, NTFS + antivirus
+  contention caused threads to hang indefinitely. The 10-minute hard timeout
+  then abandoned threads (resource leak) while the user waited.
+- **Solution:** Sequential save to a staging directory (`.rpgm_staging/`), then
+  bulk `os.replace()` commit at the end. 66 files now save in ~30-60s instead
+  of 10+ minutes. Progress is reported every 5 files.
+- `orjson.dumps()` (Rust-based, ~7x faster than stdlib `json.dump`) used for
+  all JSON serialization.
+
+### Fixed: Ruby Marshal Binary Patcher Non-IVAR String Support
+
+- `marshal_binary_patcher.py`'s `OffsetTrackingReader` previously only recorded
+  byte ranges for `TYPE_IVAR`-wrapped strings (Ruby strings with encoding
+  metadata). Plain `TYPE_STRING` (non-IVAR) strings — common in RPG Maker XP/VX
+  `.rxdata` / `.rvdata` files — were not tracked, forcing fallback to the
+  legacy `rubymarshal.writer` path which has known encoding bugs.
+- **Solution:** Reader now also records non-IVAR string byte ranges with
+  auto-detected encoding (via `charset_normalizer` + legacy shift_jis/cp932
+  fallbacks). `build_patch()` handles non-IVAR → IVAR upgrade transparently
+  when the new text cannot be encoded in the original encoding.
+
+### Updated Tests
+
+- `tests/test_placeholder.py` — rewritten for segment-based API
+- `tests/test_syntax_guard_rpgm.py` — rewritten for segment-based API
+- `tests/test_json_parser_v070.py` — 3 `TestCaretSymbolProtection` tests
+  updated for segment-based return types
+- **Full suite: 492 passed, 0 failures**
+
+### Added: System.json Switch/Variable Name Extraction
+
+- `json_field_rules.py`: Added `FieldRule(("switches", "*"), "system")` and
+  `FieldRule(("variables", "*"), "system")` to the `system.json` ruleset.
+- These arrays contain thousands of names (switch/variable labels used in the
+  debug scene and event commands) that were previously completely invisible to
+  the pipeline. Empty/technical entries are filtered by existing safety heuristics.
+
+### Added: Single-Word Plugin UI Text Extraction
+
+- `json_parser._looks_like_textual_value()` now accepts an optional `key`
+  parameter. When the key contains text-indicating substrings (`text`, `label`,
+  `name`, `title`, `caption`, `help`, `command`, etc.), single ASCII words like
+  `"Exit"`, `"Save"`, `"Auto"` are now extracted — previously they were rejected
+  for not containing spaces, non-ASCII characters, or punctuation.
+- Same fix applied to the metadata-guided path in
+  `_should_extract_plugin_parameter_value()`: single-word values with
+  text-indicating keys are now extracted even when plugin metadata lacks
+  explicit text hints.
+
+### Fixed: Atomic Write Hardening on Windows
+
+- `file_ops.py`: `_atomic_replace()` now falls back to
+  `win32file.ReplaceFileW` when `os.replace()` fails with
+  `ERROR_SHARING_VIOLATION` (antivirus lock contention). Uses exponential
+  backoff (0.1s, 0.2s, 0.4s) for up to 3 retries before raising.
+- `ReplaceFileW` is specifically designed for atomic file replacement and
+  handles Windows file-lock edge cases more reliably than plain `os.replace()`.
+
+### Changed: UI Redesign — Dashboard Layout & Consolidated Navigation
+
+- **Navigation reduced from 6 to 3 main pages** (`main_window.py`): Home, Settings,
+  Data (Export + Glossary as tabs). Console and About moved to bottom section.
+  Less page switching means faster access to core functionality.
+- **Dashboard home page** (`home_interface.py`): Two-column layout with project
+  + language + controls on the left and a live console log on the right. Users
+  see translation progress and log output simultaneously without switching tabs.
+- **Data page** (`main_window.py`): `QTabWidget` combining Export/Import and
+  Glossary under a single navigation item. Glossary no longer duplicates the
+  settings page's glossary section.
+- **Language list expanded to 133 languages** (`home_interface.py`): All Google
+  Translate supported languages included (Afrikaans → Zulu). Languages stored
+  in a single `_ALL_LANGS` constant — source adds "Auto Detect", target reuses
+  the same dict. Eliminates duplication between the two comboboxes.
+
+### Ported: RenLocalizer Translator Reliability Improvements
+
+- **Identity responses no longer ban endpoints** (`translator.py`): Short/technical
+  terms like "HP", "Exit", "ATK" that Google cannot translate were triggering
+  escalating cooldown + circuit breaker + endpoint bans, causing cascade failures.
+  Now identity is accepted as-is (the text stays original) — only real HTTP 429
+  triggers backoff. RenLocalizer uses the same strategy.
+- **Escalating 429 cooldown** (`translator.py`): Replaced fixed 20s cooldown with
+  exponential backoff: 3s → 6s → 12s → 24s → capped at 30s. `_consecutive_429_count`
+  decrements on success for gradual recovery after a rate-limit burst.
+- **Adaptive concurrency** (`translator.py`): Tracks last 500 request metrics
+  (latency + success/fail). Every 5 seconds, if fail rate > 20% or avg latency
+  > 1.5s, concurrency is reduced by 20%. If fail rate < 5% and latency < 0.5s,
+  concurrency slowly increases. Prevents cascade bans by auto-reducing load.
+- **Post-batch identity retry** (`translator.py`): After all batch slices complete,
+  scans for unchanged texts and retries each individually with a fresh endpoint.
+  Recovers texts that hit soft rate-limits during batch separator mode.
+
 ## [0.6.5] - 2026-04-18
 
 ### Fixed: Critical Pipeline & Save Bugs

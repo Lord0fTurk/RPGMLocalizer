@@ -140,6 +140,11 @@ DATABASE_FIELD_RULES: dict[str, tuple[FieldRule, ...]] = {
         FieldRule(("stypeNames", "*"), "system", is_dialogue=True),
         FieldRule(("wtypeNames", "*"), "system", is_dialogue=True),
         FieldRule(("atypeNames", "*"), "system", is_dialogue=True),
+        # Switch/variable names: appear in debug scene, event commands,
+        # and plugin UIs.  Empty / technical entries are filtered by
+        # is_safe_to_translate automatically.
+        FieldRule(("switches", "*"), "system"),
+        FieldRule(("variables", "*"), "system"),
     ),
 }
 

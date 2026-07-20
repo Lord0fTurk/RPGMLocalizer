@@ -22,6 +22,8 @@ import re
 import struct
 from typing import Any
 
+import charset_normalizer
+
 import rubymarshal.reader
 from rubymarshal.classes import RubyString, Symbol
 from rubymarshal.constants import (
@@ -157,9 +159,30 @@ class OffsetTrackingReader(rubymarshal.reader.Reader):
 
     def __init__(self, fd, registry=None):
         super().__init__(fd, registry=registry)
-        # id(deserialized_obj) → (ivar_start, blob_start, blob_end, ivar_end, encoding_name)
+        # id(deserialized_obj) → StringByteRange
         self.string_ranges: dict[int, StringByteRange] = {}
+        # Non-IVAR string ranges (plain TYPE_STRING without encoding wrapper)
+        # id(bytes_obj) → (blob_start, blob_end)
+        self._non_ivar_strings: dict[int, tuple[int, int]] = {}
         self._ivar_context_stack: list[int] = []  # stack of TYPE_IVAR start positions
+
+    @staticmethod
+    def _detect_bytes_encoding(raw: bytes) -> str:
+        """Detect encoding of raw bytes, with RPG Maker fallbacks."""
+        if not raw:
+            return 'utf-8'
+        results = charset_normalizer.from_bytes(raw)
+        best = results.best()
+        if best and best.coherence >= 0.5:
+            return best.encoding
+        # RPG Maker legacy fallbacks
+        for enc in ['shift_jis', 'cp932', 'cp1252', 'euc_jp', 'gbk', 'euc_kr']:
+            try:
+                raw.decode(enc)
+                return enc
+            except (UnicodeDecodeError, LookupError):
+                continue
+        return 'latin1'
 
     def read(self, in_ivar=False):
         pos_before = self.fd.tell()
@@ -192,12 +215,15 @@ class OffsetTrackingReader(rubymarshal.reader.Reader):
             self._ivar_context_stack.pop()
         elif token == TYPE_STRING:
             blob_start = self.fd.tell()
-            result = self.read_blob()
+            raw_bytes = self.read_blob()
             blob_end = self.fd.tell()
-            # If we're inside an IVAR, record the blob range
             if self._ivar_context_stack:
-                # We'll finalize in the in_ivar block below
                 self._pending_blob = (blob_start, blob_end)
+                result = raw_bytes  # will be decoded in ivar block
+            else:
+                # Non-IVAR string: keep raw bytes, record range
+                result = raw_bytes
+                self._non_ivar_strings[id(result)] = (blob_start, blob_end)
         elif token == b':':
             result = self.read_symreal()
         elif token == b'i':
@@ -331,6 +357,28 @@ class OffsetTrackingReader(rubymarshal.reader.Reader):
                         self._pending_blob = None
             elif attributes:
                 result.set_attributes(attributes)
+
+        else:
+            # Non-IVAR TYPE_STRING: detect encoding and record range
+            _raw = getattr(self, '_non_ivar_strings', None)
+            if token == TYPE_STRING and _raw and id(result) in _raw:
+                blob_start, blob_end = _raw[id(result)]
+                # Auto-detect encoding for non-IVAR strings (common in XP/VX)
+                encoding = self._detect_bytes_encoding(result)
+                try:
+                    decoded = result.decode(encoding)
+                except UnicodeDecodeError:
+                    decoded = result.decode('latin1', errors='replace')
+                    encoding = 'latin1'
+                result = decoded
+                self.string_ranges[id(result)] = StringByteRange(
+                    ivar_start=blob_start - 1,  # include the '"' byte
+                    blob_start=blob_start,
+                    blob_end=blob_end,
+                    attrs_start=blob_end,     # no attrs
+                    attrs_end=blob_end,
+                    encoding=encoding,
+                )
 
         if token == TYPE_REGEXP:
             result = re.compile(str(result), re_flags)
@@ -548,34 +596,48 @@ def build_patch(
     
     Replaces the blob (marshal_long + raw bytes) and optionally the encoding
     suffix if the encoding needs to change.
+    
+    For non-IVAR strings (attrs_start == attrs_end), an encoding change
+    requires upgrading to IVAR format by inserting the ``I`` byte.
     """
     if not new_text.strip():
         return None  # Skip empty translations — preserve original
 
     target_encoding = _detect_target_encoding(byte_range.encoding, new_text)
     try:
-        new_bytes = new_text.encode(target_encoding)
+        new_str_bytes = new_text.encode(target_encoding)
     except (UnicodeEncodeError, LookupError):
-        new_bytes = new_text.encode('utf-8')
+        new_str_bytes = new_text.encode('utf-8')
         target_encoding = 'utf-8'
 
-    new_marshal_long = encode_marshal_long(len(new_bytes))
+    new_marshal_long = encode_marshal_long(len(new_str_bytes))
 
     encoding_changed = target_encoding.lower().replace('-', '').replace('_', '') != \
                        byte_range.encoding.lower().replace('-', '').replace('_', '')
 
+    # Detect non-IVAR: no attributes region
+    is_non_ivar = (byte_range.attrs_start == byte_range.attrs_end)
+
     if encoding_changed:
-        # Replace blob + encoding suffix (from blob_start to attrs_end)
-        new_suffix = _build_encoding_suffix(target_encoding)
-        patch_bytes = new_marshal_long + new_bytes + new_suffix
-        return PatchEntry(
-            start=byte_range.blob_start,
-            end=byte_range.attrs_end,
-            new_bytes=patch_bytes,
-        )
+        if is_non_ivar:
+            # Non-IVAR → IVAR upgrade: replace from '"' byte, add 'I' prefix + suffix
+            patch_bytes = b'\x49\x22' + new_marshal_long + new_str_bytes + _build_encoding_suffix(target_encoding)
+            return PatchEntry(
+                start=byte_range.ivar_start,
+                end=byte_range.blob_end,
+                new_bytes=patch_bytes,
+            )
+        else:
+            # IVAR: replace blob + encoding suffix
+            patch_bytes = new_marshal_long + new_str_bytes + _build_encoding_suffix(target_encoding)
+            return PatchEntry(
+                start=byte_range.blob_start,
+                end=byte_range.attrs_end,
+                new_bytes=patch_bytes,
+            )
     else:
         # Replace only the blob (marshal_long + raw bytes)
-        patch_bytes = new_marshal_long + new_bytes
+        patch_bytes = new_marshal_long + new_str_bytes
         return PatchEntry(
             start=byte_range.blob_start,
             end=byte_range.blob_end,

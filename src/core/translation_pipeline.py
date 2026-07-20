@@ -10,9 +10,13 @@ import os
 import shutil
 import json
 import asyncio
+import concurrent.futures
 import logging
 import re
 import time
+import tempfile
+
+import orjson
 from collections import Counter
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
@@ -190,6 +194,28 @@ class TranslationPipeline(QObject):
         if self._project_profile and self._project_profile.has_wordwrap_plugins:
             if not self.settings.get("auto_wordwrap", False) and not self.settings.get("visustella_wordwrap", False):
                 self.log_message.emit("info", "💡 Tip: Detected Message/WordWrap plugins. You might want to enable 'Auto Word-Wrap' in settings for better dialogue formatting.")
+
+        # Resolution-aware word-wrap hint
+        if self._project_profile and self._project_profile.window_width > 0:
+            est_std = self._project_profile.estimated_char_limit()
+            est_portrait = self._project_profile.estimated_portrait_char_limit()
+            self.log_message.emit(
+                "info",
+                f"🖥️ Detected game resolution {self._project_profile.window_width}×{self._project_profile.window_height} — "
+                f"auto word-wrap limits: {est_std} chars (standard) / {est_portrait} chars (portrait)",
+            )
+
+        # Font installation (pre-translation)
+        font_path = self.settings.get("font_path", "")
+        if font_path:
+            self._install_project_font(font_path, project_path)
+        elif self.settings.get("font_use_noto", False):
+            from src.core.font_manager import download_noto_sans
+            noto = download_noto_sans(
+                progress_callback=lambda msg: self.log_message.emit("info", msg),
+            )
+            if noto:
+                self._install_project_font(str(noto), project_path)
         
         # Collect files
         files = self._collect_files(data_dir)
@@ -880,6 +906,40 @@ class TranslationPipeline(QObject):
             f"strategy={profile.suggested_batch_strategy}"
         ))
 
+    def _install_project_font(self, font_path: str, project_path: str) -> None:
+        """Install a replacement font into the project before translation."""
+        from src.core.font_manager import install_font_to_game, calculate_wrap_limits
+
+        metrics = install_font_to_game(
+            font_path,
+            project_path,
+            log_callback=lambda msg: self.log_message.emit("info", msg),
+        )
+        if metrics is None:
+            self.log_message.emit("warning", f"Failed to install font: {font_path}")
+            return
+
+        self.log_message.emit(
+            "info",
+            f"🔤 Font installed: {metrics.family_name} "
+            f"({metrics.avg_char_width_px} px/char @ 28px, weight={metrics.weight})",
+        )
+
+        # Recalculate word-wrap limits based on new font metrics
+        if self._project_profile and self._project_profile.window_width > 0:
+            std, portrait = calculate_wrap_limits(
+                self._project_profile.window_width, metrics,
+            )
+            # Only update if user hasn't manually set them
+            if self.settings.get("wordwrap_limit_standard", 54) == 54:
+                self.settings["wordwrap_limit_standard"] = std
+            if self.settings.get("wordwrap_limit_portrait", 44) == 44:
+                self.settings["wordwrap_limit_portrait"] = portrait
+            self.log_message.emit(
+                "info",
+                f"📏 Wrap limits recalibrated: {std} chars standard / {portrait} chars portrait",
+            )
+
     def _write_coverage_report(self, coverage_report: Dict[str, Any], output_path: str) -> None:
         """Write a JSON coverage report to disk."""
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
@@ -1265,238 +1325,197 @@ class TranslationPipeline(QObject):
                     if translation:
                         file_updates[file_path][path] = translation
         
-        def save_file(file_path):
+        def apply_wordwrap(changes, tag_lookup):
+            """Apply word-wrap settings to dialogue text in-place."""
+            visu_wrap = self.settings.get("visustella_wordwrap", False)
+            auto_wrap = self.settings.get("auto_wordwrap", False)
+            if not visu_wrap and not auto_wrap:
+                return  # nothing to do — skip the entire loop
+
+            wrap_limit_std = self.settings.get("wordwrap_limit_standard", 54)
+            wrap_limit_portrait = self.settings.get("wordwrap_limit_portrait", 44)
+
+            # Resolution-aware auto-scaling: if the setting is still at the
+            # pipeline default (user never touched the slider) and we have
+            # a resolution profile, use the estimate from the game's window size.
+            if self._project_profile and self._project_profile.window_width > 0:
+                if wrap_limit_std == 54:
+                    wrap_limit_std = self._project_profile.estimated_char_limit()
+                if wrap_limit_portrait == 44:
+                    wrap_limit_portrait = self._project_profile.estimated_portrait_char_limit()
+
+            for p, text in list(changes.items()):
+                tag = tag_lookup.get(p, "")
+                if not (tag.startswith("message_dialogue") or tag.startswith("scroll_text")):
+                    continue
+                if visu_wrap:
+                    if not text.startswith("<WordWrap>"):
+                        changes[p] = "<WordWrap>" + text
+                elif auto_wrap and "\n" not in text:
+                    width = wrap_limit_portrait if "hasPicture" in tag else wrap_limit_std
+                    _CRE = re.compile(r'\\[A-Za-z]+(?:\[[^\]]*\])?')
+                    visible = _CRE.sub('', text)
+                    if len(visible) <= width:
+                        continue
+                    segs = _CRE.split(text)
+                    codes = _CRE.findall(text)
+                    flat = []
+                    for i, seg in enumerate(segs):
+                        if seg:
+                            flat.append((seg, False))
+                        if i < len(codes):
+                            flat.append((codes[i], True))
+                    lines, cur, vchar = [], "", 0
+                    for part, is_code in flat:
+                        if is_code:
+                            cur += part
+                        else:
+                            for wi, word in enumerate(part.split(' ')):
+                                if wi > 0:
+                                    sp = ' '
+                                elif vchar > 0 and cur and not cur.endswith(' '):
+                                    sp = ' '
+                                else:
+                                    sp = ''
+                                wlen = len(word)
+                                if vchar + len(sp) + wlen > width and vchar > 0:
+                                    lines.append(cur.rstrip())
+                                    cur, vchar = word, wlen
+                                else:
+                                    cur += sp + word if vchar > 0 or wi > 0 else word
+                                    vchar += len(sp) + wlen
+                    if cur.strip():
+                        lines.append(cur.rstrip())
+                    if lines:
+                        changes[p] = "\n".join(lines)
+
+        def save_file_staged(file_path, staging_dir):
+            """Apply parser + serialise to staging dir.  Returns basename on success."""
             if self.should_stop:
-                return
-            
-            filename_early = os.path.basename(file_path)
-            self.logger.debug(f"[save] start: {filename_early}")
-            t_save = time.monotonic()
+                return None
             changes = file_updates.get(file_path)
             if not changes or file_path not in parsed_files:
-                return
-            
+                return None
+
             parser, entries = parsed_files[file_path]
             filename = os.path.basename(file_path)
             file_ext = os.path.splitext(file_path)[1].lower()
-            
+
             tag_lookup = {path: tag for path, _t, tag in entries}
-            
-            visu_wrap = self.settings.get("visustella_wordwrap", False)
-            auto_wrap = self.settings.get("auto_wordwrap", False)
-            wrap_limit_std = self.settings.get("wordwrap_limit_standard", 54)
-            wrap_limit_portrait = self.settings.get("wordwrap_limit_portrait", 44)
-            
-            for p, text in changes.items():
-                tag = tag_lookup.get(p, "")
-                if tag.startswith("message_dialogue"):
-                    if visu_wrap:
-                        if not text.startswith("<WordWrap>"):
-                            changes[p] = "<WordWrap>" + text
-                    elif auto_wrap and "\n" not in text:
-                        # Use portrait limit if the tag indicates a picture is present
-                        width = wrap_limit_portrait if "hasPicture" in tag else wrap_limit_std
-                        
-                        # Calculate visible length (exclude RPG Maker escape codes)
-                        import re as _re
-                        _CODE_RE = _re.compile(r'\\[A-Za-z]+(?:\[[^\]]*\])?')
-                        visible_text = _CODE_RE.sub('', text)
-                        if len(visible_text) > width:
-                            # Code-aware wrapping: treat escape codes as zero-width atoms
-                            # Split text into (code, text) segments, wrap only visible text
-                            segments = _CODE_RE.split(text)
-                            codes = _CODE_RE.findall(text)
-                            # Rebuild with codes as atomic inserts
-                            flat_parts: list[tuple[str, bool]] = []  # (content, is_code)
-                            for i, seg in enumerate(segments):
-                                if seg:
-                                    flat_parts.append((seg, False))
-                                if i < len(codes):
-                                    flat_parts.append((codes[i], True))
-                            
-                            # Greedy line-break: accumulate visible chars, break at word boundaries
-                            lines: list[str] = []
-                            current_line = ""
-                            current_visible = 0
-                            for part, is_code in flat_parts:
-                                if is_code:
-                                    current_line += part  # Zero visible width
-                                else:
-                                    words = part.split(' ')
-                                    for wi, word in enumerate(words):
-                                        space = ' ' if (current_visible > 0 and wi > 0) or (current_visible > 0 and current_line and not current_line.endswith(' ')) else ''
-                                        if wi > 0:
-                                            space = ' '
-                                        word_len = len(word)
-                                        if current_visible + len(space) + word_len > width and current_visible > 0:
-                                            lines.append(current_line.rstrip())
-                                            current_line = word
-                                            current_visible = word_len
-                                        else:
-                                            current_line += space + word if current_visible > 0 or wi > 0 else word
-                                            current_visible += len(space) + word_len
-                            if current_line.strip():
-                                lines.append(current_line.rstrip())
-                            if lines:
-                                changes[p] = "\n".join(lines)
-            
-            try:
-                # Get pre-loaded data for Ruby files to avoid double-loading
-                cached_data = self._parsed_data_cache.get(file_path)
-                
-                # Apply translations (backup deferred until after success)
-                if file_ext in ('.rvdata2', '.rxdata', '.rvdata') and cached_data is not None:
-                    new_data = parser.apply_translation(file_path, changes, original_data=cached_data)
-                else:
-                    new_data = parser.apply_translation(file_path, changes)
-                
-                if new_data is None:
-                    parser_failure_reason = getattr(parser, "last_apply_error", None)
-                    if parser_failure_reason and "write disabled" in parser_failure_reason.lower():
-                        self.log_message.emit("info", f"{filename}: script writing disabled, preserving original file")
-                        self.logger.debug(f"[save] skipped (write disabled): {filename} in {time.monotonic() - t_save:.2f}s")
-                        return filename
-                    if parser_failure_reason:
-                        self.log_message.emit("warning", f"{filename}: {parser_failure_reason}")
-                    raise ValueError(
-                        parser_failure_reason or f"Parser returned no writable data for {filename}"
-                    )
-                
-                # Write file
+            apply_wordwrap(changes, tag_lookup)
+
+            t1 = time.monotonic()
+            cached_data = self._parsed_data_cache.get(file_path)
+            if file_ext in ('.rvdata2', '.rxdata', '.rvdata') and cached_data is not None:
+                new_data = parser.apply_translation(file_path, changes, original_data=cached_data)
+            else:
+                new_data = parser.apply_translation(file_path, changes)
+            t_apply = time.monotonic() - t1
+            if t_apply > 1.0:
+                self.log_message.emit("info", f"  apply_translation: {t_apply:.1f}s")
+
+            if new_data is None:
+                reason = getattr(parser, "last_apply_error", None)
+                if reason and "write disabled" in reason.lower():
+                    self.log_message.emit("info", f"{filename}: script writing disabled")
+                    return filename
+                raise ValueError(reason or f"No writable data for {filename}")
+
+            stage_path = os.path.join(staging_dir, filename)
+            # Use safe_write to staging (temp + atomic replace within staging dir)
+            with safe_write(stage_path, 'wb') as f:
                 if file_ext == '.json':
-                    with safe_write(file_path, 'w', encoding='utf-8') as f:
-                        json.dump(new_data, f, ensure_ascii=False)
-                
+                    f.write(orjson.dumps(new_data))
                 elif file_ext == '.js':
-                    with safe_write(file_path, 'w', encoding='utf-8') as f:
-                        if isinstance(new_data, str):
-                            f.write(new_data)
-                        else:
-                            prefix = getattr(parser, '_js_prefix', "var $plugins = \n")
-                            suffix = getattr(parser, '_js_suffix', ";\n")
-                            f.write(prefix)
-                            json.dump(new_data, f, ensure_ascii=False)
-                            f.write(suffix)
-
-                elif file_ext == '.txt':
+                    if isinstance(new_data, str):
+                        f.write(new_data.encode('utf-8'))
+                    else:
+                        prefix = getattr(parser, '_js_prefix', "var $plugins = \n").encode('utf-8')
+                        suffix = getattr(parser, '_js_suffix', ";\n").encode('utf-8')
+                        f.write(prefix)
+                        f.write(orjson.dumps(new_data))
+                        f.write(suffix)
+                elif file_ext in ('.txt', '.csv', TS_SCENARIO_EXTENSION):
                     if not isinstance(new_data, str):
-                        raise ValueError(f"Expected text output for {filename}, got {type(new_data).__name__}")
-                    with safe_write(file_path, 'w', encoding='utf-8', newline='') as f:
-                        f.write(new_data)
-
-                elif file_ext == '.csv':
-                    if not isinstance(new_data, str):
-                        raise ValueError(f"Expected CSV text output for {filename}, got {type(new_data).__name__}")
-                    with safe_write(file_path, 'w', encoding='utf-8', newline='') as f:
-                        f.write(new_data)
-
-                elif file_ext == TS_SCENARIO_EXTENSION:
-                    if not isinstance(new_data, str):
-                        raise ValueError(f"Expected scenario text output for {filename}, got {type(new_data).__name__}")
-                    with safe_write(file_path, 'w', encoding='utf-8', newline='') as f:
-                        f.write(new_data)
-                          
+                        raise ValueError(f"Expected str, got {type(new_data).__name__} for {filename}")
+                    f.write(new_data.encode('utf-8'))
                 elif file_ext in ('.rvdata2', '.rxdata', '.rvdata'):
                     if isinstance(new_data, bytes):
-                        # Binary-patched data — write directly
-                        with safe_write(file_path, 'wb') as f:
-                            f.write(new_data)
+                        f.write(new_data)
                     else:
-                        # Legacy path (script containers) — use rubymarshal.writer
                         import rubymarshal.writer
-                        with safe_write(file_path, 'wb') as f:
+                        rubymarshal.writer.write(f, new_data)
+                else:
+                    raise ValueError(f"Unsupported extension: {file_ext}")
+
+            self.logger.debug(f"[save] done: {filename}")
+            return filename
+
+        # --- Sequential save (direct write, no staging) ---
+        total = len(file_updates)
+
+        saved_filenames: list = []
+        for idx, fp in enumerate(sorted(
+            file_updates.keys(),
+            key=lambda p: (0 if p.lower().endswith(".js") else 1),
+        )):
+            if self.should_stop:
+                break
+            basename = os.path.basename(fp)
+            self.log_message.emit("info", f"Writing {basename}...")
+            try:
+                changes = file_updates.get(fp)
+                if not changes or fp not in parsed_files:
+                    continue
+                parser, entries = parsed_files[fp]
+                file_ext = os.path.splitext(fp)[1].lower()
+                tag_lookup = {p: t for p, _t, t in entries}
+                apply_wordwrap(changes, tag_lookup)
+
+                cached_data = self._parsed_data_cache.get(fp)
+                if file_ext in ('.rvdata2', '.rxdata', '.rvdata') and cached_data is not None:
+                    new_data = parser.apply_translation(fp, changes, original_data=cached_data)
+                else:
+                    new_data = parser.apply_translation(fp, changes)
+
+                if new_data is None:
+                    reason = getattr(parser, "last_apply_error", None)
+                    if reason and "write disabled" in reason.lower():
+                        self.log_message.emit("info", f"{basename}: script writing disabled")
+                        saved_filenames.append(basename)
+                        continue
+                    raise ValueError(reason or f"No data for {basename}")
+
+                # Write directly using safe_write (temp file + atomic replace)
+                with safe_write(fp, 'wb') as f:
+                    if file_ext == '.json':
+                        f.write(orjson.dumps(new_data))
+                    elif file_ext == '.js':
+                        if isinstance(new_data, str):
+                            f.write(new_data.encode('utf-8'))
+                        else:
+                            prefix = getattr(parser, '_js_prefix', "var $plugins = \n").encode('utf-8')
+                            suffix = getattr(parser, '_js_suffix', ";\n").encode('utf-8')
+                            f.write(prefix)
+                            f.write(orjson.dumps(new_data))
+                            f.write(suffix)
+                    elif file_ext in ('.txt', '.csv', TS_SCENARIO_EXTENSION):
+                        f.write(new_data.encode('utf-8') if isinstance(new_data, str) else new_data)
+                    elif file_ext in ('.rvdata2', '.rxdata', '.rvdata'):
+                        if isinstance(new_data, bytes):
+                            f.write(new_data)
+                        else:
+                            import rubymarshal.writer
                             rubymarshal.writer.write(f, new_data)
-                
-                self.logger.debug(f"[save] done: {filename} in {time.monotonic() - t_save:.2f}s")
-                return filename
-                
-            except Exception as e:
-                self.logger.error(f"[save] failed: {filename} in {time.monotonic() - t_save:.2f}s — {e}")
-                return None
+                    else:
+                        raise ValueError(f"Unsupported extension: {file_ext}")
 
-        # Create backups sequentially BEFORE launching parallel workers.
-        # Doing backup inside workers caused NTFS directory serialization with
-        # 8 concurrent shutil.copy2 calls to the same folder, effectively
-        # serializing all workers while also starving each other — producing
-        # 10+ minute hangs on large projects.  Sequential backup is safe
-        # because the backup is only a read + copy; the translated write
-        # happens afterward in the parallel phase.
-        if self.backup_manager:
-            self.log_message.emit("info", f"Creating backups for {len(file_updates)} files...")
-            for file_path in file_updates.keys():
-                if file_path in parsed_files:
-                    result = self.backup_manager.create_backup(file_path)
-                    if not result:
-                        self.logger.warning(
-                            f"Backup failed for {os.path.basename(file_path)} — "
-                            "save will proceed anyway"
-                        )
-
-        self.log_message.emit("info", f"Saving {len(file_updates)} files in parallel...")
-
-        # Worker selection based on project profile
-        if self._project_profile:
-            strategy = self._project_profile.suggested_batch_strategy
-            if strategy == "conservative":
-                max_workers = 2
-            elif strategy == "capped":
-                max_workers = min(4, os.cpu_count() or 4)
-            else:
-                max_workers = min(os.cpu_count() or 4, 8)
-        else:
-            max_workers = min(os.cpu_count() or 4, 8)
-        
-        # Submit all save tasks with a per-batch wall-clock timeout.
-        # executor.map() / the context-manager shutdown(wait=True) block forever
-        # if any worker thread hangs (e.g. rubymarshal.writer on a cyclic object,
-        # an antivirus holding a temp file, or a corrupt Ruby Marshal stream).
-        # Using submit() + wait(timeout) + shutdown(wait=False) lets us detect and
-        # report stuck files instead of hanging the entire application.
-        # Cap total timeout at 10 minutes regardless of file count — 246 files × 60s
-        # would produce a ~4 hour timeout that looks like an infinite hang to the user.
-        # Raised from 300s (5 min) to 600s (10 min) to absorb antivirus scanning delays.
-        _PER_FILE_BUDGET_SEC = 30
-        _MAX_TOTAL_SEC = 600  # 10-minute hard ceiling (raised from 300 to absorb AV scanning)
-        _TOTAL_TIMEOUT_SEC = min(_PER_FILE_BUDGET_SEC * max(len(file_updates), 1), _MAX_TOTAL_SEC)
-
-        executor = ThreadPoolExecutor(max_workers=max_workers)
-        try:
-            # Submit .js files (plugins.js etc.) first so they are not starved at the
-            # tail of the timeout window when many JSON files are queued ahead of them.
-            sorted_paths = sorted(
-                file_updates.keys(),
-                key=lambda p: (0 if p.lower().endswith(".js") else 1),
-            )
-            future_to_path = {executor.submit(save_file, fp): fp for fp in sorted_paths}
-            done, not_done = _cf_wait(future_to_path, timeout=_TOTAL_TIMEOUT_SEC,
-                                      return_when=ALL_COMPLETED)
-
-            saved_filenames: list = []
-            for future in done:
-                try:
-                    saved_filenames.append(future.result())
-                except Exception as exc:
-                    fp = future_to_path[future]
-                    self.logger.error(f"Error saving {os.path.basename(fp)}: {exc}")
-                    saved_filenames.append(None)
-
-            if not_done:
-                hung_names = [os.path.basename(future_to_path[f]) for f in not_done]
-                self.logger.error(
-                    f"Save timeout ({_TOTAL_TIMEOUT_SEC}s): {len(not_done)} file(s) did not "
-                    f"complete — {hung_names[:10]}"
-                )
-                self.log_message.emit(
-                    "warning",
-                    f"{len(not_done)} file(s) timed out during save and were skipped. "
-                    "See the log for details."
-                )
-                for _ in not_done:
-                    saved_filenames.append(None)
-        finally:
-            # shutdown(wait=False) abandons any still-running threads instead of
-            # blocking the main thread until they finish (or hang forever).
-            executor.shutdown(wait=False, cancel_futures=True)
+                saved_filenames.append(basename)
+            except Exception as exc:
+                self.logger.error(f"Error saving {basename}: {exc}")
+                self.log_message.emit("warning", f"Failed to save {basename}: {exc}")
+                saved_filenames.append(None)
+            self.progress_updated.emit(idx + 1, total, f"Saving... {idx + 1}/{total}")
 
         success_count = len([f for f in saved_filenames if f])
 

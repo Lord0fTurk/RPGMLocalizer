@@ -4,6 +4,15 @@ import re
 import urllib.parse
 from typing import Set
 
+_MAGIC_SIGNATURES: dict[bytes, str] = {
+    b"\x89PNG\r\n\x1a\n": ".png",
+    b"\xff\xd8\xff": ".jpg",
+    b"GIF8": ".gif",
+    b"OggS": ".ogg",
+    b"RIFF": ".wav",
+}
+_MP4_FTYP = re.compile(b".{4}ftyp")
+
 
 def normalize_asset_text(text: str) -> str:
     """Normalize a candidate asset string for path checks."""
@@ -108,3 +117,21 @@ def asset_identifier_candidates(text: str) -> Set[str]:
         add_candidate(basename)
 
     return candidates
+
+
+def guess_extension_from_bytes(data: bytes) -> str:
+    """Detect file extension from magic bytes at the start of binary data.
+
+    Returns the extension (including dot, e.g. ``".png"``) or an empty
+    string if the signature is not recognised.
+    """
+    if len(data) < 8:
+        return ""
+    for magic, ext in _MAGIC_SIGNATURES.items():
+        if data.startswith(magic):
+            return ext
+    if _MP4_FTYP.match(data[4:12]) if len(data) >= 12 else False:
+        return ".mp4"
+    if data.startswith(b"\x00\x00\x00") and len(data) >= 12 and _MP4_FTYP.match(data[4:12]):
+        return ".mp4"
+    return ""

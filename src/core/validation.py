@@ -5,7 +5,6 @@ Ensures translation integrity and safety before saving files.
 import logging
 from typing import Dict, List, Any, Tuple, Optional
 from dataclasses import dataclass, field
-from src.utils.placeholder import validate_restoration
 
 logger = logging.getLogger(__name__)
 
@@ -57,23 +56,13 @@ class Validator:
     def validate_translation_entry(original: str, translated: str, placeholders: Dict[str, str]) -> bool:
         """
         Validate a single translation line against its original.
-        Checks for missing placeholders.
+        (v0.7.0: placeholder validation is a no-op — codes are never exposed
+        to translation in the segment-based system; kept for API compatibility.)
         """
         if not original.strip():
             return True
-            
         if not translated:
-            # Empty translation for non-empty original is a failure
             return False
-            
-        # Check Placeholders
-        is_valid, missing = validate_restoration(original, translated, placeholders)
-        if not is_valid:
-            logger.warning(f"Validation Failed: Missing placeholders {missing}")
-            logger.debug(f"Original: {original}")
-            logger.debug(f"Translated: {translated}")
-            return False
-            
         return True
 
     @staticmethod

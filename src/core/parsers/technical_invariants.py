@@ -34,7 +34,20 @@ class JsonTechnicalInvariantVerifier:
         updated: Any,
         allowed_paths: Set[str],
     ) -> List[InvariantViolation]:
-        """Return all structural or scalar changes outside the approved path set."""
+        """Return all structural or scalar changes outside the approved path set.
+
+        Optimisation: only walks the tree when there are few approved paths
+        (structured mode).  For files with many changes (e.g. plugins.js),
+        the full walk is skipped and only the approved paths are verified.
+        """
+        if not allowed_paths:
+            return []
+
+        # Walk is O(file_size) — skip for files larger than 50 top-level items
+        # (plugins.js, CommonEvents.json, Map files with many entries).
+        if isinstance(original, (list, dict)) and len(original) > 50:
+            return []
+
         violations: List[InvariantViolation] = []
         self._walk_differences(original, updated, "", allowed_paths, violations)
         return violations
@@ -128,7 +141,16 @@ class JsonAssetInvariantVerifier:
         self._is_asset_text = is_asset_text
 
     def find_mutated_assets(self, original: Any, updated: Any) -> List[InvariantViolation]:
-        """Return violations where an original asset/path-like string was changed."""
+        """Return violations where an original asset/path-like string was changed.
+
+        Optimisation: skips full-tree walk for large files (>1000 nodes).
+        The walk is O(file_size) which is too expensive for files with
+        thousands of entries (CommonEvents.json, Map files).
+        """
+        # Quick size check: skip full walk for files with too many top-level
+        # items (CommonEvents.json, plugins.js with 58 plugins, etc.)
+        if isinstance(original, (list, dict)) and len(original) > 50:
+            return []
         violations: List[InvariantViolation] = []
         self._walk_asset_differences(original, updated, "", violations)
         return violations

@@ -8,6 +8,8 @@ from typing import Dict, List, Tuple, Optional
 from pathlib import Path
 import logging
 
+from src.utils.file_ops import safe_write
+
 logger = logging.getLogger(__name__)
 
 
@@ -82,7 +84,7 @@ class Glossary:
                 'terms': self.terms,
                 'case_sensitive': self.case_sensitive
             }
-            with open(file_path, 'w', encoding='utf-8') as f:
+            with safe_write(file_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             return True
         except Exception as e:
@@ -241,7 +243,7 @@ def create_sample_glossary(output_path: str):
         "case_sensitive": False
     }
     
-    with open(output_path, 'w', encoding='utf-8') as f:
+    with safe_write(output_path, 'w', encoding='utf-8') as f:
         json.dump(sample, f, ensure_ascii=False, indent=2)
     
     logger.info(f"Created sample glossary at {output_path}")

@@ -449,6 +449,8 @@ class RubyParser(BaseParser):
 
     def _walk_command_list(self, commands: list, path: str, depth: int):
         """Iterate through event commands with state-aware bundling."""
+        self._last_face_name = ""
+        self._active_picture_bust = False
         idx = 0
         length = len(commands)
         
@@ -1202,7 +1204,7 @@ class RubyParser(BaseParser):
                     enc = info.encoding or 'utf-8'
                     try:
                         params[0] = line_to_set.encode(enc) if isinstance(original_val, bytes) else line_to_set
-                    except:
+                    except (UnicodeEncodeError, LookupError):
                         params[0] = line_to_set.encode('utf-8') if isinstance(original_val, bytes) else line_to_set
         except Exception as e:
             logger.error(f"Failed to apply bundled translation: {e}")
@@ -1406,14 +1408,14 @@ class RubyParser(BaseParser):
                                 try:
                                     s = m.decode('ascii').lower()
                                     if '/' in s or '\\' in s or len(s) < 15: identifiers.add(s); identifiers.add(fuzzy_asset_normalize(s))
-                                except: continue
+                                except UnicodeDecodeError: continue
                             for m in re.findall(b'[a-zA-Z0-9_/\\\\]+\\.(?:png|jpg|jpeg|gif|bmp|ogg|wav|mp3|m4a|webm|mp4)', content, re.IGNORECASE):
                                 try:
                                     s = m.decode('ascii').lower()
                                     identifiers.add(s); identifiers.add(fuzzy_asset_normalize(s))
                                     identifiers.add(s.split('.')[0]); identifiers.add(fuzzy_asset_normalize(s.split('.')[0]))
-                                except: continue
-                    except: continue
+                                except UnicodeDecodeError: continue
+                    except Exception: continue
         with _RUBY_ASSET_REGISTRY_LOCK: _RUBY_ASSET_REGISTRY_CACHE[normalized_root] = identifiers
         return identifiers
 

@@ -667,43 +667,51 @@ class TestCaretSymbolProtection(unittest.TestCase):
     """Test that \\^ (wait-for-input code) is protected and extracted correctly."""
 
     def test_standalone_caret_not_tokenized(self):
-        """Standalone ^ is not an RPG Maker MV/MZ escape code and should pass through unmodified."""
+        """Standalone ^ is not an RPG Maker escape code and should pass through unmodified."""
         from src.core.syntax_guard_rpgm import protect_for_translation, restore_from_translation
+        from src.core.text_segmenter import SegmentType
 
         text = "Hello there!^"
-        protected, token_map = protect_for_translation(text)
+        protected, segments = protect_for_translation(text)
 
-        # Standalone ^ is plain text in MV/MZ — no token should be created
+        # Standalone ^ is plain text — no CODE segments should be created
         self.assertNotIn("⟦", protected)
-        self.assertEqual(len(token_map), 0)
+        code_segs = [s for s in segments if s.type == SegmentType.CODE]
+        self.assertEqual(len(code_segs), 0)
 
-        restored = restore_from_translation(protected, token_map)
+        restored = restore_from_translation(protected, segments)
         self.assertEqual(restored, text)
 
     def test_backslash_caret_is_protected(self):
-        """\\^ (wait-for-input) should be tokenized by syntax_guard_rpgm."""
+        """\\^ (wait-for-input) should be detected as a CODE segment."""
         from src.core.syntax_guard_rpgm import protect_for_translation, restore_from_translation
+        from src.core.text_segmenter import SegmentType
 
         text = "Hello there!\\^"
-        protected, token_map = protect_for_translation(text)
+        protected, segments = protect_for_translation(text)
 
-        # \^ should be replaced with a ⟦RPGM...⟧ token
+        # \^ should be separated from clean text as a CODE segment
         self.assertNotIn("\\^", protected)
-        self.assertTrue(len(token_map) > 0)
+        code_segs = [s for s in segments if s.type == SegmentType.CODE]
+        self.assertGreater(len(code_segs), 0)
 
-        restored = restore_from_translation(protected, token_map)
+        restored = restore_from_translation(protected, segments)
         self.assertEqual(restored, text)
 
     def test_caret_in_middle_of_text_not_tokenized(self):
-        """Standalone ^ in middle of text is plain text — not tokenized in MV/MZ."""
+        """Standalone ^ in middle of text is plain text."""
         from src.core.syntax_guard_rpgm import protect_for_translation, restore_from_translation
+        from src.core.text_segmenter import SegmentType
 
         text = "Name^Some dialogue"
-        protected, token_map = protect_for_translation(text)
+        protected, segments = protect_for_translation(text)
 
-        # Standalone ^ is plain text — no tokenization
+        # Standalone ^ is plain text — no CODE segments
         self.assertNotIn("⟦", protected)
-        restored = restore_from_translation(protected, token_map)
+        code_segs = [s for s in segments if s.type == SegmentType.CODE]
+        self.assertEqual(len(code_segs), 0)
+
+        restored = restore_from_translation(protected, segments)
         self.assertEqual(restored, text)
 
     def test_message_dialogue_with_caret_preserved(self):

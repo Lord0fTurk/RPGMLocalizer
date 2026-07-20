@@ -35,7 +35,7 @@ class AboutInterface(ScrollArea):
             self.lbl_icon.setPixmap(pixmap.scaled(96, 96, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
         else:
             self.lbl_icon.setText("RL")
-            self.lbl_icon.setStyleSheet("font-size: 48px; font-weight: bold; color: white;")
+            self.lbl_icon.setStyleSheet("font-size: 48px; font-weight: bold; color: #00b4d8;")
             
         # Title
         self.lbl_title = QLabel("RPGMLocalizer")

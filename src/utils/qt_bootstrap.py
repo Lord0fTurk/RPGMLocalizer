@@ -212,6 +212,11 @@ def bootstrap_qt_environment() -> dict[str, str]:
     # (lowercase "fusion" raises "module fusion is not installed" and aborts
     # QML loading entirely), even though QStyleFactory itself is case-insensitive.
     os.environ.setdefault("QT_STYLE_OVERRIDE", "Fusion")
+    # Pin the QML Controls style to Material so the Controls layer never
+    # inherits a system-native style (e.g. "org.kde.desktop" on KDE, "macOS"
+    # on macOS) that would override Material.Dark accent colors on ComboBox,
+    # Slider, ScrollBar, Popup, etc. and produce mismatched widgets.
+    os.environ.setdefault("QT_QUICK_CONTROLS_STYLE", "Material")
     # Disable the platform theme plugin so Qt never queries Windows / macOS
     # for colours, fonts, or style hints.
     os.environ.setdefault("QT_QPA_PLATFORMTHEME", "")

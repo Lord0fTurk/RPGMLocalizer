@@ -1,5 +1,8 @@
-# Core UI
+# Core UI — QML runtime (PyQt6-Qt6 and PyQt6-sip are pulled automatically)
 PyQt6>=6.8.1
+
+# Legacy PyWidget UI — kept for backward compatibility during transition
+# Can be removed once src/ui/ is fully deprecated
 PyQt6-Fluent-Widgets[full]>=1.11.2
 
 # Ruby Marshal parsing for XP/VX/Ace
@@ -11,9 +14,7 @@ orjson>=3.11.0
 # Encoding detection for Ruby/legacy files
 charset-normalizer>=3.4.1
 
-# Translation APIs
-deep-translator>=1.11.4
-requests>=2.32.3
+# HTTP client for translation APIs
 aiohttp>=3.11.12
 
 # Optional: YAML export support
@@ -25,3 +26,6 @@ lark>=1.1.9
 # Audit-only JS AST analysis
 tree-sitter>=0.25.2
 tree-sitter-javascript>=0.25.0
+
+# Lenient JSON5 parsing for malformed plugins.js payloads (trailing commas, comments)
+json5>=0.9.25

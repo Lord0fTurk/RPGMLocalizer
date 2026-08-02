@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from PyQt6.QtCore import QObject, pyqtSignal as Signal
 
-from .translator import GoogleTranslator, TranslationRequest
+from .translator import GoogleTranslator, TranslationRequest, create_translator
 from .parser_factory import get_parser
 from .parsers.js_ast_extractor import JavaScriptAstAuditExtractor
 from .parsers.hendrix_csv_parser import HENDRIX_CSV_FILENAME
@@ -95,16 +95,7 @@ class TranslationPipeline(QObject):
         concurrency = self.settings.get("concurrent_requests", DEFAULT_CONCURRENCY)
         batch_size = self.settings.get("batch_size", DEFAULT_BATCH_SIZE)
         
-        self.translator = GoogleTranslator(
-            concurrency=concurrency,
-            batch_size=batch_size,
-            use_multi_endpoint=self.settings.get("use_multi_endpoint", DEFAULT_USE_MULTI_ENDPOINT),
-            enable_lingva_fallback=self.settings.get("enable_lingva_fallback", DEFAULT_ENABLE_LINGVA_FALLBACK),
-            request_delay_ms=self.settings.get("request_delay_ms", DEFAULT_REQUEST_DELAY_MS),
-            timeout_seconds=self.settings.get("request_timeout", DEFAULT_TIMEOUT_SECONDS),
-            max_retries=self.settings.get("max_retries", DEFAULT_MAX_RETRIES),
-            use_syntax_guard=self.settings.get("use_syntax_guard", True)
-        )
+        self.translator = create_translator(self.settings)
         self.merger = TextMerger(batch_size=batch_size)
         self.logger = logging.getLogger("Pipeline")
         self.js_ast_audit_extractor = JavaScriptAstAuditExtractor()
@@ -116,7 +107,7 @@ class TranslationPipeline(QObject):
         self.importer: TranslationImporter = TranslationImporter()
         # Progress throttling
         self._last_progress_update: float = 0
-        self._progress_throttle_ms: int = self.settings.get("progress_throttle_ms", 100)
+        self._progress_throttle_ms: int = self.settings.get("progress_throttle_ms", 250)
         
         # Engine profiling
         self._project_profile: ProjectProfile | None = None
@@ -171,6 +162,8 @@ class TranslationPipeline(QObject):
             return
 
         self.stage_changed.emit(PipelineStage.VALIDATING.value, "Scanning project...")
+        engine_id = self.settings.get("engine", "google")
+        self.log_message.emit("info", f"Translation engine: {engine_id} ({type(self.translator).__name__})")
         self.log_message.emit("info", f"Project: {project_path}")
         if self.cache:
             self.log_message.emit("info", f"Translation cache directory: {self.cache.cache_dir}")
@@ -370,8 +363,11 @@ class TranslationPipeline(QObject):
             plugin_js = self._find_file_in_subdir_case_insensitive(os.path.dirname(project_root), "js", "plugins.js")
 
         if plugin_js and os.path.exists(plugin_js):
-            files.append(plugin_js)
-            
+            if self.settings.get("translate_plugins_js", True):
+                files.append(plugin_js)
+            else:
+                self.log_message.emit("info", "Skipping js/plugins.js translation (disabled in settings)")
+
             # Plugin JS UI literal extraction: Only scan plugin source files for safe UI strings
             # when project has shop/quest/heavy UI signals (narrow activation).
             # This is controlled by profile analysis to prevent false positives.
@@ -1453,6 +1449,12 @@ class TranslationPipeline(QObject):
 
         # --- Sequential save (direct write, no staging) ---
         total = len(file_updates)
+        save_start = time.time()
+        PER_FILE_LIMIT_SEC = 60   # single file taking >60s is stuck
+        TOTAL_LIMIT_SEC = 300     # entire save phase ceiling (5 min)
+
+        self.log_message.emit("info", f"Saving {total} files...")
+        last_save_progress_time = 0.0
 
         saved_filenames: list = []
         for idx, fp in enumerate(sorted(
@@ -1461,8 +1463,12 @@ class TranslationPipeline(QObject):
         )):
             if self.should_stop:
                 break
+            total_elapsed = time.time() - save_start
+            if total_elapsed > TOTAL_LIMIT_SEC:
+                self.log_message.emit("warning", f"Save phase exceeded {TOTAL_LIMIT_SEC}s limit — stopping ({idx}/{total} files saved)")
+                break
             basename = os.path.basename(fp)
-            self.log_message.emit("info", f"Writing {basename}...")
+            file_start = time.time()
             try:
                 changes = file_updates.get(fp)
                 if not changes or fp not in parsed_files:
@@ -1515,7 +1521,14 @@ class TranslationPipeline(QObject):
                 self.logger.error(f"Error saving {basename}: {exc}")
                 self.log_message.emit("warning", f"Failed to save {basename}: {exc}")
                 saved_filenames.append(None)
-            self.progress_updated.emit(idx + 1, total, f"Saving... {idx + 1}/{total}")
+            file_elapsed = time.time() - file_start
+            if file_elapsed > PER_FILE_LIMIT_SEC:
+                self.log_message.emit("warning", f"Slow save: {basename} took {file_elapsed:.0f}s")
+            
+            now_ms = time.time() * 1000
+            if (now_ms - last_save_progress_time >= self._progress_throttle_ms) or (idx + 1 == total):
+                last_save_progress_time = now_ms
+                self.progress_updated.emit(idx + 1, total, f"Saving... {idx + 1}/{total}")
 
         success_count = len([f for f in saved_filenames if f])
 

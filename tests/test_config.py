@@ -2,18 +2,23 @@
 Unit tests for translator configuration.
 Tests language setting propagation.
 """
+import asyncio
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, patch
+
+from src.core.translator import GoogleTranslator
 
 
 class TestTranslatorLanguageConfig(unittest.TestCase):
-    """Test that language settings are passed correctly."""
-    
+    """Test that language settings from request metadata actually drive GoogleTranslator.
+
+    Only the network layer (`_try_translate`) is mocked; `translate_batch()` itself
+    runs for real so a regression in metadata handling would fail this test.
+    """
+
     def test_translator_uses_metadata_languages(self):
         """Translator should use languages from request metadata."""
-        # This test verifies the fix for hardcoded language issue
-        
-        # Mock request with metadata
+        translator = GoogleTranslator()
         requests = [
             {
                 'text': 'Hello world',
@@ -25,32 +30,36 @@ class TestTranslatorLanguageConfig(unittest.TestCase):
                 }
             }
         ]
-        
-        # Extract expected values
-        first_metadata = requests[0]['metadata']
-        s_lang = first_metadata.get('source_lang', 'auto')
-        t_lang = first_metadata.get('target_lang', 'en')
-        
-        # Verify they are used (not hardcoded)
-        self.assertEqual(s_lang, 'en')
-        self.assertEqual(t_lang, 'tr')
-    
+
+        with patch.object(translator, '_try_translate', new=AsyncMock(return_value=['Merhaba dunya'])) as mock_try:
+            results = asyncio.run(translator.translate_batch(requests))
+
+        self.assertEqual(results[0].source_lang, 'en')
+        self.assertEqual(results[0].target_lang, 'tr')
+        self.assertEqual(results[0].translated_text, 'Merhaba dunya')
+        mock_try.assert_awaited_once()
+        called_source, called_target = mock_try.await_args.args[1], mock_try.await_args.args[2]
+        self.assertEqual(called_source, 'en')
+        self.assertEqual(called_target, 'tr')
+
     def test_translator_defaults_to_auto_and_en(self):
         """Translator should default to 'auto' and 'en' if metadata missing."""
+        translator = GoogleTranslator()
         requests = [
             {
                 'text': 'Hello world',
                 'metadata': {}  # No language in metadata
             }
         ]
-        
-        first_metadata = requests[0]['metadata']
-        s_lang = first_metadata.get('source_lang', 'auto')
-        t_lang = first_metadata.get('target_lang', 'en')
-        
-        # Should use defaults
-        self.assertEqual(s_lang, 'auto')
-        self.assertEqual(t_lang, 'en')
+
+        with patch.object(translator, '_try_translate', new=AsyncMock(return_value=['Hello world'])) as mock_try:
+            results = asyncio.run(translator.translate_batch(requests))
+
+        self.assertEqual(results[0].source_lang, 'auto')
+        self.assertEqual(results[0].target_lang, 'en')
+        called_source, called_target = mock_try.await_args.args[1], mock_try.await_args.args[2]
+        self.assertEqual(called_source, 'auto')
+        self.assertEqual(called_target, 'en')
 
 
 class TestConstantsConfiguration(unittest.TestCase):
@@ -78,13 +87,16 @@ class TestConstantsConfiguration(unittest.TestCase):
         self.assertIsNotNone(TRANSLATOR_RECURSION_MAX_DEPTH)
         self.assertEqual(TRANSLATOR_RECURSION_MAX_DEPTH, 50)
     
-    def test_ruby_encoding_fallback_list_defined(self):
-        """Ruby fallback encodings should be hardened in ruby_parser (shift_jis priority)."""
-        # RUBY_ENCODING_FALLBACK_LIST was inlined into ruby_parser._safe_decode_ruby_string.
-        # This test documents the expected fallback order used there.
-        fallback_encodings = ['shift_jis', 'cp1252', 'euc_jp', 'gbk']
-        self.assertEqual(len(fallback_encodings), 4)
-        self.assertIn('shift_jis', fallback_encodings)
+    def test_ruby_shift_jis_fallback_decodes_legacy_bytes(self):
+        """_safe_decode_ruby_string should recover Shift-JIS text via its manual fallback chain."""
+        from src.core.parsers.ruby_parser import _safe_decode_ruby_string
+
+        raw = "テスト".encode("shift_jis")  # invalid as UTF-8, must fall back
+        info = _safe_decode_ruby_string(raw)
+
+        self.assertEqual(info.text, "テスト")
+        self.assertTrue(info.is_bytes)
+        self.assertIn(info.encoding.lower().replace("-", "_"), ("shift_jis", "sjis"))
 
 
 if __name__ == '__main__':

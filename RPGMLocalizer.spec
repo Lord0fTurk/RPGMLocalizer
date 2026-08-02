@@ -20,6 +20,9 @@ app_version = version_ns.get('VERSION', '0.6.3')
 
 datas = [
     (os.path.join(project_dir, 'LICENSE'), '.'),
+    # QML UI files — REQUIRED: without these the frozen exe crashes immediately
+    # because QQmlApplicationEngine cannot find Main.qml at startup.
+    (os.path.join(project_dir, 'src', 'gui', 'qml'), 'src/gui/qml'),
 ]
 if os.path.exists(icon_png_path):
     datas.append((icon_png_path, '.'))
@@ -38,43 +41,55 @@ a = Analysis(
     binaries=binaries,
     datas=datas,
     hiddenimports=[
+        # --- Core app modules ---
         'src',
+        'src.backend',
+        'src.backend.app_backend',
+        'src.backend.settings_backend',
         'src.core',
-        'src.core.parsers',
-        'src.core.parsers.json_parser',
-        'src.core.parsers.ruby_parser',
+        'src.core.translation_pipeline',
         'src.core.translator',
+        'src.core.enums',
         'src.core.glossary',
         'src.core.cache',
         'src.core.parser_factory',
-        'src.core.enums',
         'src.core.export_import',
-        'src.ui',
-        'src.ui.main_window',
-        'src.ui.components.console_log',
-        'src.ui.interfaces.home_interface',
-        'src.ui.interfaces.settings_interface',
-        'src.ui.interfaces.export_interface',
-        'src.ui.interfaces.about_interface',
-        'src.ui.interfaces.glossary_interface',
+        'src.core.text_segmenter',
+        'src.core.text_merger',
+        'src.core.engine_profiler',
+        'src.core.font_manager',
+        'src.core.constants',
+        'src.core.parsers',
+        'src.core.parsers.json_parser',
+        'src.core.parsers.ruby_parser',
         'src.utils',
         'src.utils.backup',
         'src.utils.paths',
+        'src.utils.app_paths',
         'src.utils.settings_store',
-        'src.utils.placeholder',
         'src.utils.file_ops',
-        'rubymarshal',
-        'aiohttp',
-        'qfluentwidgets',
+        'src.utils.qt_bootstrap',
+        'src.utils.placeholder',
+        # --- PyQt6 / QML runtime ---
         'PyQt6',
         'PyQt6.QtCore',
         'PyQt6.QtGui',
         'PyQt6.QtWidgets',
+        'PyQt6.QtQml',        # QQmlApplicationEngine — REQUIRED for QML UI
+        'PyQt6.QtQuick',      # QtQuick scene graph — REQUIRED for QML rendering
+        'PyQt6.QtNetwork',    # needed by aiohttp SSL + Qt networking
+        # --- Third-party ---
+        'rubymarshal',
+        'aiohttp',
+        'orjson',
+        'charset_normalizer',
+        'lark',
+        'json5',
     ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['matplotlib', 'numpy', 'tkinter', 'pandas', 'scipy'],
+    excludes=['matplotlib', 'numpy', 'tkinter', 'pandas', 'scipy', 'qfluentwidgets'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,

@@ -141,7 +141,7 @@ class SettingsInterface(ScrollArea):
             parent=self.performanceGroup
         )
         self.slider_throttle.setRange(0, 1000)
-        self.slider_throttle.setValue(100)
+        self.slider_throttle.setValue(250)
         
         self.performanceGroup.addSettingCard(self.slider_batch_size)
         self.performanceGroup.addSettingCard(self.slider_concurrent)
@@ -417,7 +417,7 @@ class SettingsInterface(ScrollArea):
 
         self.slider_batch_size.setValue(settings.get("batch_size", self.slider_batch_size.value()))
         self.slider_concurrent.setValue(settings.get("concurrent_requests", self.slider_concurrent.value()))
-        self.slider_throttle.setValue(settings.get("progress_throttle_ms", 100))
+        self.slider_throttle.setValue(settings.get("progress_throttle_ms", 250))
 
         self.chk_multi_endpoint.setChecked(settings.get("use_multi_endpoint", True))
         self.chk_lingva_fallback.setChecked(settings.get("enable_lingva_fallback", True))

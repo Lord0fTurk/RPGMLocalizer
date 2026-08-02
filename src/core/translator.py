@@ -69,10 +69,15 @@ class BaseTranslator(ABC):
         self.logger = logging.getLogger(self.__class__.__name__)
         self._session: aiohttp.ClientSession | None = None
         self._connector: aiohttp.TCPConnector | None = None
+        self._session_lock = asyncio.Lock()
         self.timeout_seconds = timeout_seconds
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
+        if self._session and not self._session.closed:
+            return self._session
+        async with self._session_lock:
+            if self._session and not self._session.closed:
+                return self._session
             self._connector = aiohttp.TCPConnector(limit=256, ttl_dns_cache=300)
             timeout = aiohttp.ClientTimeout(
                 total=max(45, self.timeout_seconds),
@@ -86,7 +91,7 @@ class BaseTranslator(ABC):
                 timeout=timeout,
                 headers=_headers,
             )
-        return self._session
+            return self._session
 
     async def close(self):
         if self._session:
@@ -232,8 +237,7 @@ class GoogleTranslator(BaseTranslator):
             for ep in self.google_endpoints:
                 self._endpoint_health[ep] = {"fails": 0, "banned_until": 0.0}
             available = self.google_endpoints[:]
-        self._endpoint_index = (min(self._endpoint_index, len(available) - 1) + 1) % len(available)
-        return available[self._endpoint_index]
+        return random.choice(available)
 
     def _get_next_lingva(self) -> str:
         self._lingva_index = (self._lingva_index + 1) % len(self.lingva_instances)
@@ -671,3 +675,58 @@ class GoogleTranslator(BaseTranslator):
                     self.logger.debug(f"Lingva {instance} failed: {type(exc).__name__}: {exc}")
                     await asyncio.sleep(0.3)
         return None
+
+
+# ---------------------------------------------------------------------------
+# Translator factory
+# ---------------------------------------------------------------------------
+
+def create_translator(settings: dict) -> "BaseTranslator":
+    """
+    Instantiate the correct translator based on settings["engine"].
+
+    Currently only GoogleTranslator is fully implemented. DeepL, OpenAI,
+    Gemini, Ollama and LibreTranslate stubs will be added in future releases;
+    until then they fall back to GoogleTranslator with a log warning.
+    """
+    import logging
+    log = logging.getLogger("TranslatorFactory")
+
+    engine_id: str = settings.get("engine", "google")
+    concurrency: int = settings.get("concurrent_requests", 8)
+    batch_size: int = settings.get("batch_size", 15)
+    common_kwargs = dict(
+        concurrency=concurrency,
+        batch_size=batch_size,
+        request_delay_ms=settings.get("request_delay_ms", DEFAULT_REQUEST_DELAY_MS),
+        timeout_seconds=settings.get("request_timeout", DEFAULT_TIMEOUT_SECONDS),
+        max_retries=settings.get("max_retries", DEFAULT_MAX_RETRIES),
+        use_syntax_guard=settings.get("use_syntax_guard", True),
+    )
+
+    if engine_id in ("google", "lingva"):
+        return GoogleTranslator(
+            **common_kwargs,
+            use_multi_endpoint=settings.get("use_multi_endpoint", DEFAULT_USE_MULTI_ENDPOINT),
+            enable_lingva_fallback=(
+                True if engine_id == "lingva"
+                else settings.get("enable_lingva_fallback", DEFAULT_ENABLE_LINGVA_FALLBACK)
+            ),
+        )
+
+    # --- future engines (not yet implemented) ---
+    unsupported_msg = {
+        "deepl":          "DeepL engine is not yet implemented — falling back to Google Translate.",
+        "openai":         "OpenAI/ChatGPT engine is not yet implemented — falling back to Google Translate.",
+        "gemini":         "Google Gemini engine is not yet implemented — falling back to Google Translate.",
+        "local_llm":      "Local LLM (Ollama) engine is not yet implemented — falling back to Google Translate.",
+        "libretranslate": "LibreTranslate engine is not yet implemented — falling back to Google Translate.",
+    }
+    msg = unsupported_msg.get(engine_id, f"Unknown engine '{engine_id}' — falling back to Google Translate.")
+    log.warning(msg)
+
+    return GoogleTranslator(
+        **common_kwargs,
+        use_multi_endpoint=settings.get("use_multi_endpoint", DEFAULT_USE_MULTI_ENDPOINT),
+        enable_lingva_fallback=settings.get("enable_lingva_fallback", DEFAULT_ENABLE_LINGVA_FALLBACK),
+    )

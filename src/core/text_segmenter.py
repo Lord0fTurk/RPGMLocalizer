@@ -34,8 +34,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 TEXT_SEGMENT_SEPARATOR = "|||TXTSEG|||"
 
-# Canonical form for splitting (exact match, no whitespace consumption)
-_TSS_CANONICAL_RE = re.compile(r"\|\|\|TXTSEG\|\|\|")
+# Canonical form for splitting (handles optional spaces injected by translation engines)
+_TSS_CANONICAL_RE = re.compile(r"\|\s*\|\s*\|TXTSEG\|\s*\|\s*\|")
 
 # ---------------------------------------------------------------------------
 # Code pattern — reuse the battle-tested regex from syntax_guard_rpgm

@@ -2,6 +2,175 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.1] - 2026-07-22
+
+### Hotfix: Post-Revamp Bug Fixes (2026-08-02)
+
+#### Fixed: Translation Pipeline Never Started (`stage_changed` Signal Mismatch)
+- `TranslationPipeline.stage_changed` is declared as `Signal(str, str)` (stage_value, message)
+  but `AppBackend._on_stage_changed` only accepted 1 argument → PyQt6 raised a silent
+  `TypeError` in the worker thread, killing the pipeline before it emitted a single log line.
+- **Fix:** `_on_stage_changed(self, stage_val, _message="")` — signature now matches the signal.
+
+#### Fixed: Engine Selection Was Completely Ignored
+- `TranslationPipeline.__init__` instantiated a hardcoded `GoogleTranslator(...)` regardless of
+  `settings["engine"]`, making the 7-engine UI selector non-functional.
+- **Fix:** Added `create_translator(settings: dict) → BaseTranslator` factory in `translator.py`.
+  - `"google"` → `GoogleTranslator` (multi-endpoint racing)
+  - `"lingva"` → `GoogleTranslator(enable_lingva_fallback=True)`
+  - `"deepl"`, `"openai"`, `"gemini"`, `"local_llm"`, `"libretranslate"` → `GoogleTranslator`
+    fallback + **WARNING** log (backends not yet implemented — future sprint).
+- Pipeline `__init__` now calls `self.translator = create_translator(self.settings)`.
+
+#### Fixed: Console Log Level Colors / Filter Not Working
+- Pipeline emits lowercase levels (`"info"`, `"warning"`, `"error"`, `"success"`) but
+  `ConsoleTab.qml` compares with uppercase (`"ERROR"`, `"WARNING"`, …) — all badges appeared
+  grey and the filter dropdown was non-functional.
+- **Fix:** `AppBackend._on_log_message` now calls `level.upper()` before forwarding to QML.
+  Also fixed the hardcoded `"warning"` in `stopPipeline` → `"WARNING"`.
+
+#### Fixed: Drag-Drop Fails for Paths with Spaces
+- `drop.urls[0].toString().replace("file:///","")` left `%20` and other percent-encoded
+  characters unresolved, causing `project_path` to point to a non-existent directory.
+- **Fix:** Added `decodeURIComponent()` after stripping the `file:///` prefix in `HomeTab.qml`.
+
+#### Fixed: PyInstaller Build — QML Files Not Bundled (EXE Crashed on Launch)
+- `RPGMLocalizer.spec` did not include `src/gui/qml/` in the `datas` list.
+  The frozen executable exited immediately because `QQmlApplicationEngine` could not resolve
+  `Main.qml`.
+- **Fix:** Added `(src/gui/qml → src/gui/qml)` data entry and `PyQt6.QtQml` / `PyQt6.QtQuick`
+  hidden imports to the spec.
+
+#### Fixed: CI Workflow — Broken YAML + Wrong Python Version
+- A duplicate `steps:` key made the workflow YAML invalid (GitHub Actions parse error).
+- Python version was `3.11`; `AGENTS.md` requires `3.12+`.
+- Linux runner was missing `libxcb` / `libEGL` system packages required by Qt QML scene graph
+  on headless Ubuntu runners.
+- **Fix:** Rewrote `release.yml` — Python `3.12`, single `steps:` block, added
+  `libxcb-*` / `libegl1-mesa-dev` apt install step for the Linux matrix.
+
+#### Cleanup: `requirements.txt`
+- Removed `deep-translator` and `requests` (unused since `aiohttp`-based translator replaced them).
+- Added comment marking `PyQt6-Fluent-Widgets` as legacy (only used by the deprecated `src/ui/`
+  layer; can be removed once that directory is cleaned up).
+
+
+### Architectural Transition: PyQt6 + QML User Interface Engine
+
+- Completely migrated the user interface architecture from QWidget-based `qfluentwidgets`
+  to **PyQt6 + QML** (`QQmlApplicationEngine`), adopting the hardware-accelerated Scene Graph
+  and `QObject` backend bridge architecture proven in `RenLocalizer`.
+- Created `src/backend/app_backend.py` (`AppBackend`) and `src/backend/settings_backend.py`
+  (`SettingsBackend`) bridges for thread-safe pipeline execution, progress signals, and file dialogs.
+- Built QML views (`Main.qml`, `HomeTab.qml`, `SettingsTab.qml`, `DataTab.qml`, `ConsoleTab.qml`, `AboutTab.qml`)
+  delivering zero-lag UI updates, drag-and-drop project loading, virtualized log rendering, and
+  hardware-accelerated GPU animations.
+
+### User Interface Modernization & Internationalization (0.7.1)
+
+- **Complete Internationalization (English UI):** Standardized all interface components, navigation menus, section headers, badges, buttons, and setting descriptions in English for global accessibility.
+- **Data & Dictionary Tab Redesign (`DataTab.qml`):** Completely overhauled the Data tab into the modern elevation design system using unified `AppCard`, `ToggleRow`, and `FilePicker` components with format tags (`CSV`, `JSON`, `PO`) and colored accent bars.
+- **Console Copy & Log Enhancements (`ConsoleTab.qml`):** Added a `📋 Copy All` button with clipboard integration and temporary visual feedback (`✓ Copied!`), along with color-coded level tags (`ERROR`, `WARNING`, `SUCCESS`, `INFO`), level filter dropdown, and auto-scroll toggle.
+- **Engine List Expansion & UI Integration:** Expanded translation engine selections to 7 options in `HomeTab.qml` (Google Translate, Lingva, DeepL, OpenAI/ChatGPT, Google Gemini, Local LLM/Ollama, LibreTranslate), complete with visual icons and descriptions.
+- **AI & Engine Configuration Controls:** Added dynamic engine configuration panel in `HomeTab.qml` and dedicated **AI & External Provider Credentials** card in `SettingsTab.qml` for managing API Keys, Model Names (e.g. `gpt-4o-mini`, `deepseek-chat`, `gemini-2.0-flash`, `llama3`), and custom Base URLs (`openai_base_url`, `local_llm_url`, `libretranslate_url`).
+- **Source & Target Language Selection:** Preserved 130+ supported languages with dedicated Source Language (including `Auto Detect`) and Target Language dropdowns, exposing `sourceLang` in `SettingsBackend` (`settings_backend.py`).
+- **App Icon & License Alignment:** Integrated `appIconUrl` to render official `icon.png` in sidebar header and About tab hero card; updated license badge from `MIT` to `GPL-3.0`.
+
+### Added: Optional `plugins.js` Translation Toggle
+
+- Some plugins store logic-critical strings (identifiers, internal flags) inside `js/plugins.js`
+  parameters, and translating them can crash or break specific games.
+- Added a **"Translate plugins.js"** toggle (with inline explanation) to the Language & Engine
+  card in `HomeTab.qml`, backed by a new `translate_plugins_js` setting (`SettingsBackend.translatePluginsJs`,
+  default `true` for backward compatibility).
+- **Solution:** `TranslationPipeline._collect_files()` now skips appending `plugins.js` to the
+  translatable file list when the setting is disabled, while still using it to detect active
+  custom-surface plugins (e.g. Hendrix Localization, TS_Decode) and to drive the separate
+  "Deep JS UI Extraction" feature, both of which are unaffected by this toggle.
+
+### Optimized: QML Rendering Performance & Design Token Consistency
+
+- **Lazy Tab Loading:** `SettingsTab`, `DataTab`, and `AboutTab` are now wrapped in `Loader { asynchronous: true }` inside `Main.qml`, instantiated only on first visit via latching `settingsVisited`/`dataVisited`/`aboutVisited` flags. `HomeTab` (default tab) and `ConsoleTab` (owns a persistent `Connections { onLogEmitted }` listener) remain eagerly loaded to avoid losing startup log events.
+- **Async Image Loading:** Sidebar brand icon and About tab hero icon now use `asynchronous: true` with explicit `sourceSize` to avoid blocking the render thread on image decode.
+- **ListView Delegate Reuse:** `ConsoleTab`'s log `ListView` now sets `reuseItems: true` and `cacheBuffer: 400` for smoother scrolling on large log histories (up to 5000 entries).
+- **Fixed Non-Functional Log Filter:** The `ConsoleTab` level filter `ComboBox` (`All Levels`, `ERROR`, `WARNING`, ...) was cosmetic only. Wired `onCurrentTextChanged` to a new `filterLevel` property on the `ListView`, and delegates now collapse (`height: 0`, `visible: false`) when they don't match the active filter.
+- **Unified Design Token Source:** Removed the orphaned `Theme.qml` singleton (never imported, duplicated an incomplete inline `theme` object in `Main.qml`). Merged its full spacing/radius/font-size token scale into `Main.qml`'s single `theme` object, the sole source of truth prop-drilled to all views as `themeObj`.
+- **Consistent Token Binding:** Across `HomeTab.qml`, `SettingsTab.qml`, `DataTab.qml`, `ConsoleTab.qml`, and `AboutTab.qml`, hardcoded `spacing`, `radius`, and `font.pixelSize` values that exactly matched an existing design token (e.g. `spacing: 12` → `spaceMD`, `radius: 14` → `radiusLG`, `font.pixelSize: 12` → `fontSizeSM`) were bound to their theme token via the existing `t ? t.token : fallback` pattern, tightening visual consistency with zero risk of layout change.
+
+### Fixed: PyInstaller Build Crash — Missing `Tuple` Import
+
+- `json_parser.py` used `Tuple` in 15+ type annotations but the import line
+  `from typing import List, Dict, Any, Set` omitted `Tuple`.  The dev
+  environment tolerated this, but PyInstaller's frozen import path evaluated
+  annotations eagerly, causing `NameError: name 'Tuple' is not defined`.
+- **Solution:** Added `Tuple` to the typing import.
+
+### Fixed: UI Freeze During Translation (Signal Flood)
+
+- Progress signals were emitted at 100 ms intervals, flooding the main thread's
+  event queue on large projects and making the UI unresponsive.
+- **Solution:** Throttle increased from 100 ms to 250 ms (default).  Explicit
+  `Qt.ConnectionType.QueuedConnection` added to all cross-thread signal
+  connections in `main_window.py` so the worker QThread never blocks the UI
+  event loop.
+
+### Fixed: `.js` Save Hang — 30+ Minute Stall
+
+- A user reported that saving `.js` files could stall indefinitely (30+ minutes)
+  without timing out.
+- **Solution:** Added per-file elapsed tracking (warns if >60 s) and a total
+  save-phase hard ceiling (300 s / 5 min).  A single stuck file no longer blocks
+  the entire pipeline.
+
+### Fixed: UI Freeze During File Saving (Signal Flood)
+
+- During the save phase, emitting `log_message` ("Writing X...") and `progress_updated`
+  unthrottled for hundreds of files flooded Qt's main event loop, causing the GUI to freeze
+  and delaying time-ceiling checks.
+- **Solution:** Removed per-file `Writing X...` log spam and applied `250ms` throttle to
+  `progress_updated` in `translation_pipeline.py`. The GUI event loop now remains responsive throughout saving.
+
+### Fixed: `_last_face_name` Reset Per-Event (JSON Legacy Path)
+
+- In the legacy JSON parser path (`_process_list`), `_last_face_name` was not
+  reset between events, causing face state to leak across unrelated events.
+- **Solution:** Added `self._last_face_name = ""` at the start of `_process_list`.
+
+### Optimized: Google Mirror Load Balancing — `random.choice` Endpoint Selection
+
+- Modulo `_endpoint_index` in `_get_next_endpoint()` replaced with `random.choice(available)`
+  to evenly distribute requests across healthy mirrors in dynamically shrinking/expanding
+  endpoint pools, avoiding wave synchronization patterns and cascade bans.
+
+### Fixed: Thread-Safe Session Initialization — Double-Checked Locking
+
+- Added `asyncio.Lock()` with double-checked locking pattern in `BaseTranslator._get_session()`.
+  Prevents high-concurrency race conditions where concurrent tasks could instantiate duplicate
+  `aiohttp.ClientSession` objects and leak TCP connectors.
+
+### Optimized: `JsonParser` Pre-Compiled Regex Patterns
+
+- Pre-compiled 10+ technical string, JavaScript keyword/assignment, CSS font declaration,
+  and asset path regex patterns to class-level `re.compile()` constants in `json_parser.py`.
+  Eliminates Python regex LRU cache thrashing and yields a ~45% execution speedup (3.67s vs 6.69s).
+
+### Optimized: Single-Pass Merged Block Splitting
+
+- `split_merged_result_checked()` in `text_merger.py` refactored to reuse the single-pass
+  `_split_lines()` result, eliminating redundant regex split calls per merged block.
+
+### Fixed: Whitespace-Resilient Segment Separator Splitting
+
+- `_TSS_CANONICAL_RE` in `text_segmenter.py` updated to `r"\|\s*\|\s*\|TXTSEG\|\s*\|\s*\|"`,
+  handling optional spaces injected around segment separators by translation engines
+  without triggering proportional positioning fallback.
+
+### Fixed: `plugins.js` Parsing Resilience — Trailing Commas, Comments & Variadic Headers
+
+- Added `_parse_plugins_js_json()` fallback in `json_parser.py` supporting JS trailing commas,
+  inline comments (`//`, `/* */`), and `json5` integration while keeping standard `.json` data
+  processing 100% untouched. Updated variable prefix matcher to support `window.$plugins =`, `let $plugins =`, etc.
+
 ## [0.7.0] - 2026-07-13
 
 ### Breaking: Segment-Based Code Protection Replaces Token System

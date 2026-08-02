@@ -11,49 +11,26 @@ from src.utils.qt_bootstrap import (
 
 bootstrap_qt_environment()
 
+from PyQt6.QtCore import QUrl
 from PyQt6.QtGui import QIcon
+from PyQt6.QtQml import QQmlApplicationEngine
 from PyQt6.QtWidgets import QApplication
-from qfluentwidgets import Theme, setTheme
 
-from src.ui.main_window import MainWindow
+from src.backend.app_backend import AppBackend
+from src.backend.settings_backend import SettingsBackend
 
 
 def main() -> None:
     apply_qt_application_attributes()
 
-    from qfluentwidgets import Theme, setTheme, setThemeColor
-    from PyQt6.QtGui import QPalette, QColor
-
-    setThemeColor('#00b4d8')  # Turkuaz accent
-    setTheme(Theme.DARK)
-
+    # QApplication (not QGuiApplication) is required: AppBackend's file/folder
+    # pickers use QFileDialog, a QtWidgets class that needs a real QApplication.
     app = QApplication(sys.argv)
-
-    # Force a dark application palette as a safety net against system
-    # theme palette leaks (custom/high-contrast Windows themes can inject
-    # all-white colours even through Fusion).  qfluentwidgets and our QSS
-    # handle the real styling, but this prevents edge-case white flashes.
-    dark = QPalette()
-    dark.setColor(QPalette.ColorRole.Window, QColor("#0a1628"))
-    dark.setColor(QPalette.ColorRole.WindowText, QColor("#d6e6ff"))
-    dark.setColor(QPalette.ColorRole.Base, QColor("#131f35"))
-    dark.setColor(QPalette.ColorRole.AlternateBase, QColor("#1a2d4a"))
-    dark.setColor(QPalette.ColorRole.Text, QColor("#d6e6ff"))
-    dark.setColor(QPalette.ColorRole.Button, QColor("#1a2d4a"))
-    dark.setColor(QPalette.ColorRole.ButtonText, QColor("#d6e6ff"))
-    dark.setColor(QPalette.ColorRole.BrightText, QColor("#ff5252"))
-    dark.setColor(QPalette.ColorRole.Highlight, QColor("#00b4d8"))
-    dark.setColor(QPalette.ColorRole.HighlightedText, QColor("#0a1628"))
-    dark.setColor(QPalette.ColorRole.Link, QColor("#48cae4"))
-    dark.setColor(QPalette.ColorRole.PlaceholderText, QColor("#5a7090"))
-    app.setPalette(dark)
 
     icon_path = existing_resource_path("icon.png", "icon.ico")
     if icon_path:
         app.setWindowIcon(QIcon(icon_path))
 
-    # Safety net: force-kill the process if background threads (ThreadPoolExecutor
-    # workers, stuck QThreads, etc.) prevent a clean exit after the event loop ends.
     def _force_exit() -> None:
         non_daemon = [
             t for t in threading.enumerate()
@@ -64,9 +41,23 @@ def main() -> None:
 
     app.aboutToQuit.connect(_force_exit)
 
-    window = MainWindow()
-    emit_runtime_diagnostics(window.on_log_message)
-    window.show()
+    settings_backend = SettingsBackend()
+    app_backend = AppBackend(settings_backend)
+
+    engine = QQmlApplicationEngine()
+    engine.rootContext().setContextProperty("appBackend", app_backend)
+    engine.rootContext().setContextProperty("settingsBackend", settings_backend)
+
+    qml_file = existing_resource_path("src/gui/qml/Main.qml")
+    if not qml_file or not os.path.exists(qml_file):
+        qml_file = os.path.join(os.path.dirname(__file__), "src", "gui", "qml", "Main.qml")
+
+    engine.load(QUrl.fromLocalFile(os.path.abspath(qml_file)))
+
+    if not engine.rootObjects():
+        sys.exit(-1)
+
+    emit_runtime_diagnostics(app_backend._on_log_message)
     sys.exit(app.exec())
 
 

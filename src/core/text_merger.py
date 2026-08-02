@@ -85,7 +85,19 @@ class TextMerger:
 
     def split_merged_result(self, merged_text: str, original_entries: List[Tuple[str, str, str]]) -> List[Tuple[str, str]]:
         """Splits the merged result and returns a list of (key, text) pairs."""
-        lines, expected_count, mismatch = self._split_lines(merged_text, original_entries)
+        results, _ = self.split_merged_result_checked(merged_text, original_entries)
+        return results
+
+    def split_merged_result_checked(self, merged_text: str, original_entries: Any) -> Tuple[List[Tuple[str, str]], bool]:
+        """Splits the merged result and returns ((key, text) pairs, mismatch_flag)."""
+        formatted_orig = []
+        for entry in original_entries:
+            if len(entry) == 3:
+                formatted_orig.append(entry)
+            else:
+                formatted_orig.append(("", str(entry[1]), str(entry[2])))
+
+        lines, expected_count, mismatch = self._split_lines(merged_text, formatted_orig)
 
         if mismatch:
             if len(lines) > expected_count:
@@ -94,26 +106,13 @@ class TextMerger:
             else:
                 # Fewer parts than expected — pad with original texts to avoid data loss.
                 for i in range(len(lines), expected_count):
-                    lines.append(original_entries[i][2])
+                    lines.append(formatted_orig[i][2])
 
         results = []
         for i, line in enumerate(lines):
-            if i < len(original_entries):
-                results.append((original_entries[i][1], line))
-        return results
-
-    def split_merged_result_checked(self, merged_text: str, original_entries: Any) -> Tuple[List[Tuple[str, str]], bool]:
-        """Backward compatibility wrapper for existing tests and UI."""
-        formatted_orig = []
-        for entry in original_entries:
-            if len(entry) == 3:
-                formatted_orig.append(entry)
-            else:
-                formatted_orig.append(("", str(entry[1]), str(entry[2])))
-
-        res = self.split_merged_result(merged_text, formatted_orig)
-        _, _, mismatch = self._split_lines(merged_text, formatted_orig)
-        return res, mismatch
+            if i < len(formatted_orig):
+                results.append((formatted_orig[i][1], line))
+        return results, mismatch
 
     def _split_lines(self, merged_text: str, original_entries: List[Tuple[str, str, str]]) -> Tuple[List[str], int, bool]:
         """

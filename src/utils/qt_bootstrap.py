@@ -207,7 +207,11 @@ def bootstrap_qt_environment() -> dict[str, str]:
     # Force Fusion style to completely bypass OS theme palette inheritance.
     # Custom/high-contrast Windows themes can set all QPalette roles to white,
     # producing a blank white screen.  Fusion uses its own palette internally.
-    os.environ.setdefault("QT_STYLE_OVERRIDE", "fusion")
+    # NOTE: must be "Fusion" (exact case) — QtQuick Controls resolves this
+    # value as a QML style module name too, and that lookup is case-sensitive
+    # (lowercase "fusion" raises "module fusion is not installed" and aborts
+    # QML loading entirely), even though QStyleFactory itself is case-insensitive.
+    os.environ.setdefault("QT_STYLE_OVERRIDE", "Fusion")
     # Disable the platform theme plugin so Qt never queries Windows / macOS
     # for colours, fonts, or style hints.
     os.environ.setdefault("QT_QPA_PLATFORMTHEME", "")

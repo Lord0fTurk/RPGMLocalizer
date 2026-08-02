@@ -1558,5 +1558,34 @@ class TestVocabContextPropagation(unittest.TestCase):
         self.assertIn("Status", texts)
 
 
+class TestPluginsJsHardening(unittest.TestCase):
+    """Test plugins.js reading/writing resilience (trailing commas, comments, window.$plugins)."""
+
+    def setUp(self):
+        self.parser = JsonParser()
+
+    def test_parse_plugins_js_json_with_trailing_comma(self):
+        """plugins.js with trailing comma should be parsed cleanly without JSONDecodeError."""
+        raw_json = '[{"name": "PluginA", "status": true,},]'
+        data = self.parser._parse_plugins_js_json(raw_json)
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["name"], "PluginA")
+
+    def test_parse_plugins_js_json_with_comments(self):
+        """plugins.js with JS comments should be parsed cleanly."""
+        raw_json = '[\n// Line comment\n{"name": "PluginB", /* block comment */ "status": false}\n]'
+        data = self.parser._parse_plugins_js_json(raw_json)
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["name"], "PluginB")
+
+    def test_extract_js_json_window_plugins(self):
+        """window.$plugins = [...] header pattern should be recognized."""
+        content = '/* Header */\nwindow.$plugins = [\n{"name": "PluginC"}\n];'
+        prefix, json_str, suffix = self.parser._extract_js_json(content)
+        self.assertIsNotNone(prefix)
+        self.assertIn("window.$plugins =", prefix)
+        self.assertIsNotNone(json_str)
+
+
 if __name__ == '__main__':
     unittest.main()

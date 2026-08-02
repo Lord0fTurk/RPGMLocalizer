@@ -333,6 +333,31 @@ class JsonParser(BaseParser):
         re.compile(r'^TRP_Particle', re.IGNORECASE),
     ]
 
+    _HEX_COLOR_RE = re.compile(r'[0-9a-fA-F]{6}')
+    _VISUAL_SEP_RE = re.compile(r'[-=~*_]{4,}')
+    _FONT_DECL_RE = re.compile(r'[A-Za-z][A-Za-z0-9\s_-]*(?:\s*,\s*[A-Za-z][A-Za-z0-9\s_-]*)+')
+    _JS_AMBIGUOUS_RES = (
+        re.compile(r'(?:^|[;\n{]\s*)return\s+[a-zA-Z_$]'),
+        re.compile(r'(?:^|[;\n{]\s*)let\s+[a-zA-Z_$]\w*\s*[=;,\[]'),
+        re.compile(r'\bnew\s+[A-Z][a-zA-Z0-9_]*\s*[\(\[{]'),
+        re.compile(r'\bthis\.[a-zA-Z_$]\w*'),
+    )
+    _JS_ASSIGN_RES = (
+        re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?\s*(?:[+\-*/]?={1,3}|!==?)\s*(?:true|false|null|undefined|!?[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?(?:\.[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?)*|\d+);$'),
+        re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?\s*(?:={1,3}|!==?)\s*(?:true|false|null|undefined)$'),
+        re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?\s*(?:[+\-*/]={1,2})\s*(?:!?[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?(?:\.[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?)*|\d+)$'),
+        re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])+\s*(?:={1,3}|!==?)\s*(?:!?[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?(?:\.[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?)*|\d+)$'),
+        re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*\s*(?:={1,3}|!==?)\s*!?[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?(?:\.[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?)+$'),
+    )
+    _MATH_EXPR_CHARSET_RE = re.compile(r'^[\d\s\.\+\-\*/\(\)a-zA-Z_\[\]><=!&|?:,%;]+$')
+    _MATH_EXPR_OP_RE = re.compile(r'[\+\-\*/><=!&|]')
+    _MATH_EXPR_ALPHA_RE = re.compile(r'[a-zA-Z]')
+    _MATH_EXPR_DIGIT_RE = re.compile(r'\d')
+    _MATH_EXPR_NATURAL_WORDS_RE = re.compile(r'\b[a-zA-Z_]\w*\s+[a-zA-Z_]\w*\b')
+    _ASSET_PATH_RE = re.compile(r'[A-Za-z0-9_ ./\\\-]+')
+    _ASSET_SPACED_RE = re.compile(r'[A-Za-z0-9_ \-]+')
+    _ASSET_SINGLE_RE = re.compile(r'[A-Za-z0-9_\-]+')
+
     ASSET_FILE_EXTENSIONS = (
         '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tga', '.svg', '.webp',
         '.ogg', '.wav', '.m4a', '.mp3', '.mid', '.midi',
@@ -454,8 +479,8 @@ class JsonParser(BaseParser):
                 prefix, json_str, suffix = self._extract_js_json(content)
                 if prefix and json_str:
                     try:
-                        data = json.loads(json_str)
-                    except json.JSONDecodeError as e:
+                        data = self._parse_plugins_js_json(json_str)
+                    except Exception as e:
                          logger.error(f"Failed to parse JSON in {file_path}: {e}")
                          return []
                 else:
@@ -2241,7 +2266,7 @@ class JsonParser(BaseParser):
         if cleaned_text.startswith('#') and len(cleaned_text) in [4, 5, 7, 9]:
             return True
         # Bare hex color without '#' prefix (e.g. "bca3a7", "ff5bbc") — developer color notes
-        if re.fullmatch(r'[0-9a-fA-F]{6}', cleaned_text):
+        if self._HEX_COLOR_RE.fullmatch(cleaned_text):
             return True
         if text_lower.startswith(('rgb(', 'rgba(')):
             return True
@@ -2251,11 +2276,11 @@ class JsonParser(BaseParser):
 
         # Visual separator strings: plugin group-break parameters (e.g. '---...---', '===...===')
         # These are pure visual dividers in the editor — never player-visible text.
-        if re.fullmatch(r'[-=~*_]{4,}', cleaned_text):
+        if self._VISUAL_SEP_RE.fullmatch(cleaned_text):
             return True
 
         # CSS font-family declarations (e.g. "GameFont, sans-serif", "Meiryo, MS Gothic")
-        if re.fullmatch(r'[A-Za-z][A-Za-z0-9\s_-]*(?:\s*,\s*[A-Za-z][A-Za-z0-9\s_-]*)+', cleaned_text):
+        if self._FONT_DECL_RE.fullmatch(cleaned_text):
             css_generic_fonts = {'serif', 'sans-serif', 'monospace', 'cursive', 'fantasy',
                                  'system-ui', 'ui-serif', 'ui-sans-serif', 'ui-monospace'}
             parts = [p.strip().lower() for p in cleaned_text.split(',')]
@@ -2268,7 +2293,7 @@ class JsonParser(BaseParser):
         if text_lower in self._KNOWN_GAME_FONTS:
             return True
         
-        # JavaScript code detection â€” NEVER translate JS code
+        # JavaScript code detection — NEVER translate JS code
         # Common JS patterns: return statements, function calls, variable declarations
         # NOTE: Ambiguous English words (let, new, this, return) are handled
         # separately below with syntax-aware regexes to avoid false positives
@@ -2291,17 +2316,7 @@ class JsonParser(BaseParser):
         # Ambiguous JS keywords that overlap with common English words.
         # Use syntax-aware patterns so "let me help" passes through but
         # "let x = 5" is blocked.
-        js_ambiguous_patterns = [
-            # return <value>; or return at statement start followed by identifier
-            r'(?:^|[;\n{]\s*)return\s+[a-zA-Z_$]',
-            # let declaration: let x = ...
-            r'(?:^|[;\n{]\s*)let\s+[a-zA-Z_$]\w*\s*[=;,\[]',
-            # new Constructor( -- word after 'new' starts with uppercase
-            r'\bnew\s+[A-Z][a-zA-Z0-9_]*\s*[\(\[{]',
-            # this.property -- 'this.' followed by identifier char
-            r'\bthis\.[a-zA-Z_$]\w*',
-        ]
-        if any(re.search(pat, cleaned_text) for pat in js_ambiguous_patterns):
+        if any(pat.search(cleaned_text) for pat in self._JS_AMBIGUOUS_RES):
             return True
         
         # JS-like patterns: semicolons at end, curly braces, parentheses with dots
@@ -2311,38 +2326,21 @@ class JsonParser(BaseParser):
             return True
             
         # JS assignment or boolean evaluation (e.g. "show = true;", "enabled = false", "ext = 0;", "value += 1;")
-        is_js_assign = False
-        
-        # 1. Has semicolon -> almost certainly JS (e.g., "show = true;")
-        if re.fullmatch(r'^[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?\s*(?:[+\-*/]?={1,3}|!==?)\s*(?:true|false|null|undefined|!?[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?(?:\.[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?)*|\d+);$', cleaned_text):
-            is_js_assign = True
-        # 2. No semicolon, but RHS is a strict JS keyword (true, false, null, undefined)
-        elif re.fullmatch(r'^[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?\s*(?:={1,3}|!==?)\s*(?:true|false|null|undefined)$', cleaned_text):
-            is_js_assign = True
-        # 3. Compound operators (+=, -=, *=, /=) without semicolon
-        elif re.fullmatch(r'^[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?\s*(?:[+\-*/]={1,2})\s*(?:!?[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?(?:\.[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?)*|\d+)$', cleaned_text):
-            is_js_assign = True
-        # 4. Bracket notation or property access on either side (e.g. A[b] = c, a = b.c)
-        elif re.fullmatch(r'^[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])+\s*(?:={1,3}|!==?)\s*(?:!?[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?(?:\.[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?)*|\d+)$', cleaned_text):
-            is_js_assign = True
-        elif re.fullmatch(r'^[a-zA-Z_][a-zA-Z0-9_]*\s*(?:={1,3}|!==?)\s*!?[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?(?:\.[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]]+\])?)+$', cleaned_text):
-            is_js_assign = True
-            
-        if is_js_assign:
+        if any(pat.fullmatch(cleaned_text) for pat in self._JS_ASSIGN_RES):
             return True
             
         # 5. Strict eval/math expression detection (e.g., "100 + textSize * 10", "Width / 2", "1.5 * user", "x = y + Math.max(0, 10)")
-        if re.fullmatch(r'^[\d\s\.\+\-\*/\(\)a-zA-Z_\[\]><=!&|?:,%;]+$', cleaned_text):
+        if self._MATH_EXPR_CHARSET_RE.fullmatch(cleaned_text):
             # Must contain at least one operator and one letter
-            if re.search(r'[\+\-\*/><=!&|]', cleaned_text) and re.search(r'[a-zA-Z]', cleaned_text):
+            if self._MATH_EXPR_OP_RE.search(cleaned_text) and self._MATH_EXPR_ALPHA_RE.search(cleaned_text):
                 # Require at least one digit to distinguish from display text
                 # like "ON / OFF" or "Goodbye!" which match the char-class pattern
                 # but are clearly not math expressions.
-                if not re.search(r'\d', cleaned_text):
+                if not self._MATH_EXPR_DIGIT_RE.search(cleaned_text):
                     pass  # No digit → skip, likely display text
                 # Ensure no English/natural language consecutive words (e.g. "Name = John Doe").
                 # Valid JS maths shouldn't have words separated ONLY by spaces.
-                elif not re.search(r'\b[a-zA-Z_]\w*\s+[a-zA-Z_]\w*\b', cleaned_text):
+                elif not self._MATH_EXPR_NATURAL_WORDS_RE.search(cleaned_text):
                     return True
                 
         return False
@@ -2362,16 +2360,16 @@ class JsonParser(BaseParser):
         if self._contains_asset_reference(stripped):
             return True
         if '/' in stripped or '\\' in stripped:
-            return re.fullmatch(r'[A-Za-z0-9_ ./\\\-]+', stripped) is not None
+            return self._ASSET_PATH_RE.fullmatch(stripped) is not None
         # Support spaced asset names (e.g. "Hero Face", "Actor1 Face") when word count is small.
         # Short spaced names (1-2 words) with only alphanumeric/underscore/hyphen chars are likely asset IDs.
         # Limit to 2 words to avoid false positives on sentence-like text (e.g. "The hero appears").
         if ' ' in stripped:
             words = stripped.split()
-            if len(words) <= 2 and re.fullmatch(r'[A-Za-z0-9_ \-]+', stripped):
+            if len(words) <= 2 and self._ASSET_SPACED_RE.fullmatch(stripped):
                 return True
             return False
-        return re.fullmatch(r'[A-Za-z0-9_\-]+', stripped) is not None
+        return self._ASSET_SINGLE_RE.fullmatch(stripped) is not None
 
     def _is_extractable_runtime_text(self, text: Any, *, is_dialogue: bool = False) -> bool:
         """Central safety gate for extracted runtime text across JSON surfaces."""
@@ -2509,8 +2507,8 @@ class JsonParser(BaseParser):
                     self._js_prefix = prefix
                     self._js_suffix = suffix
                     try:
-                        data = json.loads(json_str)
-                    except json.JSONDecodeError:
+                        data = self._parse_plugins_js_json(json_str)
+                    except Exception:
                         self.last_apply_error = f"Could not parse JSON payload from {os.path.basename(file_path)}"
                         return None
                 else:
@@ -3264,14 +3262,30 @@ class JsonParser(BaseParser):
             )
         return None
 
+    def _parse_plugins_js_json(self, json_str: str) -> Any:
+        """Parse JSON payload extracted from plugins.js with fallback for trailing commas, comments, and single quotes."""
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            pass
+
+        try:
+            import json5
+            return json5.loads(json_str)
+        except Exception:
+            pass
+
+        cleaned = re.sub(r'//.*?\n|/\*.*?\*/', '', json_str, flags=re.DOTALL)
+        cleaned = re.sub(r',\s*([\]}])', r'\1', cleaned)
+        return json.loads(cleaned)
+
     def _extract_js_json(self, content: str) -> Tuple[str, str, str]:
         """
         Robustly extract the JSON part from a plugins.js file.
         Returns: (prefix, json_str, suffix) or (None, None, None)
         """
-        # Find the start: var $plugins = 
-        # Using regex to find the variable assignment, but not the end
-        match = re.search(r'((?:var|let|const)\s+\$plugins\s*=\s*)', content)
+        # Find the start: var $plugins = , let $plugins =, const $plugins =, window.$plugins =
+        match = re.search(r'((?:(?:var|let|const)\s+|window\.)?\$plugins\s*=\s*)', content)
         if not match:
             return None, None, None
             

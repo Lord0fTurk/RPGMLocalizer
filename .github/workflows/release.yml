@@ -35,7 +35,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
           cache: 'pip'
 
       - name: Install Dependencies
@@ -43,6 +43,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller pillow
+
+      - name: Install Qt platform plugins (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update -qq
+          # libxcb + OpenGL + libEGL needed by PyQt6 QML scene graph on headless Linux
+          sudo apt-get install -y --no-install-recommends \
+            libxcb-xinerama0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xfixes0 \
+            libgl1-mesa-dev libegl1-mesa-dev \
+            libglib2.0-0 libdbus-1-3
 
       - name: Generate Build Icons
         shell: bash
@@ -130,10 +141,10 @@ jobs:
           mkdir -p AppDir/usr/bin
           cp dist/RPGMLocalizer AppDir/usr/bin/RPGMLocalizer
           chmod +x AppDir/usr/bin/RPGMLocalizer
-          
+
           # Copy source icon
           cp icon.png AppDir/icon.png
-          
+
           # Create .desktop file
           cat <<EOF > AppDir/rpgmlocalizer.desktop
           [Desktop Entry]
@@ -144,14 +155,14 @@ jobs:
           Terminal=false
           Categories=Utility;
           EOF
-          
+
           # Create AppRun symlink
           ln -s usr/bin/RPGMLocalizer AppDir/AppRun
-          
+
           # Download and run appimagetool
           wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool-x86_64.AppImage
-          
+
           export ARCH=x86_64
           ./appimagetool-x86_64.AppImage --appimage-extract-and-run AppDir dist/RPGMLocalizer-Linux.AppImage
 

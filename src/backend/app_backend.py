@@ -1,11 +1,13 @@
 import logging
 import os
 import shutil
+import sys
 import webbrowser
 from typing import Any, Dict
 
 from PyQt6.QtCore import QObject, QThread, Qt, QUrl, pyqtProperty, pyqtSignal, pyqtSlot
-from PyQt6.QtWidgets import QApplication, QFileDialog
+from PyQt6.QtGui import QIcon
+from PyQt6.QtWidgets import QApplication, QFileDialog, QSystemTrayIcon, QStyle
 
 from src.core.enums import PipelineStage
 from src.core.translation_pipeline import TranslationPipeline
@@ -38,7 +40,14 @@ class AppBackend(QObject):
         self._progress_text: str = "Ready"
         self._stage_text: str = "Idle"
 
-        self._project_path: str = ""
+        self._project_path: str = str(self.settings_backend.projectPath or "")
+        self._tray_icon: QSystemTrayIcon | None = None
+        self._init_tray()
+
+        # Connect application lifecycle for zero-dangling graceful shutdown
+        app = QApplication.instance()
+        if app:
+            app.aboutToQuit.connect(self.shutdown)
 
     # --- Properties ---
 
@@ -77,6 +86,7 @@ class AppBackend(QObject):
     def projectPath(self, val: str) -> None:
         if self._project_path != val:
             self._project_path = val
+            self.settings_backend.projectPath = val
             self.isRunningChanged.emit()
 
     # --- Slots ---
@@ -138,13 +148,33 @@ class AppBackend(QObject):
             self.logger.warning(f"Could not open URL {url}: {e}")
 
     @pyqtSlot()
+    def openProjectFolder(self) -> None:
+        """Open the active project directory in the OS file manager."""
+        if not self._project_path or not os.path.exists(self._project_path):
+            return
+        try:
+            if os.name == 'nt':
+                os.startfile(self._project_path)
+            elif sys.platform == 'darwin':
+                import subprocess
+                subprocess.Popen(['open', self._project_path])
+            else:
+                import subprocess
+                subprocess.Popen(['xdg-open', self._project_path])
+        except Exception as exc:
+            self.logger.warning(f"Could not open project directory {self._project_path}: {exc}")
+
+    @pyqtSlot()
     def clearCache(self) -> None:
         try:
-            cache_dir = get_cache_dir()
+            from src.utils.app_paths import get_project_id
+            project_id = get_project_id(self._project_path) if self._project_path else None
+            cache_dir = get_cache_dir(project_id=project_id)
             if os.path.exists(cache_dir):
                 shutil.rmtree(cache_dir)
                 os.makedirs(cache_dir, exist_ok=True)
-                self.infoNotice.emit("success", "Cache Cleared", "Translation cache cleared successfully.")
+                msg = f"Translation cache cleared for [{project_id}]." if project_id else "Translation cache cleared successfully."
+                self.infoNotice.emit("success", "Cache Cleared", msg)
             else:
                 self.infoNotice.emit("info", "Cache Empty", "No active cache directory found.")
         except Exception as e:
@@ -205,15 +235,84 @@ class AppBackend(QObject):
     def _on_log_message(self, level: str, msg: str) -> None:
         self.logEmitted.emit(level.upper(), msg)
 
+    def _init_tray(self) -> None:
+        """Initialize system tray icon for desktop notifications if a real QApplication is running."""
+        self._tray_icon = None
+        try:
+            app = QApplication.instance()
+            if app and isinstance(app, QApplication) and QSystemTrayIcon.isSystemTrayAvailable():
+                self._tray_icon = QSystemTrayIcon(self)
+                if not app.windowIcon().isNull():
+                    self._tray_icon.setIcon(app.windowIcon())
+                else:
+                    p = existing_resource_path("icon.png", "icon.ico")
+                    if p and os.path.exists(p):
+                        self._tray_icon.setIcon(QIcon(p))
+                    else:
+                        self._tray_icon.setIcon(app.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxInformation))
+                self._tray_icon.show()
+        except Exception as exc:
+            self.logger.debug(f"Tray initialization skipped: {exc}")
+            self._tray_icon = None
+
+    def _show_system_notification(self, title: str, message: str, success: bool = True) -> None:
+        """Show native OS desktop notification, play chime, and alert taskbar."""
+        # 1. Desktop notification via QSystemTrayIcon
+        try:
+            if self._tray_icon and self._tray_icon.isVisible():
+                icon = QSystemTrayIcon.MessageIcon.Information if success else QSystemTrayIcon.MessageIcon.Critical
+                self._tray_icon.showMessage(title, message, icon, 5000)
+        except Exception as e:
+            self.logger.debug(f"Tray showMessage failed: {e}")
+
+        # 2. Audio Chime
+        try:
+            if os.name == 'nt':
+                import winsound
+                winsound.MessageBeep(winsound.MB_ICONASTERISK if success else winsound.MB_ICONHAND)
+            else:
+                QApplication.beep()
+        except Exception:
+            pass
+
+        # 3. Flash taskbar icon to get user's attention
+        try:
+            app = QApplication.instance()
+            if app and isinstance(app, QApplication):
+                app.alert(None, 0)
+        except Exception:
+            pass
+
     def _on_pipeline_finished(self, success: bool, summary: str) -> None:
         self._is_running = False
         self.isRunningChanged.emit()
+
+        title = "Translation Completed" if success else "Translation Failed"
+        message = summary or ("Project successfully translated." if success else "An error occurred during translation.")
+        self._show_system_notification(title, message, success=success)
+
         if success:
-            self.infoNotice.emit("success", "Translation Complete", summary or "Project localized successfully.")
+            self.infoNotice.emit("success", title, message)
         else:
-            self.infoNotice.emit("error", "Translation Failed", summary or "Errors occurred during pipeline execution.")
+            self.infoNotice.emit("error", title, message)
         self.finished.emit(success, summary)
 
     def _cleanup_thread(self) -> None:
         self._thread = None
         self._pipeline = None
+
+    @pyqtSlot()
+    def shutdown(self, timeout_ms: int = 3000) -> None:
+        """Gracefully stop any active pipeline and terminate the worker thread safely."""
+        if self._pipeline:
+            self._pipeline.stop()
+        if self._thread and self._thread.isRunning():
+            self.logger.info("Graceful shutdown: waiting for worker thread...")
+            self._thread.quit()
+            if not self._thread.wait(timeout_ms):
+                self.logger.warning(
+                    f"Worker thread did not stop within {timeout_ms} ms; terminating forcibly."
+                )
+                self._thread.terminate()
+                self._thread.wait(500)
+        self._cleanup_thread()

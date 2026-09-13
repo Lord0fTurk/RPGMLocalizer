@@ -103,6 +103,8 @@ class ExtractionSurfaceRegistry:
         "volume",
         "pitch",
         "pan",
+        "groupname",
+        "group",
     )
 
     def tokenize(self, key: str) -> set[str]:
@@ -114,7 +116,11 @@ class ExtractionSurfaceRegistry:
 
     def is_text_key(self, key: str) -> bool:
         tokens = self.tokenize(key)
-        return bool(tokens & set(self.TEXT_HINTS)) and not bool(tokens & set(self.ASSET_HINTS))
+        return (
+            bool(tokens & set(self.TEXT_HINTS))
+            and not bool(tokens & set(self.ASSET_HINTS))
+            and not bool(tokens & set(self.TECHNICAL_HINTS))
+        )
 
     def is_menu_label_key(self, key: str) -> bool:
         tokens = self.tokenize(key)

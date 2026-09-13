@@ -56,6 +56,43 @@ DEFAULT_MIRROR_MAX_FAILURES = 5
 DEFAULT_MIRROR_BAN_TIME = 120   # 2-minute cooldown (was 3600); mirrors recover quickly after a soft ban
 DEFAULT_RACING_ENDPOINTS = 1    # 1 endpoint at a time to prevent cascade bans (was 2)
 
+# --- Google Endpoint Hardening (ported from RenLocalizer v2.8.13) ---
+# Per-request headers merged over the session's rotating User-Agent.
+# Since Feb 2026 Google rejects bare-UA clients with 429 even at low
+# volume; these browser-grade headers are the confirmed minimal set
+# that restores access.
+GOOGLE_BROWSER_HEADERS = {
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://translate.google.com/",
+    "Cookie": "CONSENT=YES+cb",
+}
+
+# Alternate Google endpoint family (/translate_a/t, Chrome-dictionary
+# client). Keeps serving traffic while /translate_a/single is IP-range
+# blocked. Response shape differs:
+#   sl set  -> ["translation"]
+#   sl=auto -> [["translation", "detected_lang"]]
+GOOGLE_CLIENTS5_ENDPOINT = "https://clients5.google.com/translate_a/t"
+
+# Third Google-family route: TranslateWebserverUi RPC layer (rpcid MkEWBc).
+# Fully separate pipeline from both /translate_a/single and clients5.
+# Response is a length-prefixed envelope body; translation lives in
+# inner[1][0][0][5] sentences, plain strings at inner[1][0][0].
+GOOGLE_BATCHEXECUTE_ENDPOINT = (
+    "https://translate.google.com/_/TranslateWebserverUi/data/batchexecute"
+)
+
+# IP-level 429 circuit breaker: after this many consecutive 429s Google has
+# flagged the client IP — all mirror rotation is pointless until the flag
+# decays, so requests pause for RATE_LIMIT_LONG_COOLDOWN seconds instead of
+# hammering every host in a tight loop.
+RATE_LIMIT_CIRCUIT_BREAKER_THRESHOLD = 6
+RATE_LIMIT_LONG_COOLDOWN = 300
+# While the breaker is active, primaries are retried at most once per this
+# interval (a single request probes whether the IP flag has decayed).
+RATE_LIMIT_PRIMARY_PROBE_INTERVAL = 300
+
 # --- Safety & Recognition ---
 # Non-translatable key patterns
 NON_TRANSLATABLE_KEYS = {
@@ -63,3 +100,18 @@ NON_TRANSLATABLE_KEYS = {
     'switch_id', 'variable_id', 'common_event_id',
     'animation_id', 'bgm', 'bgs', 'me', 'se'
 }
+
+# --- AI & Translation Constants (ported from RenLocalizer) ---
+AI_DEFAULT_TEMPERATURE = 0.3
+AI_DEFAULT_TIMEOUT = 120  # seconds
+AI_LOCAL_TIMEOUT = 180    # seconds, for local LLMs
+AI_DEFAULT_MAX_TOKENS = 2048
+AI_MAX_RETRIES = 3
+AI_LOCAL_URL = "http://localhost:11434/v1"  # Default Ollama URL
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+]
+

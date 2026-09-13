@@ -58,10 +58,3 @@ class RPGLexer:
             self.logger.warning(f"Lexer fail: {e}")
             return [StringSegment(text, is_code=False)]
 
-# Test bolumu
-if __name__ == "__main__":
-    lexer = RPGLexer()
-    test_str = "Merhaba \\C[1]Kahraman\\C[0]! <WordWrap> [name] hoscakal."
-    tokens = lexer.tokenize(test_str)
-    for t in tokens:
-        print(t)

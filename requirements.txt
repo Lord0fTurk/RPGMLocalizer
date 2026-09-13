@@ -29,3 +29,7 @@ tree-sitter-javascript>=0.25.0
 
 # Lenient JSON5 parsing for malformed plugins.js payloads (trailing commas, comments)
 json5>=0.9.25
+
+# AI Translation Engines (OpenAI, DeepSeek, Local LLM, Gemini)
+openai>=1.50.0
+google-genai>=0.1.0

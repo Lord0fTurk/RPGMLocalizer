@@ -184,8 +184,13 @@ class BaseParser(QObject, metaclass=ParserMeta):
                 # Common asset patterns like Actor1, Map001, etc.
                 if any(c.isdigit() for c in trimmed) and any(c.isalpha() for c in trimmed):
                     return False
-                # MixedCase strings without spaces are usually class names or keys
+                # MixedCase/CamelCase strings without spaces are usually class names, variables or keys (e.g. isQuestActive, questId)
                 if any(c.isupper() for c in trimmed[1:]) and any(c.islower() for c in trimmed):
+                    return False
+                # Technical identifier check (lowerCamelCase or dot-separated properties like actor.hp)
+                if re.fullmatch(r"^[a-z]+(?:[A-Z0-9][a-z0-9]+)+$", trimmed):
+                    return False
+                if '.' in trimmed and not any(c in trimmed for c in ' ,;:!?'):
                     return False
             
             # Short ASCII strings that look like IDs (e.g., 'v1', 'id')
@@ -218,3 +223,30 @@ class BaseParser(QObject, metaclass=ParserMeta):
             return False
 
         return True
+
+    def is_uncertain_text(self, text: str) -> bool:
+        if not isinstance(text, str):
+            return False
+        stripped = text.strip()
+        if not stripped:
+            return False
+
+        if any(ord(char) > 127 for char in stripped):
+            return False
+
+        if ' ' in stripped:
+            return False
+
+        return (
+            any(char.isdigit() for char in stripped)
+            or self._has_camel_hump(stripped)
+            or any(symbol in stripped for symbol in "*_~")
+            or len(stripped) == 1
+        )
+
+    @staticmethod
+    def _has_camel_hump(text: str) -> bool:
+        letters = [char for char in text if char.isalpha()]
+        if len(letters) < 2:
+            return False
+        return any(before.islower() and after.isupper() for before, after in zip(letters, letters[1:]))

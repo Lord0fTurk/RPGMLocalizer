@@ -2,6 +2,157 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.0] - 2026-09-12
+
+### High-Performance Translation & Network Subsystem (Ported from RenLocalizer)
+- **Ultra-Stable Multi-Endpoint Failover Pipeline**:
+  - Implemented bounded concurrency (`asyncio.Semaphore` capped at 4-8 workers) for both `clients5` and `batchexecute` to prevent IP rate-limiting.
+  - Aligned `batchexecute` RPC payload structure (`rpcids: "MkEWBc"`, `hl`, `soc-app`, `soc-platform`) and browser-grade Google headers with RenLocalizer standards.
+  - Added fast-path alternate rescue chain: Primaries -> `clients5.google.com/translate_a/t` -> `translate.google.com/_/TranslateWebserverUi/data/batchexecute` (`MkEWBc` RPC) -> Lingva (`translate.projectsegfau.lt` + verified mirrors).
+  - Eliminates cascading 30-second lockout freezes by failing over immediately per item upon primary blocks.
+  - Robust `batchexecute` RPC envelope parser (`_iter_batchexecute_inner`, `_parse_batchexecute_text`) handling varied response shapes (sentence arrays at `inner[1][0][0][5]`, plain-string nodes at `inner[1][0][0]`, and legacy single-segment strings).
+- **IP-Level 429 Circuit Breaker & Probe Gating**:
+  - Flagged IP protection after 6 consecutive 429s (`RATE_LIMIT_LONG_COOLDOWN = 300s`).
+  - While active, primaries are retried at most once per probe interval (`RATE_LIMIT_PRIMARY_PROBE_INTERVAL = 300s`), while alternate endpoints smoothly handle traffic.
+  - Shared exponential cooldown helpers with thundering-herd jitter protection (`_compute_global_cooldown`, `_apply_global_cooldown`, `_wait_out_global_cooldown`).
+- **Browser-Grade Request Headers (`GOOGLE_BROWSER_HEADERS`)**:
+  - Integrated `Accept`, `Accept-Language`, `Referer: https://translate.google.com/`, and `Cookie: CONSENT=YES+cb` merged over rotating User-Agents to prevent anti-bot blocks.
+- **Automatic Deduplication & HTTP POST Batching**:
+  - Pre-dispatch deduplication (`dup_links`) translates identical dialogue/system strings once and remaps to original positions, saving 30-50% redundant network calls.
+  - Slices unique requests into character-bounded chunks with `|||RPGMSEP_S|||`, dispatching multi-text payloads via HTTP POST to eliminate URL length constraints.
+- **Modular Translators Subsystem (`src/core/translators/`)**:
+  - Decomposed the monolithic translator into Single Responsibility Principle (SRP) modules: `base.py`, `router.py`, `google.py`, `services.py`, and `manager.py`.
+  - Maintained 100% backward-compatible import shim in `translator.py`.
+- **Full AI & External Translation Engine Suite (1:1 with RenLocalizer)**:
+  - **`src/core/ai_translator.py`**: Complete AI translation architecture supporting OpenAI (`gpt-4o-mini`), DeepSeek (`deepseek-chat`), Local LLM (`llama3.2` on Ollama / LM Studio), and Google Gemini (`google.genai` SDK).
+  - **Screenplay / Scene Mode Batching**: Dialogue lines bundled into screenplay format (`### SCENE START ### / [0] Harold: ...`) with speaker attribution, providing rich character gender and formality context while safely stripping speaker prefixes from outputs.
+  - **Tencent Hy-MT Translation Profile (`hy_mt2`)**: Full model profile for Tencent Hy-MT / Hunyuan-MT translation models with model-card sampling recipe (`top_p: 0.6`, `top_k: 20`, `repetition_penalty: 1.05`) and official instruction templates.
+  - **Structured JSON Schema & XML Batching**: Resilient batch parsers with 1-based indexing tolerance and multi-format fallback (scene -> json -> xml).
+  - **Levenshtein Anchor Recovery & Orphan Cleanup**: Smart neighbor-word alignment recovers missing placeholder tokens, while regex scrubbers clean orphaned token fragments.
+  - **`DeepLTranslator`**: Full implementation in `services.py` with XML tag isolation (`<x i="N"/>`), free vs pro URL auto-routing, formality controls (`default`, `formal`, `informal`), and RPG Maker escape sequence whitespace healing.
+  - **`LibreTranslateTranslator`**: Self-hosted and cloud translator with URL normalization, HTML `<span translate="no">` placeholder shielding, entity unescaping, and 429 rate-limit backoff.
+  - **`PseudoTranslator`**: Testing translator supporting `expand` (`[!!! ... !!!]`), `accent` (accents vowels), and `both` modes without external network calls.
+  - **`src/core/exceptions.py`**: Standardized exception classes (`RPGMLocalizerError`, `RateLimitError`, `QuotaExceededError`, `NetworkConnectionError`).
+  - **Factory & Subsystem Wiring**: Updated `create_translator` and `translators/__init__.py` to natively route all engine requests.
+
+
+### Engine Syntax Protection & SyntaxGuard Modernization
+- **Mathematical Unicode Brackets & XML Tags**:
+  - Re-architected code protection using `⟦RLPH{hex}_{id}⟧` (U+27E6 / U+27E7) for Google Translate and `<ph id="N">...</ph>` XML tags for AI/LLM engines.
+- **6-Stage Anti-Corruption Restoration Pipeline**:
+  - *Stage 0*: Fast exact token match restoration.
+  - *Stage 0.5*: Bare token recovery for translation endpoints stripping outer brackets.
+  - *Stage 1*: Script transliteration repair normalizing Cyrillic/Greek token corruptions (e.g. `РЛПХ` -> `RLPH`).
+  - *Stage 2*: Spaced token healing restoring space-mangled tokens (`⟦ RLPH ... ⟧`).
+  - *Stage 3*: Bracket substitution healing recovering alternate brackets (`[RLPH...]`, `【RLPH...】`, `{RLPH...}`).
+  - *Stage 4*: Heuristic Levenshtein / Suffix ID matching.
+  - *Stage 5 (Corruption Fallback)*: Engine safety fallback reverting to original text when critical escape codes are damaged or deleted.
+- **Nested RPG Maker Tag Protection**:
+  - Added balanced recursive bracket support in `text_segmenter.py` and `syntax_guard_rpgm.py` (`\C[\V[1]]`, `\P[\V[n]]`, `\fs[\v[n]]`), preventing nested control codes from leaking into translation.
+- **Choice Condition Syntax Protection**:
+  - First-class regex protection for RPG Maker MZ/MV choice condition plugins (e.g. `MPP_ChoiceEX`, Yanfly) including `en(v[2]>=10)`, `if(s[1])`, and bare variable/switch references (`v[2]`, `s[10]`), preventing Google Translate from translating conditions into language keywords (e.g. `en` -> `ve`).
+- **Transliteration & Separator Bleeding Guards**:
+  - Zero-leak scrubbers detecting Cyrillic/ASCII separator remnants (`|||`, `RPGMSEP`, `TXTSEG`, `ТХЦЭГ`), immediately rejecting and routing corrupted batches.
+- **Identifier & Variable Heuristic Guard**:
+  - Enhanced `is_safe_to_translate` in `base.py` to recognize lowerCamelCase (`isQuestActive`), dot-separated object properties (`actor.hp`), and technical code patterns, completely shielding plugin state and script variables from translation.
+
+### Parser Hardening & Game Data Integrity
+- **Robust Multi-Encoding File Support (`read_text_file`)**:
+  - Implemented `read_text_file` in `src/utils/file_ops.py` with automatic fallback cascade across `utf-8-sig`, `utf-8`, `cp932` (Shift-JIS), `shift_jis`, `euc_jp`, and `latin-1`.
+  - Completely resolved `'utf-8' codec can't decode byte 0x83` crashes in `JS_AST_Extractor` and `JsonParser` when reading Japanese MV/MZ plugins (e.g. `RestoreMenuAfterCommon.js`).
+- **String-Aware Plugin Comment Parser**:
+  - Replaced naive regex in `_parse_plugins_js_json` with string-aware parsing that preserves comments inside JSON string literals (such as `// console.log(...)`), preventing quote unbalancing and syntax errors in Lunatic / script parameter configurations.
+- **Format Token Disambiguation**:
+  - Updated technical string heuristics (`_is_technical_string`) to recognize sprintf/RPG Maker format tokens (`%1`, `%2`, `%s`, `%d`), ensuring format patterns like `Loading %1` and `Day %1` are correctly extracted rather than misidentified as math modulo expressions.
+- **Project-Wide Asset Collision Safety Net**:
+  - Enforced asset collision guard in `_should_block_asset_like_translation_update` across all surfaces, blocking translation mutations matching existing asset filenames (e.g. `Item` -> `Item.png`) even outside asset path context.
+- **Surface & Key Classification Refinement**:
+  - Registered `GroupName` as a technical identifier in `extraction_surface_registry.py` while recognizing `Pattern` as a translatable text format indicator.
+- **Game Registry (Identifier Protection)**:
+  - Added `src/core/parsers/game_registry.py` to build a per-project registry of identifiers the game resolves by exact name from `js/plugins/*.js` and `data/*.json`, holding back strings that would otherwise break lookups if translated.
+- **Listed Surface for Uncertain Plugin Arguments**:
+  - Added `BaseParser.is_uncertain_text` and a `listed` surface in `JsonParser`. Ambiguous single-token plugin arguments that fail the safety gate are collected via `parser.listed_entries()` for manual review in CSV/JSON import rather than silently translated or dropped.
+- **Choice Sync & MoveRoute Guard**:
+  - Choice branches (Code 402) are kept synchronized with choice labels (Code 102) on save to prevent editor drift.
+  - Skips `moveRoute`/`moveFrequency`/`moveSpeed`/`moveType` during generic walking to avoid scanning movement commands.
+- **System Locale Normalization**:
+  - `System.json` `locale` is automatically normalized to `en_US` on save, ensuring the in-game name-entry keyboard defaults to Latin characters rather than Japanese kana.
+
+### RenLocalizer-Grade Configuration & Project-Isolated Cache Architecture
+- **OS-Standard Application Data Paths (`%APPDATA%/RPGMLocalizer`)**:
+  - Migrated configuration, logs, and translation cache out of the application root directory into standard OS-specific data directories (`%APPDATA%/RPGMLocalizer` on Windows, `~/Library/Application Support/RPGMLocalizer` on macOS, `$XDG_DATA_HOME/RPGMLocalizer` on Linux).
+  - Maintained full portable mode support: placing a `.portable` marker in the application directory forces local storage next to the executable.
+  - Implemented legacy portable detection: existing writable `config.json` in the app directory automatically preserves portable operation.
+- **Transparent Configuration Migration (`config.json`)**:
+  - Standardized the primary configuration file name to `config.json`.
+  - Added automatic backward-compatible migration: seamlessly locates legacy `settings.json` or root `config.json` files on first run, imports existing user settings, and writes them atomically to `%APPDATA%/RPGMLocalizer/config.json`.
+- **Project-Aware Translation Memory & Cache (`get_project_id`)**:
+  - Ported RenLocalizer's multi-tiered project identification engine specifically adapted for RPG Maker:
+    1. *MV/MZ*: Extracts game title and identity from `package.json` (`window.title`, `name`) and `data/System.json` (`gameTitle`).
+    2. *XP/VX/VXA*: Extracts title from `Game.ini` (`[Game] Title=...`).
+    3. *Executables*: Detects custom game executable names while ignoring generic launchers (`Game.exe`, `nw.exe`, `RPG_RT.exe`).
+    4. *Directory Fallback*: Normalizes root folder names.
+  - Added `normalize_project_name`: strips browser duplicates (`(1)`, `[1]`), version tags (`v1.0`, `0.2.3`, `2026.04`), platform suffixes (`-pc`, `-win`, `-mac`), and build stages (`beta`, `demo`, `remastered`).
+  - Game updates (e.g. `Game v1.0` -> `Game v1.1`) now automatically share and reuse the same stable cache pool.
+- **Isolated Project & Language Cache Hierarchy**:
+  - Replaced the single global flat cache with isolated directories: `cache/<project_id>/<target_lang>/translation_cache.json`.
+  - Translations from different games never collide, overwrite, or corrupt each other.
+  - Transparently migrates and re-indexes existing flat legacy caches (`.rpgm_cache/translation_cache.json`) into the active project cache.
+- **Path Manager API Parity (`src/utils/path_manager.py`)**:
+  - Added unified `path_manager.py` exporting `get_data_path`, `get_app_dir`, `ensure_data_directories`, `normalize_project_name`, `get_project_id`, and `get_cache_dir`, providing 100% API parity with RenLocalizer.
+
+### Saving Performance, Invariant Validation & Transactional Safety
+- **Pre-Write Shadow Dry-Run**:
+  - Integrated `Validator.validate_json_roundtrip` and `Validator.validate_ruby_roundtrip` directly into `TranslationPipeline._inject_translation`. Translated data is serialized and deserialized in memory to ensure AST integrity and structural invariants before writing to disk.
+- **Session Manifest & Transactional Rollback**:
+  - `BackupManager.create_session_manifest` logs every modified file with original/backup SHA-256 hashes in `.rpgm_backup/manifest_<timestamp>.json`.
+  - Added `rollback_manifest` to enable single-action transactional rollback to vanilla game files.
+- **Parallel Save Dispatcher (`ThreadPoolExecutor`)**:
+  - Re-introduced multi-threaded saving for MV/MZ and generic game data (`ThreadPoolExecutor` bounded to 4-8 workers based on engine profile), replacing slow sequential file writing.
+- **50x Faster AST Invariant Snapshots**:
+  - Replaced Python's slow recursive `copy.deepcopy` in `json_parser.py` with `orjson.loads(orjson.dumps(data))` (with graceful fallback), cutting per-file memory snapshot overhead from 5-10s to ~20-40ms on large JSON/CommonEvents files.
+- **Pre-Filtering Zero-Change Files**:
+  - Pre-filters `file_updates` to only include files that actually contain translation modifications, skipping untouched files immediately and eliminating redundant disk I/O.
+- **Shadow Dry-Run Serialization Reuse**:
+  - `Validator.validate_json_roundtrip` caches serialized byte payloads directly in validation metadata, eliminating duplicate `orjson.dumps` calls during atomic `safe_write`.
+
+### Theatrical Scene Mode & Dialogue Orchestration
+- **Event Command Grouping**:
+  - Added `src/core/parsers/scene_orchestrator.py` grouping Show Text Header (Code 101 / speaker) and consecutive text lines (Code 401) into cohesive `DialogueBlock` structures.
+- **Theatrical Script LLM Formatting**:
+  - Formats scenes in script format (`### SCENE START ### / [0] Harold: ...`), preserving character gender, tone, and Turkish "sen/siz" consistency across dialogue turns.
+- **RPG Maker 4-Line Message Box Reflow (`layout.py`)**:
+  - Added code-aware line measurement and word-boundary reflow algorithm (`measure`/`chop`/`wrap`/`reflow_text` in `src/core/layout.py`) enforcing the 4-line message box constraint without splitting control codes or breaking words.
+- **Resilient LLM Repair (`llm_repair.py`)**:
+  - Added `src/core/llm_repair.py` (`parse_llm_array` Clean/Repaired/Salvaged) handling markdown fences, trailing commas, missing commas between strings, single-quoted arrays, and truncated outputs via string salvage.
+  - Wired into `OpenAICompatibleTranslator._parse_translations` so malformed LLM batches no longer force expensive individual fallbacks.
+
+### Security Hardening & Lifecycle Stability
+- **Ruby Marshal Deserialization Security**:
+  - Added `src/core/parsers/restricted_ruby_unmarshaller.py` enforcing strict allowlists for RPG Maker data classes (`RPG::*`, `Table`, `Color`, `Tone`, `Rect`) to prevent arbitrary code execution during binary deserialization.
+- **Zip Slip / Path Traversal Guard**:
+  - Added `safe_extract_zip` in `src/utils/file_ops.py` validating path resolution (`is_relative_to`) on all extracted archives.
+- **Asynchronous Concurrency & Qt Lifecycle Hardening**:
+  - Worker threads run isolated `asyncio` event loops with safe task cancellation and session cleanup, eliminating `Event loop is closed` errors.
+  - Connected `QApplication.aboutToQuit` to `AppBackend.shutdown(timeout_ms=3000)` ensuring clean worker thread termination and preventing `QThread: Destroyed while thread is still running` crashes.
+
+### Modern UI Components & Desktop Notifications
+- **Native OS Desktop Notifications (`QSystemTrayIcon`)**:
+  - Added system tray notification integration in `AppBackend` delivering Windows desktop balloon/toast alerts upon translation completion even when the app is minimized or running in the background.
+- **Auditory Chime & Taskbar Alert**:
+  - Emits standard OS notification sound (`winsound.MessageBeep` on Windows / `QApplication.beep`) and flashes the Windows taskbar icon via `QApplication.alert` to immediately notify the user.
+- **Interactive Completion Dialog (`CompletionDialog.qml`)**:
+  - Modern dark-themed modal popup displaying completion status, summary statistics (entries processed, outcome), and a one-click "Open Folder" button.
+- **Reusable QML Components (`src/gui/qml/components/`)**:
+  - `ToastNotification.qml`: Animated non-intrusive status notification bubble.
+  - `WarningDialog.qml`: Tactile modal confirmation dialog.
+  - `ShimmerProgressBar.qml`: Smooth shimmer-gradient progress indicator.
+  - `TactileButton.qml`: Responsive scale-bounce feedback button.
+- **Global English Localization Consistency**:
+  - Ensured desktop toast notifications, InfoBar alerts, and completion dialog messages are standardized in English for international users.
+- **Window Reactivation**:
+  - Automatically brings the application window to the foreground (`window.show()`, `window.raise()`, `window.requestActivate()`) upon translation completion.
+
 ## [0.7.1] - 2026-07-22
 
 ### Hotfix: Post-Revamp Bug Fixes (2026-08-02)

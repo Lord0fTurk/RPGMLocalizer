@@ -2,6 +2,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Controls.Material 2.15
 import QtQuick.Layouts 1.15
+import "../components"
 
 Item {
     id: root
@@ -356,6 +357,7 @@ Item {
                         { id: "lingva",         name: "Lingva",             icon: "🔄", desc: "Free · Privacy-friendly Google frontend" },
                         { id: "deepl",          name: "DeepL",              icon: "🎯", desc: "High quality · API key required" },
                         { id: "openai",         name: "OpenAI / ChatGPT",   icon: "🤖", desc: "AI-powered · Context-aware · API key required" },
+                        { id: "deepseek",       name: "DeepSeek",           icon: "🐳", desc: "Fast & affordable · API key required" },
                         { id: "gemini",         name: "Google Gemini",      icon: "✨", desc: "AI-powered · Gemini Pro · API key required" },
                         { id: "local_llm",      name: "Local LLM (Ollama)", icon: "🦙", desc: "Offline · Custom models · No API key" },
                         { id: "libretranslate", name: "LibreTranslate",     icon: "🔓", desc: "Open-source · Self-hostable · Optional API key" },
@@ -393,12 +395,14 @@ Item {
                                     Layout.fillWidth: true
                                     model: langCard.engineNames
                                     currentIndex: langCard.engineIdToIndex(settingsBackend.engine)
-                                    onActivated: settingsBackend.engine = langCard.engineIds[currentIndex]
+                                    onActivated: (index) => { settingsBackend.engine = langCard.engineIds[index] }
                                 }
                                 // Engine description badge
                                 Text {
                                     Layout.fillWidth: true
-                                    text: langCard.engineDefs[engineCombo.currentIndex].icon + "  " + langCard.engineDefs[engineCombo.currentIndex].desc
+                                    text: langCard.engineDefs[engineCombo.currentIndex].icon + "  "
+                                          + langCard.engineDefs[engineCombo.currentIndex].desc
+                                          + (langCard.engineDefs[engineCombo.currentIndex].wip ? " · Coming soon (falls back to Google)" : "")
                                     font.pixelSize: t ? t.fontSizeXS : 10
                                     color: t ? t.textMuted : "#55556a"
                                     elide: Text.ElideRight
@@ -420,7 +424,7 @@ Item {
                                     Layout.fillWidth: true
                                     model: langCard.langNames
                                     currentIndex: langCard.codeToIndex(langCard.langCodes, settingsBackend.sourceLang)
-                                    onActivated: settingsBackend.sourceLang = langCard.langCodes[currentIndex]
+                                    onActivated: (index) => { settingsBackend.sourceLang = langCard.langCodes[index] }
                                 }
                             }
 
@@ -438,7 +442,7 @@ Item {
                                     Layout.fillWidth: true
                                     model: langCard.targetLangNames
                                     currentIndex: langCard.codeToIndex(langCard.targetLangCodes, settingsBackend.targetLang)
-                                    onActivated: settingsBackend.targetLang = langCard.targetLangCodes[currentIndex]
+                                    onActivated: (index) => { settingsBackend.targetLang = langCard.targetLangCodes[index] }
                                 }
                             }
                         }
@@ -476,7 +480,7 @@ Item {
                                     text: settingsBackend.deeplApiKey
                                     placeholder: "Authentication key (e.g. xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx:fx)"
                                     isPassword: true
-                                    onEditingFinished: settingsBackend.deeplApiKey = newText
+                                    onEditingFinished: (newText) => { settingsBackend.deeplApiKey = newText }
                                 }
                             }
 
@@ -494,20 +498,51 @@ Item {
                                         text: settingsBackend.openaiApiKey
                                         placeholder: "sk-..."
                                         isPassword: true
-                                        onEditingFinished: settingsBackend.openaiApiKey = newText
+                                        onEditingFinished: (newText) => { settingsBackend.openaiApiKey = newText }
                                     }
                                     InputField {
                                         label: "Model Name"
                                         text: settingsBackend.openaiModel
                                         placeholder: "gpt-4o-mini or deepseek-chat"
-                                        onEditingFinished: settingsBackend.openaiModel = newText
+                                        onEditingFinished: (newText) => { settingsBackend.openaiModel = newText }
                                     }
                                 }
                                 InputField {
                                     label: "Base URL (Optional - set to https://api.deepseek.com/v1 for DeepSeek)"
                                     text: settingsBackend.openaiBaseUrl
                                     placeholder: "https://api.openai.com/v1"
-                                    onEditingFinished: settingsBackend.openaiBaseUrl = newText
+                                    onEditingFinished: (newText) => { settingsBackend.openaiBaseUrl = newText }
+                                }
+                            }
+
+                            // DeepSeek Settings
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 10
+                                visible: settingsBackend.engine === "deepseek"
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: t ? t.spaceMD : 12
+                                    InputField {
+                                        label: "DeepSeek API Key"
+                                        text: settingsBackend.deepseekApiKey
+                                        placeholder: "sk-..."
+                                        isPassword: true
+                                        onEditingFinished: (newText) => { settingsBackend.deepseekApiKey = newText }
+                                    }
+                                    InputField {
+                                        label: "Model Name"
+                                        text: settingsBackend.deepseekModel
+                                        placeholder: "deepseek-chat"
+                                        onEditingFinished: (newText) => { settingsBackend.deepseekModel = newText }
+                                    }
+                                }
+                                InputField {
+                                    label: "Base URL"
+                                    text: settingsBackend.deepseekBaseUrl
+                                    placeholder: "https://api.deepseek.com/v1"
+                                    onEditingFinished: (newText) => { settingsBackend.deepseekBaseUrl = newText }
                                 }
                             }
 
@@ -525,13 +560,13 @@ Item {
                                         text: settingsBackend.geminiApiKey
                                         placeholder: "AIzaSy..."
                                         isPassword: true
-                                        onEditingFinished: settingsBackend.geminiApiKey = newText
+                                        onEditingFinished: (newText) => { settingsBackend.geminiApiKey = newText }
                                     }
                                     InputField {
                                         label: "Model Name"
                                         text: settingsBackend.geminiModel
                                         placeholder: "gemini-2.0-flash"
-                                        onEditingFinished: settingsBackend.geminiModel = newText
+                                        onEditingFinished: (newText) => { settingsBackend.geminiModel = newText }
                                     }
                                 }
                             }
@@ -549,13 +584,13 @@ Item {
                                         label: "Ollama / LM Studio Base URL"
                                         text: settingsBackend.localLlmUrl
                                         placeholder: "http://localhost:11434/v1"
-                                        onEditingFinished: settingsBackend.localLlmUrl = newText
+                                        onEditingFinished: (newText) => { settingsBackend.localLlmUrl = newText }
                                     }
                                     InputField {
                                         label: "Model Name"
                                         text: settingsBackend.localLlmModel
                                         placeholder: "llama3, mistral, qwen2.5..."
-                                        onEditingFinished: settingsBackend.localLlmModel = newText
+                                        onEditingFinished: (newText) => { settingsBackend.localLlmModel = newText }
                                     }
                                 }
                             }
@@ -573,14 +608,14 @@ Item {
                                         label: "Server URL"
                                         text: settingsBackend.libretranslateUrl
                                         placeholder: "http://localhost:5000"
-                                        onEditingFinished: settingsBackend.libretranslateUrl = newText
+                                        onEditingFinished: (newText) => { settingsBackend.libretranslateUrl = newText }
                                     }
                                     InputField {
                                         label: "API Key (Optional)"
                                         text: settingsBackend.libretranslateApiKey
                                         placeholder: "Optional key"
                                         isPassword: true
-                                        onEditingFinished: settingsBackend.libretranslateApiKey = newText
+                                        onEditingFinished: (newText) => { settingsBackend.libretranslateApiKey = newText }
                                     }
                                 }
                             }
@@ -596,7 +631,7 @@ Item {
                             label: "Translate plugins.js"
                             desc: "Translates UI text stored inside js/plugins.js. Turn this off if translation breaks or crashes a specific game — some plugins keep logic-critical strings there that should stay untouched."
                             checked: settingsBackend.translatePluginsJs
-                            onToggled: settingsBackend.translatePluginsJs = val
+                            onToggled: (val) => { settingsBackend.translatePluginsJs = val }
                         }
                     }
                 }
@@ -637,31 +672,10 @@ Item {
                                 }
                             }
                         }
-                        Rectangle {
-                            Layout.fillWidth: true; height: 8; radius: 4
-                            color: t ? t.bg4 : "#2a2a3a"
-                            Rectangle {
-                                width: parent.width * (appBackend.progressTotal > 0 ? (appBackend.progressCurrent / appBackend.progressTotal) : 0.0)
-                                height: parent.height; radius: parent.radius
-                                gradient: Gradient {
-                                    orientation: Gradient.Horizontal
-                                    GradientStop { position: 0.0; color: t ? t.accentDark : "#5a4dd4" }
-                                    GradientStop { position: 1.0; color: t ? t.accentLight : "#a89bf9" }
-                                }
-                                Behavior on width { NumberAnimation { duration: 300; easing.type: Easing.OutQuad } }
-                            }
-                        }
-                        RowLayout {
-                            Layout.fillWidth: true
-                            Text {
-                                text: appBackend.progressText; font.pixelSize: t ? t.fontSizeSM : 12
-                                color: t ? t.textMuted : "#55556a"; elide: Text.ElideRight; Layout.fillWidth: true
-                            }
-                            Text {
-                                property int pct: appBackend.progressTotal > 0 ? Math.round(appBackend.progressCurrent * 100 / appBackend.progressTotal) : 0
-                                text: pct + "%"; font.pixelSize: t ? t.fontSizeMD : 13; font.bold: true
-                                color: pct > 0 ? (t ? t.accent : "#7c6cf8") : (t ? t.textMuted : "#55556a")
-                            }
+                        ShimmerProgressBar {
+                            themeObj: t
+                            value: appBackend.progressTotal > 0 ? (appBackend.progressCurrent / appBackend.progressTotal) : 0.0
+                            statusText: appBackend.progressText
                         }
                     }
                 }

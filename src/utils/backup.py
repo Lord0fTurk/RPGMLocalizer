@@ -4,7 +4,6 @@ Creates backups before any write operation to prevent data loss.
 """
 import os
 import shutil
-import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
@@ -30,7 +29,6 @@ class BackupManager:
         """
         self.backup_dir = self._resolve_backup_dir(backup_dir)
         self.backup_log: List[tuple] = []  # (original, backup_path, timestamp)
-        self._lock = threading.Lock()  # Serializes concurrent create_backup calls
 
     def _resolve_backup_dir(self, backup_dir: Optional[str]) -> Optional[str]:
         """Resolve explicit backup directories in a cross-platform-safe way."""
@@ -55,49 +53,48 @@ class BackupManager:
             logger.error(f"Cannot backup non-existent file: {file_path}")
             return None
         
-        with self._lock:
-            try:
-                # Determine backup directory
-                if self.backup_dir:
-                    backup_base = self.backup_dir
-                else:
-                    file_dir = os.path.dirname(file_path)
-                    backup_base = os.path.join(file_dir, '.rpgm_backup')
-                
-                # Create backup directory if needed
-                os.makedirs(backup_base, exist_ok=True)
-                
-                # Generate backup filename
-                filename = os.path.basename(file_path)
-                if use_timestamp:
-                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    name, ext = os.path.splitext(filename)
-                    backup_name = f"{name}_{timestamp}{ext}"
-                else:
-                    backup_name = f"{filename}.bak"
-                
-                backup_path = os.path.join(backup_base, backup_name)
-                
-                # Don't overwrite existing backup with same name
-                if os.path.exists(backup_path):
-                    counter = 1
-                    while os.path.exists(backup_path):
-                        name, ext = os.path.splitext(backup_name)
-                        backup_path = os.path.join(backup_base, f"{name}_{counter}{ext}")
-                        counter += 1
-                
-                # Copy file
-                shutil.copy2(file_path, backup_path)
-                
-                # Log the backup
-                self.backup_log.append((file_path, backup_path, datetime.now()))
-                logger.info(f"Created backup: {backup_path}")
-                
-                return backup_path
-                
-            except Exception as e:
-                logger.error(f"Failed to create backup for {file_path}: {e}")
-                return None
+        try:
+            # Determine backup directory
+            if self.backup_dir:
+                backup_base = self.backup_dir
+            else:
+                file_dir = os.path.dirname(file_path)
+                backup_base = os.path.join(file_dir, '.rpgm_backup')
+            
+            # Create backup directory if needed
+            os.makedirs(backup_base, exist_ok=True)
+            
+            # Generate backup filename
+            filename = os.path.basename(file_path)
+            if use_timestamp:
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                name, ext = os.path.splitext(filename)
+                backup_name = f"{name}_{timestamp}{ext}"
+            else:
+                backup_name = f"{filename}.bak"
+            
+            backup_path = os.path.join(backup_base, backup_name)
+            
+            # Don't overwrite existing backup with same name
+            if os.path.exists(backup_path):
+                counter = 1
+                while os.path.exists(backup_path):
+                    name, ext = os.path.splitext(backup_name)
+                    backup_path = os.path.join(backup_base, f"{name}_{counter}{ext}")
+                    counter += 1
+            
+            # Copy file
+            shutil.copy2(file_path, backup_path)
+            
+            # Log the backup
+            self.backup_log.append((file_path, backup_path, datetime.now()))
+            logger.info(f"Created backup: {backup_path}")
+            
+            return backup_path
+            
+        except Exception as e:
+            logger.error(f"Failed to create backup for {file_path}: {e}")
+            return None
     
     def restore_backup(self, backup_path: str, original_path: Optional[str] = None) -> bool:
         """
@@ -161,22 +158,21 @@ class BackupManager:
         file_backups: dict = {}  # original_name -> list of (path, mtime)
         
         # Collect all backups
-        with os.scandir(self.backup_dir) as entries:
-            for entry in entries:
-                if entry.is_file():
-                    mtime = datetime.fromtimestamp(entry.stat().st_mtime)
-                    # Extract original filename (remove timestamp suffix)
-                    name = entry.name
-                    # Pattern: name_YYYYMMDD_HHMMSS.ext
-                    parts = name.rsplit('_', 2)
-                    if len(parts) >= 2:
-                        base_name = parts[0]
-                    else:
-                        base_name = name
-                    
-                    if base_name not in file_backups:
-                        file_backups[base_name] = []
-                    file_backups[base_name].append((entry.path, mtime))
+        for entry in os.scandir(self.backup_dir):
+            if entry.is_file():
+                mtime = datetime.fromtimestamp(entry.stat().st_mtime)
+                # Extract original filename (remove timestamp suffix)
+                name = entry.name
+                # Pattern: name_YYYYMMDD_HHMMSS.ext
+                parts = name.rsplit('_', 2)
+                if len(parts) >= 2:
+                    base_name = parts[0]
+                else:
+                    base_name = name
+                
+                if base_name not in file_backups:
+                    file_backups[base_name] = []
+                file_backups[base_name].append((entry.path, mtime))
         
         # Process each file's backups
         for base_name, backups in file_backups.items():
@@ -212,6 +208,91 @@ class BackupManager:
             'backup_dir': self.backup_dir,
             'files_backed_up': len(set(orig for orig, _, _ in self.backup_log))
         }
+
+    def create_session_manifest(self, session_name: Optional[str] = None) -> Optional[str]:
+        """
+        Export a JSON manifest containing records of all files modified/backed up in this session,
+        including their SHA-256 hashes and backup paths.
+        """
+        if not self.backup_log:
+            return None
+
+        import hashlib
+        import json
+
+        def _calc_sha256(path: str) -> Optional[str]:
+            if not os.path.exists(path):
+                return None
+            h = hashlib.sha256()
+            with open(path, "rb") as f:
+                while chunk := f.read(65536):
+                    h.update(chunk)
+            return h.hexdigest()
+
+        target_dir = self.backup_dir
+        if not target_dir:
+            target_dir = os.path.join(os.path.dirname(self.backup_log[0][0]), '.rpgm_backup')
+        os.makedirs(target_dir, exist_ok=True)
+
+        timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+        name = session_name or f"manifest_{timestamp_str}.json"
+        manifest_path = os.path.join(target_dir, name)
+
+        records = []
+        for orig, bak, ts in self.backup_log:
+            records.append({
+                "original": orig,
+                "backup": bak,
+                "timestamp": ts.isoformat(),
+                "backup_sha256": _calc_sha256(bak),
+                "original_sha256": _calc_sha256(orig),
+            })
+
+        manifest_data = {
+            "version": "1.0",
+            "created_at": datetime.now().isoformat(),
+            "total_files": len(records),
+            "records": records,
+        }
+
+        try:
+            with open(manifest_path, "w", encoding="utf-8") as f:
+                json.dump(manifest_data, f, indent=2, ensure_ascii=False)
+            logger.info(f"Created backup session manifest: {manifest_path}")
+            return manifest_path
+        except Exception as exc:
+            logger.error(f"Failed to create session manifest {manifest_path}: {exc}")
+            return None
+
+    def rollback_manifest(self, manifest_path: str) -> int:
+        """
+        Restore all files specified in a session manifest.
+        Returns the number of successfully restored files.
+        """
+        if not os.path.exists(manifest_path):
+            logger.error(f"Manifest not found: {manifest_path}")
+            return 0
+
+        import json
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                manifest_data = json.load(f)
+        except Exception as exc:
+            logger.error(f"Failed to read manifest {manifest_path}: {exc}")
+            return 0
+
+        restored_count = 0
+        records = manifest_data.get("records", [])
+        for record in reversed(records):
+            orig = record.get("original")
+            bak = record.get("backup")
+            if orig and bak and os.path.exists(bak):
+                if self.restore_backup(bak, orig):
+                    restored_count += 1
+
+        logger.info(f"Rollback completed: {restored_count}/{len(records)} files restored from {manifest_path}")
+        return restored_count
+
 
 
 # Global backup manager instance

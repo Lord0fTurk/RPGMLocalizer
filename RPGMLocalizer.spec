@@ -16,7 +16,7 @@ software_opengl_dll = os.path.join(qt_bin_dir, 'opengl32sw.dll')
 version_ns = {}
 with open(os.path.join(project_dir, 'version.py'), 'r', encoding='utf-8') as f:
     exec(f.read(), version_ns)
-app_version = version_ns.get('VERSION', '0.6.3')
+app_version = version_ns.get('VERSION', '0.8.0')
 
 datas = [
     (os.path.join(project_dir, 'LICENSE'), '.'),
@@ -46,9 +46,17 @@ a = Analysis(
         'src.backend',
         'src.backend.app_backend',
         'src.backend.settings_backend',
+        'src.backend.game_registry',
+        'src.backend.endpoint_router',
+        'src.backend.llm_repair',
         'src.core',
         'src.core.translation_pipeline',
         'src.core.translator',
+        'src.core.translators',
+        'src.core.translators.base',
+        'src.core.translators.google',
+        'src.core.translators.services',
+        'src.core.translators.manager',
         'src.core.enums',
         'src.core.glossary',
         'src.core.cache',
@@ -59,9 +67,22 @@ a = Analysis(
         'src.core.engine_profiler',
         'src.core.font_manager',
         'src.core.constants',
+        'src.core.validation',
+        'src.core.syntax_guard_rpgm',
         'src.core.parsers',
+        'src.core.parsers.base',
         'src.core.parsers.json_parser',
         'src.core.parsers.ruby_parser',
+        'src.core.parsers.scene_orchestrator',
+        'src.core.parsers.restricted_ruby_unmarshaller',
+        'src.core.parsers.marshal_binary_patcher',
+        'src.core.parsers.structured_json_extractor',
+        'src.core.parsers.plugin_family_registry',
+        'src.core.parsers.note_tag_parser',
+        'src.core.parsers.js_ast_extractor',
+        'src.core.parsers.js_tokenizer',
+        'src.core.parsers.hendrix_csv_parser',
+        'src.core.parsers.ts_adv_scenario_parser',
         'src.utils',
         'src.utils.backup',
         'src.utils.paths',
@@ -70,6 +91,7 @@ a = Analysis(
         'src.utils.file_ops',
         'src.utils.qt_bootstrap',
         'src.utils.placeholder',
+        'src.utils.sound_registry',
         # --- PyQt6 / QML runtime ---
         'PyQt6',
         'PyQt6.QtCore',

@@ -172,32 +172,3 @@ class TextMerger:
                     merged_map[lookup_key] = req['metadata']['original_entries']
                 requests_list.append(req)
         return requests_list, merged_map
-
-    @staticmethod
-    def merge_consecutive(entries: List[Tuple[str, str, str]], max_batch_size: int = DEFAULT_BATCH_SIZE) -> List[Dict[str, Any]]:
-        if not entries: return []
-        requests = []
-        current_block = []
-        
-        def _flush():
-            nonlocal current_block
-            if not current_block: return
-            if len(current_block) == 1:
-                f, k, t = current_block[0]
-                requests.append({'text': t, 'metadata': {'file': f, 'key': k, 'is_merged': False}})
-            else:
-                from src.core.constants import SAFE_MERGE_SEPARATOR
-                txt = SAFE_MERGE_SEPARATOR.join(e[2] for e in current_block)
-                requests.append({'text': txt, 'metadata': {'file': current_block[0][0], 'key': current_block[0][1], 'is_merged': True, 'original_entries': current_block.copy()}})
-            current_block = []
-
-        for f, k, t, tag in entries:
-            is_dialogue = any(tag.startswith(p) for p in ("dialogue_block", "message_dialogue", "scroll_text"))
-            if not is_dialogue:
-                _flush()
-                requests.append({'text': t, 'metadata': {'file': f, 'key': k, 'is_merged': False}})
-            else:
-                if len(current_block) >= max_batch_size: _flush()
-                current_block.append((f, k, t))
-        _flush()
-        return requests

@@ -137,3 +137,53 @@ def safe_write(filepath, mode='w', encoding='utf-8', **kwargs):
                 f.close()
             except Exception as ce:
                 logger.debug("Error closing file in finally: %s", ce)
+
+
+def safe_extract_zip(zip_path: str, target_dir: str) -> list[str]:
+    """Safely extract a ZIP archive with strict Zip Slip / Path Traversal prevention.
+
+    Raises:
+        ValueError: When a zip member attempts to write outside target_dir.
+    """
+    import zipfile
+    from pathlib import Path
+
+    dest = Path(target_dir).resolve()
+    dest.mkdir(parents=True, exist_ok=True)
+    extracted_files: list[str] = []
+
+    with zipfile.ZipFile(zip_path, 'r') as zf:
+        for member in zf.namelist():
+            target_file = (dest / member).resolve()
+            if not target_file.is_relative_to(dest):
+                raise ValueError(
+                    f"Security Exception (Zip Slip): Attempted path traversal via '{member}'"
+                )
+
+            # Extract safely
+            zf.extract(member, dest)
+            extracted_files.append(str(target_file))
+
+    return extracted_files
+
+
+def read_text_file(file_path: str | os.PathLike[str]) -> tuple[str, str]:
+    """Read a text file with multi-encoding fallback.
+
+    Tries UTF-8-SIG, UTF-8, CP932, Shift-JIS, EUC-JP, Latin-1 in order to safely
+    handle Japanese RPG Maker plugins and legacy localization assets.
+
+    Returns:
+        tuple[str, str]: (decoded_content, detected_encoding)
+    """
+    with open(file_path, "rb") as handle:
+        raw_bytes = handle.read()
+
+    for encoding in ("utf-8-sig", "utf-8", "cp932", "shift_jis", "euc_jp", "latin-1"):
+        try:
+            return raw_bytes.decode(encoding), encoding
+        except (UnicodeDecodeError, LookupError):
+            continue
+
+    return raw_bytes.decode("latin-1", errors="replace"), "latin-1"
+

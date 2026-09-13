@@ -5,6 +5,7 @@ import QtQuick.Layouts 1.15
 import QtQuick.Window 2.15
 
 import "views"
+import "components"
 
 ApplicationWindow {
     id: window
@@ -73,15 +74,36 @@ ApplicationWindow {
         readonly property int animSlow:   350
     }
 
-    // =========================================================
-    // NOTICE POPUP
-    // =========================================================
+    CompletionDialog {
+        id: completionDialog
+        themeObj: theme
+        z: 10000
+    }
+
+    ToastNotification {
+        id: toast
+        themeObj: theme
+        anchors.bottom: parent.bottom
+        anchors.right: parent.right
+        anchors.margins: 24
+        z: 9999
+    }
+
     Connections {
         target: appBackend
+        function onFinished(success, summary) {
+            window.show()
+            window.raise()
+            window.requestActivate()
+            completionDialog.openWith(success, summary, appBackend.projectPath)
+        }
         function onInfoNotice(notice_type, title, message) {
-            noticeTitle.text = title
-            noticeMsg.text = message
-            noticePopup.open()
+            toast.show(notice_type, title, message)
+            if (notice_type === "error" && !completionDialog.visible) {
+                noticeTitle.text = title
+                noticeMsg.text = message
+                noticePopup.open()
+            }
         }
     }
 

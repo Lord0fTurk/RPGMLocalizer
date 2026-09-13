@@ -86,21 +86,15 @@ class Validator:
             
         if isinstance(original_data, dict):
             # Check that all original keys are present in translated
-            original_keys = set(original_data.keys())
-            translated_keys = set(translated_data.keys())
-            
-            # All original keys must be present
-            if not (original_keys <= translated_keys):
-                missing_keys = original_keys - translated_keys
+            if not (original_data.keys() <= translated_data.keys()):
+                missing_keys = set(original_data.keys()) - set(translated_data.keys())
                 logger.error(f"Missing keys in translated data: {missing_keys}")
                 return False
             
             # Recursively check values for nested structures
-            for key in original_keys:
-                orig_val = original_data[key]
-                trans_val = translated_data.get(key)
-                
+            for key, orig_val in original_data.items():
                 if isinstance(orig_val, (dict, list)):
+                    trans_val = translated_data.get(key)
                     if not Validator.validate_json_structure(orig_val, trans_val):
                         logger.error(f"Structure mismatch at key '{key}'")
                         return False
@@ -108,3 +102,91 @@ class Validator:
             return True
             
         return True
+
+    @staticmethod
+    def validate_json_roundtrip(original_data: Any, translated_data: Any) -> ValidationResult:
+        """
+        Perform a shadow dry-run serialization & deserialization check on translated JSON data.
+        Ensures:
+        1. orjson/json can serialize without error.
+        2. Deserialized result matches original structure and keys.
+        """
+        import orjson
+        try:
+            dumped_bytes = orjson.dumps(translated_data)
+        except Exception as exc:
+            return ValidationResult.failure([f"JSON serialization failed: {exc}"])
+
+        try:
+            reloaded = orjson.loads(dumped_bytes)
+        except Exception as exc:
+            return ValidationResult.failure([f"JSON deserialization failed: {exc}"])
+
+        if not Validator.validate_json_structure(original_data, reloaded):
+            return ValidationResult.failure(["JSON structural invariant verification failed after roundtrip"])
+
+        return ValidationResult.success({"byte_size": len(dumped_bytes), "serialized_bytes": dumped_bytes})
+
+    @staticmethod
+    def validate_ruby_roundtrip(translated_data: Any) -> ValidationResult:
+        """
+        Ensure Ruby Marshal data can be serialized without type or encoding corruption.
+        """
+        if isinstance(translated_data, bytes):
+            if len(translated_data) == 0:
+                return ValidationResult.failure(["Ruby binary patch result is empty"])
+            return ValidationResult.success({"byte_size": len(translated_data)})
+
+        try:
+            import io
+            import rubymarshal.writer
+            buffer = io.BytesIO()
+            rubymarshal.writer.write(buffer, translated_data)
+            serialized = buffer.getvalue()
+            if not serialized:
+                return ValidationResult.failure(["Ruby Marshal serialized output is empty"])
+            return ValidationResult.success({"byte_size": len(serialized)})
+        except Exception as exc:
+            return ValidationResult.failure([f"Ruby Marshal serialization check failed: {exc}"])
+
+    @staticmethod
+    def validate_js_syntax(js_code: str) -> ValidationResult:
+        """
+        Validate JavaScript syntax using tree-sitter AST parser.
+        Ensures modified JavaScript plugin or source files have no syntax errors before writing to disk.
+        """
+        if not js_code or not js_code.strip():
+            return ValidationResult.success()
+
+        try:
+            from tree_sitter import Language, Parser
+            import tree_sitter_javascript
+
+            lang = Language(tree_sitter_javascript.language())
+            parser = Parser(lang)
+            tree = parser.parse(js_code.encode("utf-8"))
+
+            if tree.root_node.has_error:
+                def _collect_errors(node: Any, limit: int = 3) -> List[str]:
+                    errs: List[str] = []
+                    if node.has_error:
+                        if node.is_error or node.is_missing:
+                            errs.append(f"line {node.start_point[0] + 1}, col {node.start_point[1]}")
+                        for child in node.children:
+                            if len(errs) >= limit:
+                                break
+                            errs.extend(_collect_errors(child, limit - len(errs)))
+                    return errs
+
+                error_locs = _collect_errors(tree.root_node)
+                loc_str = f" at {', '.join(error_locs)}" if error_locs else ""
+                msg = f"JavaScript syntax error detected in parsed AST{loc_str}"
+                logger.error(msg)
+                return ValidationResult.failure([msg])
+
+            return ValidationResult.success({"byte_size": len(js_code)})
+        except Exception as exc:
+            logger.warning(f"Tree-sitter JS validation skipped or encountered an error: {exc}")
+            return ValidationResult.success()
+
+

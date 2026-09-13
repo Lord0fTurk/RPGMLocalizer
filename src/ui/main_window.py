@@ -187,6 +187,38 @@ class MainWindow(MSFluentWindow):
         self.homeInterface.update_status(message if success else f"Error: {message}")
         self.on_log_message("success" if success else "error", message)
 
+        try:
+            import os
+            if os.name == 'nt':
+                import winsound
+                winsound.MessageBeep(winsound.MB_ICONASTERISK if success else winsound.MB_ICONHAND)
+            else:
+                QApplication.beep()
+            QApplication.alert(self, 0)
+        except Exception:
+            pass
+
+        if success:
+            InfoBar.success(
+                title="Translation Completed",
+                content=message or "Project successfully translated.",
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=6000,
+                parent=self.homeInterface,
+            )
+        else:
+            InfoBar.error(
+                title="Translation Failed",
+                content=message or "An error occurred during translation.",
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=6000,
+                parent=self.homeInterface,
+            )
+
     def on_progress(self, current, total, text=""):
         if total > 0:
             pct = int((current / total) * 100)
@@ -286,11 +318,15 @@ class MainWindow(MSFluentWindow):
 
     def clear_cache(self):
         from src.core.cache import get_cache
+        from src.utils.app_paths import get_project_id
         try:
-            cache = get_cache()
+            proj_dir = self.homeInterface.txt_path.text().strip()
+            target_lang = self.homeInterface.TARGET_LANGUAGES.get(self.homeInterface.cmb_target.currentText(), "tr")
+            project_id = get_project_id(proj_dir) if proj_dir else None
+            cache = get_cache(project_id=project_id, target_lang=target_lang)
             cache.clear()
             cache.save()
-            msg = f"Translation cache cleared"
+            msg = f"Translation cache cleared for [{project_id}] ({target_lang})" if project_id else "Translation cache cleared"
             self.on_log_message("success", msg)
             InfoBar.success(title='Cache Cleared', content=msg,
                             orient=Qt.Orientation.Horizontal, isClosable=True,

@@ -34,8 +34,13 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 TEXT_SEGMENT_SEPARATOR = "|||TXTSEG|||"
 
-# Canonical form for splitting (handles optional spaces injected by translation engines)
-_TSS_CANONICAL_RE = re.compile(r"\|\s*\|\s*\|TXTSEG\|\s*\|\s*\|")
+# Canonical form for splitting (handles optional spaces and transliterations like ТХЦЭГь/THCEG)
+_TSS_CANONICAL_RE = re.compile(
+    r"\|\s*\|\s*\|(?:\s*[A-Za-zА-Яа-я0-9_\s]{3,15}\s*)\|\s*\|\s*\|"
+)
+_TSS_SCRUB_RE = re.compile(
+    r"\|\s*\|\s*\|[^|\n]*\|\s*\|\s*\||\|{3}[^|\n]*\|{3}"
+)
 
 # ---------------------------------------------------------------------------
 # Code pattern — reuse the battle-tested regex from syntax_guard_rpgm
@@ -46,6 +51,7 @@ _TSS_CANONICAL_RE = re.compile(r"\|\s*\|\s*\|TXTSEG\|\s*\|\s*\|")
 _PROTECT_PATTERN_STR = (
     r'(\[\[.*?\]\]|'                     # [[escaped]]
     r'\{\{.*?\}\}|'                      # {{escaped}}
+    r'\\(?:[cCiIpPfFwWvVnNoOaAhHxXyY]|fs|fn|oc|ow|hc|ac|px|py|wc|tt|bg)\[(?:[^\[\]]*|\[[^\[\]]*\])*\]|'  # Nested brackets like \C[\V[1]] or \fs[\v[2]]
     r'\\c\[\d+\]|'                       # \c[n] - color
     r'\\C\[\d+\]|'                       # \C[n] - color (uppercase)
     r'\\i\[\d+\]|'                       # \i[n] - icon
@@ -54,6 +60,7 @@ _PROTECT_PATTERN_STR = (
     r'\\P\[[^\]]+\]|'                    # \P[var] - player variable
     r'\\f\[[^\]]+\]|'                    # \f[filename] - face image
     r'\\n<[^>]+>|'                       # \n<name> - nameplate
+    r'\\[Nn][Cc]<[^>]+>|'                # \NC<text>/\nc<text> - Yanfly name window
     r'\\[Ww]\[\d+\]|'                    # \W[n]/\w[n] - wait frames
     r'\\[Ff][Bb]|'                       # \FB/\fb - font bold toggle
     r'\\[Ff][Ii]|'                       # \FI/\fi - font italic toggle
@@ -61,8 +68,11 @@ _PROTECT_PATTERN_STR = (
     r'\\[Nn]\[\d+\]|'                    # \N[n]/\n[n] - actor name
     r'\\[Ff][Ss]\[\d+\]|'               # \FS[n]/\fs[n] - font size
     r'\\[Ff][Ss]\b|'                     # \FS without bracket
+    r'\\[Ff][Nn]<[^>]+>|'                # \FN<font>/\fn<font> - font name
     r'\\[Oo][Cc]\[\d+\]|'               # \OC[n] - VisuStella outline color
+    r'\\[Oo][Ww]\[[^\]]+\]|'            # \OW[width]/\ow[width] - outline width
     r'\\[Hh][Cc]\[\d+\]|'               # \HC[n] - VisuStella hex color
+    r'\\[Hh][Cc]<[^>]+>|'                # \HC<color>/\hc<color> - hex color (angle form)
     r'\\[Aa][Cc]\[\d+\]|'               # \AC[n] - VisuStella actor color
     r'\\[Pp][Xx]\[\d+\]|'               # \PX[n] - position X
     r'\\[Pp][Yy]\[\d+\]|'               # \PY[n] - position Y
@@ -73,9 +83,10 @@ _PROTECT_PATTERN_STR = (
     r'\\[Pp][Oo][Pp]\[[^\]]*\]|'        # \pop[...] - popup
     r'\\[Ww][Oo][Rr][Dd][Ww][Rr][Aa][Pp]\[[^\]]*\]|'  # \WordWrap[...]
     r'\\msghnd|'                         # \msghnd
-    r'\\[{}.<>!g$\\nip^;]|'             # Simple escapes
-    r'<WordWrap>|'                       # <WordWrap>
-    r'<(?:clear|indent|left|center|right)>|'  # Other tags
+    r'\\[{}.<>!gG$\\nip^;|]|'            # Simple escapes (incl. \G currency, \| wait)
+    r'\b(?:if|en|req|cond|eval)\s*\((?:[^()\n]|\([^()\n]*\))+\)|'  # Choice condition plugins: if(s[1]), en(v[2]>=10)
+    r'\b[vsVS]\[\d+\]|'                 # Variable/switch references: v[2], s[10]
+    r'</?[a-zA-Z][a-zA-Z0-9_\s:-]*>|'    # XML/plugin tags: <WordWrap>, <ChoiceHelp>, <page condition>
     r'\[(?:sad|happy|angry|sweat|confused|smirk|evil|thinking|doubt|grin|NOTE|custom)\d*\]|'  # Flavor tags
     r'\[[^\[\]]+\])'                     # Generic [variable]
 )
@@ -151,22 +162,30 @@ def reassemble(translated_clean: str, segments: List[Segment]) -> str:
     1. Try to split *translated_clean* on the segment separator.
     2. If the part count matches the TEXT segment count, interleave codes.
     3. Otherwise fall back to proportional positioning.
+    4. Guarantee: Scrub any residual separator tokens from the final text.
     """
     text_count = sum(1 for s in segments if s.type == SegmentType.TEXT)
     if text_count == 0:
-        return translated_clean
+        return _TSS_SCRUB_RE.sub("", translated_clean).strip()
 
     parts = _split_clean(translated_clean, text_count)
 
     if len(parts) == text_count:
-        return _interleave(parts, segments)
+        res = _interleave(parts, segments)
+    else:
+        logger.debug(
+            "reassemble: separator split mismatch (got %d, expected %d) — "
+            "falling back to proportional positioning",
+            len(parts), text_count,
+        )
+        res = _proportional_reinsert(translated_clean, segments)
 
-    logger.debug(
-        "reassemble: separator split mismatch (got %d, expected %d) — "
-        "falling back to proportional positioning",
-        len(parts), text_count,
-    )
-    return _proportional_reinsert(translated_clean, segments)
+    # Scrubber: Separator markers should NEVER leak into final game text under any circumstances
+    if "|||" in res or "TXTSEG" in res or "ТХЦЭГ" in res or "THCEG" in res:
+        res = _TSS_SCRUB_RE.sub("", res)
+        res = re.sub(r"  +", " ", res).strip()
+
+    return res
 
 
 # ---------------------------------------------------------------------------
@@ -209,46 +228,36 @@ def _interleave(text_parts: List[str], segments: List[Segment]) -> str:
     return "".join(out)
 
 
+def _calculate_code_positions(segments: List[Segment], clean_full: str) -> List[Tuple[float, str]]:
+    positions: List[Tuple[float, str]] = []
+    cum_len = 0
+    full_len = max(len(clean_full), 1)
+    for seg in segments:
+        if seg.type == SegmentType.TEXT:
+            cum_len += len(seg.content) + len(TEXT_SEGMENT_SEPARATOR)
+        else:
+            ratio = cum_len / full_len
+            positions.append((ratio, seg.content))
+    return positions
+
+
 def _proportional_reinsert(translated: str, segments: List[Segment]) -> str:
     """Fallback: place codes at proportional positions.
 
     Only reached when the separator split fails.
     """
-    # Build the full clean-text reference for ratio calculation
-    clean_parts: List[str] = []
-    code_list: List[str] = []
-    for seg in segments:
-        if seg.type == SegmentType.TEXT:
-            clean_parts.append(seg.content)
-        else:
-            code_list.append(seg.content)
-
+    clean_parts = [seg.content for seg in segments if seg.type == SegmentType.TEXT]
     clean_full = TEXT_SEGMENT_SEPARATOR.join(clean_parts)
     if not clean_full:
-        return translated
+        return _TSS_SCRUB_RE.sub("", translated).strip()
 
-    # Calculate cumulative positions of each code
-    positions: List[Tuple[float, str]] = []
-    cum_len = 0
-    code_idx = 0
-    for seg in segments:
-        if seg.type == SegmentType.TEXT:
-            cum_len += len(seg.content) + len(TEXT_SEGMENT_SEPARATOR)
-        else:
-            # Position of this code in the clean_full string
-            code_pos = cum_len
-            code_len = len(seg.content)
-            # Ratio based on the start of the code gap in clean_full
-            mid = code_pos
-            if code_idx < len(code_list):
-                ratio = mid / max(len(clean_full), 1)
-                positions.append((ratio, seg.content))
-                code_idx += 1
-
+    positions = _calculate_code_positions(segments, clean_full)
     if not positions:
-        return translated
+        return _TSS_SCRUB_RE.sub("", translated).strip()
 
-    result = translated
+    # Pre-clean separator remnants so they are never interleaved with codes
+    result = _TSS_SCRUB_RE.sub("", translated)
+    result = re.sub(r"  +", " ", result).strip()
     tlen = len(result)
     for ratio, code in reversed(positions):
         insert_at = int(ratio * tlen)
@@ -264,6 +273,7 @@ def _proportional_reinsert(translated: str, segments: List[Segment]) -> str:
         else:
             result = code
 
+    result = _TSS_SCRUB_RE.sub("", result)
     return re.sub(r"  +", " ", result).strip()
 
 

@@ -155,26 +155,26 @@ Item {
                         }
                         Rectangle { Layout.fillWidth: true; height: 1; color: t ? t.border1 : "#2e2e3e" }
                         StyledSlider {
-                            label: "Batch Size"; from: 5; to: 50; step: 1
+                            label: "Batch Size (Lines)"; from: 5; to: 50; step: 5
                             value: settingsBackend.batchSize
-                            onMoved: settingsBackend.batchSize = Math.round(val)
+                            onMoved: (val) => { settingsBackend.batchSize = Math.round(val) }
                         }
                         StyledSlider {
                             label: "Concurrent Requests"; from: 1; to: 20; step: 1
                             value: settingsBackend.concurrentRequests
-                            onMoved: settingsBackend.concurrentRequests = Math.round(val)
+                            onMoved: (val) => { settingsBackend.concurrentRequests = Math.round(val) }
                         }
                         ToggleRow {
                             label: "Multi-Endpoint Racing"
                             desc: "Rotate Google mirror endpoints in parallel"
                             checked: settingsBackend.useMultiEndpoint
-                            onToggled: settingsBackend.useMultiEndpoint = val
+                            onToggled: (val) => { settingsBackend.useMultiEndpoint = val }
                         }
                         ToggleRow {
                             label: "Lingva Fallback"
                             desc: "Fall back to Lingva if Google fails"
                             checked: settingsBackend.enableLingvaFallback
-                            onToggled: settingsBackend.enableLingvaFallback = val
+                            onToggled: (val) => { settingsBackend.enableLingvaFallback = val }
                         }
                     }
                 }
@@ -204,20 +204,20 @@ Item {
                                 text: settingsBackend.openaiApiKey
                                 placeholder: "sk-..."
                                 isPassword: true
-                                onEditingFinished: settingsBackend.openaiApiKey = newText
+                                onEditingFinished: (newText) => { settingsBackend.openaiApiKey = newText }
                             }
                             InputField {
                                 label: "Model Name"
                                 text: settingsBackend.openaiModel
                                 placeholder: "gpt-4o-mini"
-                                onEditingFinished: settingsBackend.openaiModel = newText
+                                onEditingFinished: (newText) => { settingsBackend.openaiModel = newText }
                             }
                         }
                         InputField {
                             label: "Base URL (Set to https://api.deepseek.com/v1 for DeepSeek)"
                             text: settingsBackend.openaiBaseUrl
                             placeholder: "https://api.openai.com/v1"
-                            onEditingFinished: settingsBackend.openaiBaseUrl = newText
+                            onEditingFinished: (newText) => { settingsBackend.openaiBaseUrl = newText }
                         }
 
                         Rectangle { Layout.fillWidth: true; height: 1; color: t ? t.border1 : "#2e2e3e" }
@@ -232,13 +232,13 @@ Item {
                                 text: settingsBackend.geminiApiKey
                                 placeholder: "AIzaSy..."
                                 isPassword: true
-                                onEditingFinished: settingsBackend.geminiApiKey = newText
+                                onEditingFinished: (newText) => { settingsBackend.geminiApiKey = newText }
                             }
                             InputField {
                                 label: "Model Name"
                                 text: settingsBackend.geminiModel
                                 placeholder: "gemini-2.0-flash"
-                                onEditingFinished: settingsBackend.geminiModel = newText
+                                onEditingFinished: (newText) => { settingsBackend.geminiModel = newText }
                             }
                         }
 
@@ -253,13 +253,13 @@ Item {
                                 label: "Base URL"
                                 text: settingsBackend.localLlmUrl
                                 placeholder: "http://localhost:11434/v1"
-                                onEditingFinished: settingsBackend.localLlmUrl = newText
+                                onEditingFinished: (newText) => { settingsBackend.localLlmUrl = newText }
                             }
                             InputField {
                                 label: "Model Name"
                                 text: settingsBackend.localLlmModel
                                 placeholder: "llama3"
-                                onEditingFinished: settingsBackend.localLlmModel = newText
+                                onEditingFinished: (newText) => { settingsBackend.localLlmModel = newText }
                             }
                         }
 
@@ -278,7 +278,7 @@ Item {
                                     text: settingsBackend.deeplApiKey
                                     placeholder: "xxxxxxxx-xxxx-..."
                                     isPassword: true
-                                    onEditingFinished: settingsBackend.deeplApiKey = newText
+                                    onEditingFinished: (newText) => { settingsBackend.deeplApiKey = newText }
                                 }
                             }
                             ColumnLayout {
@@ -289,7 +289,7 @@ Item {
                                     label: "Server URL"
                                     text: settingsBackend.libretranslateUrl
                                     placeholder: "http://localhost:5000"
-                                    onEditingFinished: settingsBackend.libretranslateUrl = newText
+                                    onEditingFinished: (newText) => { settingsBackend.libretranslateUrl = newText }
                                 }
                             }
                         }
@@ -314,24 +314,24 @@ Item {
                             label: "Auto Word-Wrap (<WordWrap>)"
                             desc: "Inject automatic line breaks in standard dialogue"
                             checked: settingsBackend.autoWordwrap
-                            onToggled: settingsBackend.autoWordwrap = val
+                            onToggled: (val) => { settingsBackend.autoWordwrap = val }
                         }
                         StyledSlider {
                             label: "Standard Dialogue Limit"; from: 25; to: 80; step: 1
                             value: settingsBackend.wordwrapLimitStandard
-                            onMoved: settingsBackend.wordwrapLimitStandard = Math.round(val)
+                            onMoved: (val) => { settingsBackend.wordwrapLimitStandard = Math.round(val) }
                         }
                         ToggleRow {
                             label: "Translate Editor Notes"
                             desc: "Include note tags and plugin parameters"
                             checked: settingsBackend.translateNotes
-                            onToggled: settingsBackend.translateNotes = val
+                            onToggled: (val) => { settingsBackend.translateNotes = val }
                         }
                         ToggleRow {
                             label: "Plugin JS UI Labels"
                             desc: "Extract translatable strings from plugins.js"
                             checked: settingsBackend.pluginJsUiExtraction
-                            onToggled: settingsBackend.pluginJsUiExtraction = val
+                            onToggled: (val) => { settingsBackend.pluginJsUiExtraction = val }
                         }
                     }
                 }
@@ -354,13 +354,13 @@ Item {
                             label: "Backup Game Data"
                             desc: "Copy original files to _backup/ before translation"
                             checked: settingsBackend.backupEnabled
-                            onToggled: settingsBackend.backupEnabled = val
+                            onToggled: (val) => { settingsBackend.backupEnabled = val }
                         }
                         ToggleRow {
                             label: "Persistent Translation Cache"
                             desc: "Skip re-translating previously translated strings"
                             checked: settingsBackend.useCache
-                            onToggled: settingsBackend.useCache = val
+                            onToggled: (val) => { settingsBackend.useCache = val }
                         }
                         RowLayout {
                             Layout.fillWidth: true

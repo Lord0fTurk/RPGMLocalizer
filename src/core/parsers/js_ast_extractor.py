@@ -12,6 +12,7 @@ from typing import Any, Iterable
 logger = logging.getLogger(__name__)
 
 from .js_tokenizer import JSStringTokenizer
+from src.utils.file_ops import read_text_file
 
 try:
     from tree_sitter import Language, Parser
@@ -165,8 +166,7 @@ class JavaScriptAstAuditExtractor:
 
     def extract_audit_candidates(self, file_path: str) -> tuple[list[JavaScriptAuditCandidate], str]:
         """Extract scored audit candidates from a JS file."""
-        with open(file_path, "r", encoding="utf-8-sig") as handle:
-            content = handle.read()
+        content, _ = read_text_file(file_path)
         return self.extract_audit_candidates_from_source(content)
 
     def extract_text_from_source(self, js_code: str) -> tuple[list[AuditEntry], str]:
@@ -289,11 +289,10 @@ class JavaScriptAstAuditExtractor:
         ]
 
     def _extract_safe_strings_with_tokenizer(self, js_code: str) -> list[AuditEntry]:
-        strings = self._tokenizer.extract_translatable_strings(js_code)
-        return [
-            (f"@SAFE_TOK{index}", value, "js_safe_sink_fallback")
-            for index, (_start, _end, value, _quote) in enumerate(strings)
-        ]
+        logger.warning(
+            "tree_sitter unavailable — safe-sink check skipped, no JS strings extracted for safety"
+        )
+        return []
 
     def _build_language(self) -> Any | None:
         """Build tree-sitter language for JavaScript AST analysis."""
@@ -321,7 +320,11 @@ class JavaScriptAstAuditExtractor:
             return raw_text[1:-1]
 
         try:
-            return ast.literal_eval(raw_text)
+            import warnings
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", SyntaxWarning)
+                return ast.literal_eval(raw_text)
         except (SyntaxError, ValueError):
             return raw_text[1:-1] if len(raw_text) >= 2 else raw_text
 

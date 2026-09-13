@@ -22,14 +22,6 @@ class RpgMakerEngine(Enum):
     UNKNOWN = "unknown"
 
 
-class RiskLevel(Enum):
-    """Risk level classification for project complexity."""
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    CRITICAL = "critical"
-
-
 @dataclass(frozen=True, slots=True)
 class DetectionEvidence:
     """Single piece of evidence for engine detection."""
@@ -506,11 +498,6 @@ class EngineProfiler:
             ".rvdata2": RpgMakerEngine.VX_ACE,
         }
         return mapping.get(variant, RpgMakerEngine.UNKNOWN)
-
-    def _detect_ruby_variant_direct(self, file_path: str) -> RpgMakerEngine:
-        """Detect Ruby variant directly from file path."""
-        ext = os.path.splitext(file_path)[1].lower()
-        return self._ruby_variant_to_engine(ext)
 
     def _analyze_plugins(self) -> Dict[str, Any]:
         """Analyze plugins.js for plugin statistics."""

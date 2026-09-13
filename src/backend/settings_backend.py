@@ -34,7 +34,7 @@ class SettingsBackend(QObject):
             "glossary_path": "",
             "use_glossary": False,
             "export_path": "",
-            "export_only": True,
+            "export_only": False,
             "export_distinct": False,
             "import_path": "",
             "regex_blacklist": "",
@@ -49,6 +49,9 @@ class SettingsBackend(QObject):
             "openai_api_key": "",
             "openai_model": "gpt-4o-mini",
             "openai_base_url": "https://api.openai.com/v1",
+            "deepseek_api_key": "",
+            "deepseek_model": "deepseek-chat",
+            "deepseek_base_url": "https://api.deepseek.com/v1",
             "gemini_api_key": "",
             "gemini_model": "gemini-2.0-flash",
             "local_llm_url": "http://localhost:11434/v1",
@@ -56,6 +59,7 @@ class SettingsBackend(QObject):
             "deepl_api_key": "",
             "libretranslate_url": "http://localhost:5000",
             "libretranslate_api_key": "",
+            "project_path": "",
         }
         self.load()
 
@@ -420,4 +424,36 @@ class SettingsBackend(QObject):
     @libretranslateApiKey.setter
     def libretranslateApiKey(self, val: str) -> None:
         self._set("libretranslate_api_key", val)
+
+    @pyqtProperty(str, notify=settingsChanged)
+    def deepseekApiKey(self) -> str:
+        return str(self._get("deepseek_api_key", ""))
+
+    @deepseekApiKey.setter
+    def deepseekApiKey(self, val: str) -> None:
+        self._set("deepseek_api_key", val)
+
+    @pyqtProperty(str, notify=settingsChanged)
+    def deepseekModel(self) -> str:
+        return str(self._get("deepseek_model", "deepseek-chat"))
+
+    @deepseekModel.setter
+    def deepseekModel(self, val: str) -> None:
+        self._set("deepseek_model", val)
+
+    @pyqtProperty(str, notify=settingsChanged)
+    def deepseekBaseUrl(self) -> str:
+        return str(self._get("deepseek_base_url", "https://api.deepseek.com/v1"))
+
+    @deepseekBaseUrl.setter
+    def deepseekBaseUrl(self, val: str) -> None:
+        self._set("deepseek_base_url", val)
+
+    @pyqtProperty(str, notify=settingsChanged)
+    def projectPath(self) -> str:
+        return str(self._get("project_path", ""))
+
+    @projectPath.setter
+    def projectPath(self, val: str) -> None:
+        self._set("project_path", val)
 

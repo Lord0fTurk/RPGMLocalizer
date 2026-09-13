@@ -31,8 +31,10 @@ from .parsers.plain_text_parser import SUPPORTED_TEXT_FILENAMES
 from .parsers.ts_adv_scenario_parser import TS_SCENARIO_EXTENSION
 from .glossary import Glossary
 from .cache import TranslationCache, get_cache
+from src.utils.app_paths import get_project_id
 from .export_import import TranslationExporter, TranslationImporter
 from src.utils.backup import BackupManager, get_backup_manager
+from .validation import Validator
 from .enums import PipelineStage
 from src.utils.file_ops import safe_write
 from .text_merger import TextMerger
@@ -91,7 +93,7 @@ class TranslationPipeline(QObject):
         self.settings = settings
         self.should_stop = False
         
-        # Get performance settings (defaults: 20 concurrent, 15 batch for maximum stability)
+        # Get performance settings (defaults from constants.py: 12 concurrent, 100 batch)
         concurrency = self.settings.get("concurrent_requests", DEFAULT_CONCURRENCY)
         batch_size = self.settings.get("batch_size", DEFAULT_BATCH_SIZE)
         
@@ -129,8 +131,14 @@ class TranslationPipeline(QObject):
         # Cache
         if self.settings.get('use_cache', True):
             cache_dir = self.settings.get('cache_dir')
-            self.cache = get_cache(cache_dir)
-            self.logger.info("Translation cache enabled")
+            project_path = self.settings.get('project_path')
+            target_lang = self.settings.get('target_lang', 'tr')
+            project_id = get_project_id(project_path) if project_path else None
+            self.cache = get_cache(cache_dir=cache_dir, project_id=project_id, target_lang=target_lang)
+            if project_id:
+                self.logger.info(f"Using translation cache: [{project_id}] ({target_lang})")
+            else:
+                self.logger.info("Translation cache enabled (global)")
         
         # Backup
         if self.settings.get('backup_enabled', True):
@@ -235,20 +243,20 @@ class TranslationPipeline(QObject):
 
         # Parse all files
         self.stage_changed.emit(PipelineStage.PARSING.value, "Extracting text...")
-        all_entries, parsed_files = self._extract_all_text(files)
+        all_entries, parsed_files, all_listed = self._extract_all_text(files)
         
-        if not all_entries:
+        if not all_entries and not all_listed:
             self.finished.emit(True, "No text found to translate.")
             return
 
         total = len(all_entries)
-        self.log_message.emit("info", f"Extracted {total} text entries")
+        self.log_message.emit("info", f"Extracted {total} text entries ({len(all_listed)} listed for review)")
         
         # Export option (if requested)
         export_path = self.settings.get('export_path')
         if export_path:
             is_distinct = self.settings.get('export_distinct', False)
-            self._export_entries(all_entries, export_path, distinct=is_distinct)
+            self._export_entries(all_entries, export_path, distinct=is_distinct, listed=all_listed)
             if self.settings.get('export_only', False):
                 self.finished.emit(True, f"Exported {total} entries (Distinct: {is_distinct}) to {export_path}")
                 return
@@ -265,21 +273,21 @@ class TranslationPipeline(QObject):
         
         # Translate remaining entries
         self.stage_changed.emit(PipelineStage.TRANSLATING.value, f"Processing {total} entries...")
-        results_map = self._translate_entries(all_entries, source_lang, target_lang)
+        try:
+            results_map = self._translate_entries(all_entries, source_lang, target_lang)
 
-        if self.should_stop:
-            self.finished.emit(False, "Stopped by user")
-            return
+            if self.should_stop:
+                self.finished.emit(False, "Stopped by user")
+                return
 
-        # Apply and Save
-        self.stage_changed.emit(PipelineStage.SAVING.value, "Saving files...")
-        self._save_translations(parsed_files, results_map)
-
-        # Save cache
-        if self.cache:
-            self.cache.save()
-            stats = self.cache.get_stats()
-            self.log_message.emit("info", f"Cache stats: {stats['hits']} hits, {stats['misses']} misses ({stats['hit_rate']})")
+            # Apply and Save
+            self.stage_changed.emit(PipelineStage.SAVING.value, "Saving files...")
+            self._save_translations(parsed_files, results_map)
+        finally:
+            if self.cache:
+                self.cache.save()
+                stats = self.cache.get_stats()
+                self.log_message.emit("info", f"Cache stats: {stats['hits']} hits, {stats['misses']} misses ({stats['hit_rate']})")
 
         self.stage_changed.emit(PipelineStage.COMPLETED.value, "Done!")
         self.finished.emit(True, f"Translation completed! Processed {total} entries.")
@@ -946,9 +954,10 @@ class TranslationPipeline(QObject):
         """Return a stable project-relative path for reports."""
         return os.path.relpath(file_path, project_path).replace("\\", "/")
 
-    def _extract_all_text(self, files: List[str]) -> Tuple[List[Tuple], Dict]:
+    def _extract_all_text(self, files: List[str]) -> Tuple[List[Tuple], Dict, List[Tuple]]:
         """Extract text from all files using parallel processing."""
         all_entries = []  # (file, path_key, text)
+        all_listed = []  # (file, path_key, text) — uncertain, exported but not auto-translated
         parsed_files = {}  # file -> (parser, entries)
         
         from concurrent.futures import ThreadPoolExecutor, wait as _cf_wait, ALL_COMPLETED
@@ -983,8 +992,14 @@ class TranslationPipeline(QObject):
                         for path, text, tag in entries
                         if self._should_keep_extracted_text(text)
                     ]
-                    self.logger.debug(f"[extract] done: {filename} in {elapsed:.2f}s ({len(filtered)} entries)")
-                    return file_path, parser, filtered, getattr(parser, '_last_loaded_data', None)
+                    listed = getattr(parser, '_listed_entries', None) or []
+                    listed = [
+                        (path, text, tag)
+                        for path, text, tag in listed
+                        if self._should_keep_extracted_text(text)
+                    ]
+                    self.logger.debug(f"[extract] done: {filename} in {elapsed:.2f}s ({len(filtered)} entries, {len(listed)} listed)")
+                    return file_path, parser, filtered, listed, getattr(parser, '_last_loaded_data', None)
                 self.logger.debug(f"[extract] done (empty): {filename} in {elapsed:.2f}s")
                 return None
             except Exception as e:
@@ -1029,7 +1044,7 @@ class TranslationPipeline(QObject):
 
         for res in results:
             if res:
-                f_path, parser, entries, raw_data = res
+                f_path, parser, entries, listed, raw_data = res
                 norm_path = os.path.normpath(f_path)
                 parsed_files[norm_path] = (parser, entries)
                 
@@ -1039,9 +1054,11 @@ class TranslationPipeline(QObject):
                 
                 for path, text, tag in entries:
                     all_entries.append((norm_path, path, text, tag))
+                for path, text, tag in listed:
+                    all_listed.append((norm_path, path, text, tag))
         
-        self.log_message.emit("info", f"Extraction completed. Found {len(all_entries)} items across {len(parsed_files)} files.")
-        return all_entries, parsed_files
+        self.log_message.emit("info", f"Extraction completed. Found {len(all_entries)} items ({len(all_listed)} listed) across {len(parsed_files)} files.")
+        return all_entries, parsed_files, all_listed
 
     def _should_keep_extracted_text(self, text: str) -> bool:
         """Filter blank entries without dropping valid single-character localized text."""
@@ -1068,16 +1085,30 @@ class TranslationPipeline(QObject):
                 retry_seen.add(key)
                 retry_entries.append((file_path, path, text, tag))
         
-        # 1. Prepare Request Data (Glossary & Cache Check)
-        # We need to construct the list of dicts expected by TextMerger/Translator
-        # Format: {'text': str, 'metadata': dict}
-        
-        raw_requests = []
-        
-        # Determine efficient batching strategy via TextMerger
-        # TextMerger.create_merged_requests returns: (requests_list, merged_map)
-        # requests_list is List[Dict] with 'text' and 'metadata'
-        requests_list, merged_map = self.merger.create_merged_requests(entries)
+        # 1. Pre-merge Cache Check on Individual Entries
+        uncached_entries: List[Tuple[str, str, str, str]] = []
+        cache_hits = 0
+        if self.cache:
+            for file_path, path, text, tag in entries:
+                if not text or not text.strip():
+                    continue
+                cached = self.cache.get(text, source_lang, target_lang)
+                if cached is not None:
+                    results_map[(file_path, path)] = cached
+                    cache_hits += 1
+                else:
+                    uncached_entries.append((file_path, path, text, tag))
+            if cache_hits > 0:
+                self.log_message.emit("info", f"Loaded {cache_hits} translations directly from cache.")
+        else:
+            uncached_entries = list(entries)
+
+        if not uncached_entries:
+            self.log_message.emit("info", "All entries found in cache!")
+            return results_map
+
+        # Determine efficient batching strategy via TextMerger for remaining uncached entries
+        requests_list, merged_map = self.merger.create_merged_requests(uncached_entries)
         
         final_requests = []
         
@@ -1153,9 +1184,9 @@ class TranslationPipeline(QObject):
             processed_count = 0
             total_reqs = len(final_requests)
             
-            def on_progress(count):
+            def on_progress(count: int = 1):
                 nonlocal processed_count
-                processed_count += count
+                processed_count += (count if count is not None else 1)
                 current_time = time.time() * 1000
                 if current_time - self._last_progress_update >= self._progress_throttle_ms:
                     self._last_progress_update = current_time
@@ -1176,9 +1207,6 @@ class TranslationPipeline(QObject):
                         glossary_map = meta.get('glossary_map', {})
                         if self.glossary and glossary_map:
                             translated_text = self.glossary.restore_terms(translated_text, glossary_map)
-                        # Restoration handled by Translator
-                        if self.cache and res.original_text:
-                            self.cache.set(res.original_text, translated_text, source_lang, target_lang)
 
                         if meta.get('is_merged'):
                             lookup_key = f"{meta['file']}::{meta['key']}"
@@ -1189,17 +1217,30 @@ class TranslationPipeline(QObject):
                                     self.logger.warning(f"Merged translation mismatch for {lookup_key}. Retrying without merge.")
                                     _queue_retry(meta['file'], original_entries)
                                 else:
-                                    for sp_key, sp_text in split_pairs:
+                                    for idx, (sp_key, sp_text) in enumerate(split_pairs):
                                         results_map[(meta['file'], sp_key)] = sp_text
+                                        if self.cache and idx < len(original_entries):
+                                            orig_single = original_entries[idx][2]
+                                            if orig_single and orig_single.strip():
+                                                self.cache.set(orig_single, sp_text, source_lang, target_lang)
+                                    # Also cache the full merged block for whole-block cache lookups
+                                    raw_orig_block = meta.get('original_text') or res.original_text
+                                    if self.cache and raw_orig_block:
+                                        self.cache.set(raw_orig_block, translated_text, source_lang, target_lang)
                                     suc += 1
                             else:
                                 self.logger.error(f"Missing merge map for key: {lookup_key}")
                         else:
+                            raw_orig = meta.get('original_text') or res.original_text
+                            if self.cache and raw_orig:
+                                self.cache.set(raw_orig, translated_text, source_lang, target_lang)
                             results_map[(meta['file'], meta['key'])] = translated_text
                             suc += 1
                     else:
                         fal += 1
                         self.logger.warning(f"Translation Failed: {meta.get('key')} - {res.error}")
+                if self.cache and self.cache._modified:
+                    self.cache.save()
                 return suc, fal
 
             # Execute Phase 1
@@ -1277,26 +1318,44 @@ class TranslationPipeline(QObject):
                             translated_text = self.glossary.restore_terms(translated_text, glossary_map)
                         # Restoration handled by Translator
 
-                        if self.cache and res.original_text:
-                            self.cache.set(res.original_text, translated_text, source_lang, target_lang)
+                        raw_orig = meta.get('original_text') or res.original_text
+                        if self.cache and raw_orig:
+                            self.cache.set(raw_orig, translated_text, source_lang, target_lang)
 
                         results_map[(meta['file'], meta['key'])] = translated_text
                     else:
                         self.logger.warning(f"Retry Translation Failed: {meta.get('key')} - {res.error}")
                         fail_total += 1
+
+                if self.cache and self.cache._modified:
+                    self.cache.save()
             
             self.log_message.emit("info", f"Batch Completed. Success: {success_total}, Failed: {fail_total}")
             
             # Cleanup
             await self.translator.close()
 
-        asyncio.run(process_all())
-        
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(process_all())
+        finally:
+            try:
+                pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+                for t in pending:
+                    t.cancel()
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            finally:
+                loop.close()
+                asyncio.set_event_loop(None)
+
         return results_map
 
     def _save_translations(self, parsed_files: Dict, results_map: Dict):
         """Apply translations and save files using parallel processing."""
-        from concurrent.futures import ThreadPoolExecutor, wait as _cf_wait, ALL_COMPLETED
+        from concurrent.futures import ThreadPoolExecutor, as_completed, wait as _cf_wait, ALL_COMPLETED
         
         # Build updates map using Fallback Strategy:
         # 1. New translations from current run (results_map)
@@ -1311,16 +1370,28 @@ class TranslationPipeline(QObject):
             
         # B. Fill missing entries from Importer (including Global Distinct rules)
         for file_path, (parser, entries) in parsed_files.items():
-            if file_path not in file_updates:
-                file_updates[file_path] = {}
-            
             for path, original_text, tag in entries:
                 # Only fill if not already translated in this run
-                if path not in file_updates[file_path]:
+                if file_path not in file_updates or path not in file_updates[file_path]:
                     translation = self.importer.get_translation(file_path, path, original_text)
                     if translation:
+                        if file_path not in file_updates:
+                            file_updates[file_path] = {}
                         file_updates[file_path][path] = translation
         
+        # Pre-filter: Only files with actual translation changes
+        file_updates = {
+            fp: changes
+            for fp, changes in file_updates.items()
+            if changes and fp in parsed_files
+        }
+
+        total = len(file_updates)
+        if total == 0:
+            self.log_message.emit("info", "No files require translation updates.")
+            self.progress_updated.emit(1, 1, "Saving completed (0 files).")
+            return
+
         def apply_wordwrap(changes, tag_lookup):
             """Apply word-wrap settings to dialogue text in-place."""
             visu_wrap = self.settings.get("visustella_wordwrap", False)
@@ -1349,130 +1420,32 @@ class TranslationPipeline(QObject):
                         changes[p] = "<WordWrap>" + text
                 elif auto_wrap and "\n" not in text:
                     width = wrap_limit_portrait if "hasPicture" in tag else wrap_limit_std
-                    _CRE = re.compile(r'\\[A-Za-z]+(?:\[[^\]]*\])?')
-                    visible = _CRE.sub('', text)
-                    if len(visible) <= width:
-                        continue
-                    segs = _CRE.split(text)
-                    codes = _CRE.findall(text)
-                    flat = []
-                    for i, seg in enumerate(segs):
-                        if seg:
-                            flat.append((seg, False))
-                        if i < len(codes):
-                            flat.append((codes[i], True))
-                    lines, cur, vchar = [], "", 0
-                    for part, is_code in flat:
-                        if is_code:
-                            cur += part
-                        else:
-                            for wi, word in enumerate(part.split(' ')):
-                                if wi > 0:
-                                    sp = ' '
-                                elif vchar > 0 and cur and not cur.endswith(' '):
-                                    sp = ' '
-                                else:
-                                    sp = ''
-                                wlen = len(word)
-                                if vchar + len(sp) + wlen > width and vchar > 0:
-                                    lines.append(cur.rstrip())
-                                    cur, vchar = word, wlen
-                                else:
-                                    cur += sp + word if vchar > 0 or wi > 0 else word
-                                    vchar += len(sp) + wlen
-                    if cur.strip():
-                        lines.append(cur.rstrip())
-                    if lines:
-                        changes[p] = "\n".join(lines)
+                    from .layout import reflow_text as _reflow_text
+                    reflowed = _reflow_text(text, width)
+                    if reflowed != text:
+                        changes[p] = reflowed
 
-        def save_file_staged(file_path, staging_dir):
-            """Apply parser + serialise to staging dir.  Returns basename on success."""
-            if self.should_stop:
-                return None
-            changes = file_updates.get(file_path)
-            if not changes or file_path not in parsed_files:
-                return None
-
-            parser, entries = parsed_files[file_path]
-            filename = os.path.basename(file_path)
-            file_ext = os.path.splitext(file_path)[1].lower()
-
-            tag_lookup = {path: tag for path, _t, tag in entries}
-            apply_wordwrap(changes, tag_lookup)
-
-            t1 = time.monotonic()
-            cached_data = self._parsed_data_cache.get(file_path)
-            if file_ext in ('.rvdata2', '.rxdata', '.rvdata') and cached_data is not None:
-                new_data = parser.apply_translation(file_path, changes, original_data=cached_data)
-            else:
-                new_data = parser.apply_translation(file_path, changes)
-            t_apply = time.monotonic() - t1
-            if t_apply > 1.0:
-                self.log_message.emit("info", f"  apply_translation: {t_apply:.1f}s")
-
-            if new_data is None:
-                reason = getattr(parser, "last_apply_error", None)
-                if reason and "write disabled" in reason.lower():
-                    self.log_message.emit("info", f"{filename}: script writing disabled")
-                    return filename
-                raise ValueError(reason or f"No writable data for {filename}")
-
-            stage_path = os.path.join(staging_dir, filename)
-            # Use safe_write to staging (temp + atomic replace within staging dir)
-            with safe_write(stage_path, 'wb') as f:
-                if file_ext == '.json':
-                    f.write(orjson.dumps(new_data))
-                elif file_ext == '.js':
-                    if isinstance(new_data, str):
-                        f.write(new_data.encode('utf-8'))
-                    else:
-                        prefix = getattr(parser, '_js_prefix', "var $plugins = \n").encode('utf-8')
-                        suffix = getattr(parser, '_js_suffix', ";\n").encode('utf-8')
-                        f.write(prefix)
-                        f.write(orjson.dumps(new_data))
-                        f.write(suffix)
-                elif file_ext in ('.txt', '.csv', TS_SCENARIO_EXTENSION):
-                    if not isinstance(new_data, str):
-                        raise ValueError(f"Expected str, got {type(new_data).__name__} for {filename}")
-                    f.write(new_data.encode('utf-8'))
-                elif file_ext in ('.rvdata2', '.rxdata', '.rvdata'):
-                    if isinstance(new_data, bytes):
-                        f.write(new_data)
-                    else:
-                        import rubymarshal.writer
-                        rubymarshal.writer.write(f, new_data)
-                else:
-                    raise ValueError(f"Unsupported extension: {file_ext}")
-
-            self.logger.debug(f"[save] done: {filename}")
-            return filename
-
-        # --- Sequential save (direct write, no staging) ---
-        total = len(file_updates)
         save_start = time.time()
-        PER_FILE_LIMIT_SEC = 60   # single file taking >60s is stuck
-        TOTAL_LIMIT_SEC = 300     # entire save phase ceiling (5 min)
+        PER_FILE_LIMIT_SEC = 60
+        TOTAL_LIMIT_SEC = 300
 
-        self.log_message.emit("info", f"Saving {total} files...")
-        last_save_progress_time = 0.0
+        # Determine worker count based on project profile
+        if self._project_profile:
+            max_workers = max(1, min(self._project_profile.suggested_worker_count, 8))
+        else:
+            max_workers = max(1, min(os.cpu_count() or 4, 8))
 
-        saved_filenames: list = []
-        for idx, fp in enumerate(sorted(
-            file_updates.keys(),
-            key=lambda p: (0 if p.lower().endswith(".js") else 1),
-        )):
+        self.log_message.emit("info", f"Saving {total} files using {max_workers} parallel workers...")
+
+        def _save_single_file(fp: str) -> tuple[str | None, str | None, float]:
             if self.should_stop:
-                break
-            total_elapsed = time.time() - save_start
-            if total_elapsed > TOTAL_LIMIT_SEC:
-                self.log_message.emit("warning", f"Save phase exceeded {TOTAL_LIMIT_SEC}s limit — stopping ({idx}/{total} files saved)")
-                break
+                return None, "Stopped by user", 0.0
             basename = os.path.basename(fp)
             file_start = time.time()
             try:
                 changes = file_updates.get(fp)
                 if not changes or fp not in parsed_files:
-                    continue
+                    return None, None, 0.0
                 parser, entries = parsed_files[fp]
                 file_ext = os.path.splitext(fp)[1].lower()
                 tag_lookup = {p: t for p, _t, t in entries}
@@ -1487,15 +1460,37 @@ class TranslationPipeline(QObject):
                 if new_data is None:
                     reason = getattr(parser, "last_apply_error", None)
                     if reason and "write disabled" in reason.lower():
-                        self.log_message.emit("info", f"{basename}: script writing disabled")
-                        saved_filenames.append(basename)
-                        continue
-                    raise ValueError(reason or f"No data for {basename}")
+                        return basename, None, time.time() - file_start
+                    return None, reason or f"No data returned for {basename}", time.time() - file_start
+
+                serialized_bytes = None
+                # Pre-write Invariant Validation & Shadow Dry-Run
+                if file_ext == '.json':
+                    orig_json = cached_data if cached_data is not None else getattr(parser, "_last_loaded_data", None)
+                    if orig_json is not None:
+                        val_res = Validator.validate_json_roundtrip(orig_json, new_data)
+                        if not val_res.is_valid:
+                            return None, f"Pre-write validation failed for {basename}: {', '.join(val_res.errors)}", time.time() - file_start
+                        serialized_bytes = val_res.metadata.get("serialized_bytes")
+                elif file_ext == '.js':
+                    if isinstance(new_data, str):
+                        js_to_validate = new_data
+                    else:
+                        prefix_str = getattr(parser, '_js_prefix', "var $plugins = \n")
+                        suffix_str = getattr(parser, '_js_suffix', ";\n")
+                        js_to_validate = f"{prefix_str}{orjson.dumps(new_data).decode('utf-8')}{suffix_str}"
+                    val_res = Validator.validate_js_syntax(js_to_validate)
+                    if not val_res.is_valid:
+                        return None, f"Pre-write JS validation failed for {basename}: {', '.join(val_res.errors)}", time.time() - file_start
+                elif file_ext in ('.rvdata2', '.rxdata', '.rvdata'):
+                    val_res = Validator.validate_ruby_roundtrip(new_data)
+                    if not val_res.is_valid:
+                        return None, f"Pre-write Ruby validation failed for {basename}: {', '.join(val_res.errors)}", time.time() - file_start
 
                 # Write directly using safe_write (temp file + atomic replace)
                 with safe_write(fp, 'wb') as f:
                     if file_ext == '.json':
-                        f.write(orjson.dumps(new_data))
+                        f.write(serialized_bytes if serialized_bytes is not None else orjson.dumps(new_data))
                     elif file_ext == '.js':
                         if isinstance(new_data, str):
                             f.write(new_data.encode('utf-8'))
@@ -1514,28 +1509,71 @@ class TranslationPipeline(QObject):
                             import rubymarshal.writer
                             rubymarshal.writer.write(f, new_data)
                     else:
-                        raise ValueError(f"Unsupported extension: {file_ext}")
+                        return None, f"Unsupported extension: {file_ext}", time.time() - file_start
 
-                saved_filenames.append(basename)
+                # Release per-file cached data to bound peak memory on large Ruby projects
+                self._parsed_data_cache.pop(fp, None)
+                if hasattr(parser, "_last_loaded_data"):
+                    parser._last_loaded_data = None
+
+                return basename, None, time.time() - file_start
             except Exception as exc:
-                self.logger.error(f"Error saving {basename}: {exc}")
-                self.log_message.emit("warning", f"Failed to save {basename}: {exc}")
-                saved_filenames.append(None)
-            file_elapsed = time.time() - file_start
-            if file_elapsed > PER_FILE_LIMIT_SEC:
-                self.log_message.emit("warning", f"Slow save: {basename} took {file_elapsed:.0f}s")
-            
-            now_ms = time.time() * 1000
-            if (now_ms - last_save_progress_time >= self._progress_throttle_ms) or (idx + 1 == total):
-                last_save_progress_time = now_ms
-                self.progress_updated.emit(idx + 1, total, f"Saving... {idx + 1}/{total}")
+                return None, str(exc), time.time() - file_start
 
-        success_count = len([f for f in saved_filenames if f])
+        # Sort files so .js (e.g. plugins.js) is submitted first
+        sorted_files = sorted(
+            file_updates.keys(),
+            key=lambda p: (0 if p.lower().endswith(".js") else 1),
+        )
+
+        saved_filenames: list = []
+        last_save_progress_time = 0.0
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_save_single_file, fp): fp for fp in sorted_files}
+            for idx, future in enumerate(as_completed(futures)):
+                if self.should_stop:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
+
+                total_elapsed = time.time() - save_start
+                if total_elapsed > TOTAL_LIMIT_SEC:
+                    self.log_message.emit("warning", f"Save phase exceeded {TOTAL_LIMIT_SEC}s limit — stopping ({len(saved_filenames)}/{total} files saved)")
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
+
+                fp = futures[future]
+                basename = os.path.basename(fp)
+                try:
+                    saved_name, err_msg, file_elapsed = future.result()
+                    if err_msg:
+                        self.logger.error(f"Error saving {basename}: {err_msg}")
+                        self.log_message.emit("warning", f"Failed to save {basename}: {err_msg}")
+                    elif saved_name:
+                        saved_filenames.append(saved_name)
+                    if file_elapsed > PER_FILE_LIMIT_SEC:
+                        self.log_message.emit("warning", f"Slow save: {basename} took {file_elapsed:.0f}s")
+                except Exception as exc:
+                    self.logger.error(f"Save worker error on {basename}: {exc}")
+                    self.log_message.emit("warning", f"Failed to save {basename}: {exc}")
+
+                now_ms = time.time() * 1000
+                if (now_ms - last_save_progress_time >= self._progress_throttle_ms) or (idx + 1 == total):
+                    last_save_progress_time = now_ms
+                    self.progress_updated.emit(idx + 1, total, f"Saving... {idx + 1}/{total}")
+
+        success_count = len(saved_filenames)
 
         if any(os.path.basename(path).lower() == HENDRIX_CSV_FILENAME for path in file_updates):
             self._ensure_hendrix_target_language(file_updates.keys())
 
         self.log_message.emit("success", f"Successfully saved {success_count} files.")
+
+        if self.backup_manager:
+            manifest_path = self.backup_manager.create_session_manifest()
+            if manifest_path:
+                self.log_message.emit("info", f"Session backup manifest created: {os.path.basename(manifest_path)}")
+
 
     def _ensure_hendrix_target_language(self, updated_files: Any) -> None:
         """Ensure Hendrix Localization knows about the active target language."""
@@ -1652,7 +1690,7 @@ class TranslationPipeline(QObject):
         }
         return names.get(language_symbol.lower(), language_symbol.upper())
 
-    def _export_entries(self, entries: List[Tuple], export_path: str, distinct: bool = False):
+    def _export_entries(self, entries: List[Tuple], export_path: str, distinct: bool = False, listed: List[Tuple] | None = None):
         """Export extracted entries to file with support for distinct string mode."""
         try:
             # Ensure target directory exists
@@ -1665,6 +1703,8 @@ class TranslationPipeline(QObject):
             for file_path, path, text, tag in entries:
                 # Pass tag as context if available
                 exporter.add_entry(file_path, path, text, context=str(tag or ""))
+            for file_path, path, text, tag in (listed or []):
+                exporter.add_entry(file_path, path, text, context=f"listed | {tag or ''}")
             
             success = False
             if export_path.endswith('.json'):
@@ -1681,20 +1721,3 @@ class TranslationPipeline(QObject):
             error_msg = f"Critical Export Error: {str(e)}"
             self.logger.error(error_msg)
             self.log_message.emit("error", error_msg)
-
-    def _import_translations(self, import_path: str) -> Dict:
-        """Import translations from file."""
-        importer = TranslationImporter()
-        
-        if import_path.endswith('.json'):
-            importer.import_json(import_path)
-        else:
-            importer.import_csv(import_path)
-        
-        # Convert to results_map format
-        results_map = {}
-        for file_path, translations in importer.get_all_translations().items():
-            for path, translated in translations.items():
-                results_map[(file_path, path)] = translated
-        
-        return results_map

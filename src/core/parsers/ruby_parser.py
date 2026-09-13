@@ -1291,7 +1291,11 @@ class RubyParser(BaseParser):
         if len(raw_text) < 2: return raw_text
         if quote == "'": return raw_text[1:-1]
         try:
-            return ast.literal_eval(raw_text)
+            import warnings
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", SyntaxWarning)
+                return ast.literal_eval(raw_text)
         except Exception:
             return raw_text[1:-1]
 

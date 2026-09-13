@@ -150,13 +150,13 @@ Item {
                             label: "Export Only Mode"
                             desc: "Do not write translations back to game data files"
                             checked: settingsBackend.exportOnly
-                            onToggled: settingsBackend.exportOnly = val
+                            onToggled: (val) => { settingsBackend.exportOnly = val }
                         }
                         ToggleRow {
                             label: "Distinct Entries Only"
                             desc: "Group identical source strings to reduce file size"
                             checked: settingsBackend.exportDistinct
-                            onToggled: settingsBackend.exportDistinct = val
+                            onToggled: (val) => { settingsBackend.exportDistinct = val }
                         }
                     }
                 }
@@ -229,7 +229,7 @@ Item {
                             label: "Use Custom Glossary"
                             desc: "Apply the selected dictionary during translation"
                             checked: settingsBackend.useGlossary
-                            onToggled: settingsBackend.useGlossary = val
+                            onToggled: (val) => { settingsBackend.useGlossary = val }
                         }
 
                         FilePicker {

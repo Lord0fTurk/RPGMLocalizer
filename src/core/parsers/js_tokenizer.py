@@ -215,8 +215,11 @@ class JSStringTokenizer:
             return raw_text[1:-1]
         try:
             import ast
+            import warnings
 
-            return ast.literal_eval(raw_text)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", SyntaxWarning)
+                return ast.literal_eval(raw_text)
         except (SyntaxError, ValueError):
             return raw_text[1:-1]
     

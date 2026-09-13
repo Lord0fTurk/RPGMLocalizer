@@ -80,7 +80,7 @@ Item {
                                 color: t ? t.textPrimary : "#f0f0ff"
                             }
                             Text {
-                                text: "v0.7.1  ·  Autonomous Localization Engine"
+                                text: appBackend.appVersion + "  ·  Autonomous Localization Engine"
                                 font.pixelSize: t ? t.fontSizeMD : 13
                                 color: t ? t.textMuted : "#55556a"
                             }

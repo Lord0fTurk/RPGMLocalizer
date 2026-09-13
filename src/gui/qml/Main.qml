@@ -257,7 +257,7 @@ ApplicationWindow {
                                 color: theme.textPrimary
                             }
                             Text {
-                                text: "v0.7.1"
+                                text: appBackend.appVersion
                                 font.pixelSize: 10
                                 color: theme.textMuted
                             }

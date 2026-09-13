@@ -15,6 +15,11 @@ from src.utils.app_paths import get_cache_dir
 from src.utils.paths import existing_resource_path
 from src.backend.settings_backend import SettingsBackend
 
+try:
+    from version import VERSION
+except ImportError:
+    VERSION = "0.8.0"
+
 
 class AppBackend(QObject):
     """QObject backend bridge connecting QML UI to TranslationPipeline worker thread."""
@@ -61,6 +66,10 @@ class AppBackend(QObject):
         if p:
             return QUrl.fromLocalFile(p).toString()
         return ""
+
+    @pyqtProperty(str, constant=True)
+    def appVersion(self) -> str:
+        return f"v{VERSION}"
 
     @pyqtProperty(int, notify=progressChanged)
     def progressCurrent(self) -> int:

@@ -143,7 +143,7 @@ class TranslationPipeline(QObject):
         # Backup
         if self.settings.get('backup_enabled', True):
             backup_dir = self.settings.get('backup_dir')
-            self.backup_manager = get_backup_manager(backup_dir)
+            self.backup_manager = BackupManager(backup_dir)
             self.logger.info("Backup system enabled")
 
     def run(self):
@@ -175,6 +175,8 @@ class TranslationPipeline(QObject):
         self.log_message.emit("info", f"Project: {project_path}")
         if self.cache:
             self.log_message.emit("info", f"Translation cache directory: {self.cache.cache_dir}")
+        if self.backup_manager:
+            self.log_message.emit("info", "Backup system enabled (original game files will be backed up before modification)")
         
         # Find Data folder
         data_dir = self._find_data_dir(project_path)
@@ -1487,6 +1489,12 @@ class TranslationPipeline(QObject):
                     if not val_res.is_valid:
                         return None, f"Pre-write Ruby validation failed for {basename}: {', '.join(val_res.errors)}", time.time() - file_start
 
+                # Create backup before writing
+                if self.backup_manager:
+                    backup_path = self.backup_manager.create_backup(fp)
+                    if not backup_path:
+                        self.logger.warning(f"Backup failed for {basename}, proceeding with caution")
+
                 # Write directly using safe_write (temp file + atomic replace)
                 with safe_write(fp, 'wb') as f:
                     if file_ext == '.json':
@@ -1518,6 +1526,11 @@ class TranslationPipeline(QObject):
 
                 return basename, None, time.time() - file_start
             except Exception as exc:
+                if self.backup_manager:
+                    backups = self.backup_manager.get_backups_for_file(fp)
+                    if backups:
+                        self.backup_manager.restore_backup(backups[-1], fp)
+                        self.logger.info(f"Restored {basename} from backup following save error")
                 return None, str(exc), time.time() - file_start
 
         # Sort files so .js (e.g. plugins.js) is submitted first
@@ -1572,6 +1585,9 @@ class TranslationPipeline(QObject):
         if self.backup_manager:
             manifest_path = self.backup_manager.create_session_manifest()
             if manifest_path:
+                backup_count = len(self.backup_manager.backup_log)
+                manifest_dir = os.path.dirname(manifest_path)
+                self.log_message.emit("info", f"Backups created for {backup_count} files in: {manifest_dir}")
                 self.log_message.emit("info", f"Session backup manifest created: {os.path.basename(manifest_path)}")
 
 

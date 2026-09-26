@@ -1,5 +1,5 @@
 """
-Translator Subsystem Shim (v0.8.0 Modular Architecture)
+Translator Subsystem Shim (v1.0.0 Architecture)
 ========================================================
 
 Backward compatibility wrapper. The monolithic translator has been refactored

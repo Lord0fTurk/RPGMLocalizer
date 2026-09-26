@@ -42,11 +42,20 @@ def main() -> None:
     app.aboutToQuit.connect(_force_exit)
 
     settings_backend = SettingsBackend()
+
+    from src.backend.locale_manager import LocaleManager
+    locale_manager = LocaleManager(settings_backend)
+
     app_backend = AppBackend(settings_backend)
+
+    from src.backend.editor_backend import EditorBackend
+    editor_backend = EditorBackend(app_backend, settings_backend)
 
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty("appBackend", app_backend)
     engine.rootContext().setContextProperty("settingsBackend", settings_backend)
+    engine.rootContext().setContextProperty("editorBackend", editor_backend)
+    engine.rootContext().setContextProperty("localeManager", locale_manager)
 
     qml_file = existing_resource_path("src/gui/qml/Main.qml")
     if not qml_file or not os.path.exists(qml_file):

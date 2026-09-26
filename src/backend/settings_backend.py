@@ -21,7 +21,7 @@ class SettingsBackend(QObject):
             "engine": "google",
             "translate_notes": False,
             "translate_comments": False,
-            "translate_plugins_js": True,
+            "translate_plugins_js": False,
             "plugin_js_ui_extraction": True,
             "visustella_wordwrap": False,
             "auto_wordwrap": True,
@@ -53,13 +53,15 @@ class SettingsBackend(QObject):
             "deepseek_model": "deepseek-chat",
             "deepseek_base_url": "https://api.deepseek.com/v1",
             "gemini_api_key": "",
-            "gemini_model": "gemini-2.0-flash",
+            "gemini_model": "gemini-2.5-flash",
+            "gemini_safety_settings": "BLOCK_NONE",
             "local_llm_url": "http://localhost:11434/v1",
             "local_llm_model": "llama3",
             "deepl_api_key": "",
             "libretranslate_url": "http://localhost:5000",
             "libretranslate_api_key": "",
             "project_path": "",
+            "ui_language": "",
         }
         self.load()
 
@@ -127,6 +129,14 @@ class SettingsBackend(QObject):
     def engine(self, val: str) -> None:
         self._set("engine", val)
 
+    @pyqtProperty(str, notify=settingsChanged)
+    def uiLanguage(self) -> str:
+        return str(self._get("ui_language", "en"))
+
+    @uiLanguage.setter
+    def uiLanguage(self, val: str) -> None:
+        self._set("ui_language", val)
+
     @pyqtProperty(bool, notify=settingsChanged)
     def translateNotes(self) -> bool:
         return bool(self._get("translate_notes", False))
@@ -145,7 +155,7 @@ class SettingsBackend(QObject):
 
     @pyqtProperty(bool, notify=settingsChanged)
     def translatePluginsJs(self) -> bool:
-        return bool(self._get("translate_plugins_js", True))
+        return bool(self._get("translate_plugins_js", False))
 
     @translatePluginsJs.setter
     def translatePluginsJs(self, val: bool) -> None:
@@ -379,11 +389,19 @@ class SettingsBackend(QObject):
 
     @pyqtProperty(str, notify=settingsChanged)
     def geminiModel(self) -> str:
-        return str(self._get("gemini_model", "gemini-2.0-flash"))
+        return str(self._get("gemini_model", "gemini-2.5-flash"))
 
     @geminiModel.setter
     def geminiModel(self, val: str) -> None:
         self._set("gemini_model", val)
+
+    @pyqtProperty(str, notify=settingsChanged)
+    def geminiSafetySettings(self) -> str:
+        return str(self._get("gemini_safety_settings", "BLOCK_NONE"))
+
+    @geminiSafetySettings.setter
+    def geminiSafetySettings(self, val: str) -> None:
+        self._set("gemini_safety_settings", val)
 
     @pyqtProperty(str, notify=settingsChanged)
     def localLlmUrl(self) -> str:

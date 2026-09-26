@@ -1,6 +1,6 @@
 """
-RPG Maker Syntax Guard Module (Modernized v0.8.0)
-===================================================
+RPG Maker & WOLF RPG Syntax Guard Module (Modernized v1.0.0)
+============================================================
 
 Provides unbreakable protection for RPG Maker escape codes and plugin tags
 during translation, supporting both Google Web endpoints and AI/LLM engines.
@@ -32,6 +32,7 @@ from src.core.text_segmenter import (
     SegmentType,
     clean_text as _segmenter_clean,
     reassemble as _segmenter_reassemble,
+    _find_word_boundary,
 )
 
 logger = logging.getLogger(__name__)
@@ -65,7 +66,7 @@ _GREEK_TO_LATIN = str.maketrans({
 _RPGM_CODE_PATTERNS = (
     r'(\[\[.*?\]\]|'                     # [[escaped]]
     r'\{\{.*?\}\}|'                      # {{escaped}}
-    r'\\(?:[cCiIpPfFwWvVnNoOaAhHxXyY]|fs|fn|oc|ow|hc|ac|px|py|wc|tt|bg)\[(?:[^\[\]]*|\[[^\[\]]*\])*\]|'  # Nested brackets like \C[\V[1]]
+    r'\\(?:[cCiIpPfFwWvVnNoOaAhHxXyY]|fs|fn|oc|ow|hc|ac|px|py|wc|tt|bg|cself|sself|self|cdb|udb|sdb|space)\[(?:[^\[\]]*|\[[^\[\]]*\])*\]|'  # Nested brackets like \C[\V[1]], \cself[66], \self[1], \cdb[0:1:0]
     r'\\c\[\d+\]|'                       # \c[n] - color
     r'\\C\[\d+\]|'                       # \C[n] - color (uppercase)
     r'\\i\[\d+\]|'                       # \i[n] - icon
@@ -108,9 +109,13 @@ _RPGM_CODE_PATTERNS = (
 RPGM_CODE_RE = re.compile(_RPGM_CODE_PATTERNS)
 
 _CRITICAL_CODE_PREFIXES = (
-    "\\V[", "\\v[", "\\N[", "\\n[", "\\P[", "\\p[", "\\C[", "\\c[",
-    "\\I[", "\\i[", "\\G", "\\g", "\\$", "\\FS[", "\\fs[",
+    # RPG Maker Standard (XP/VX/VXA/MV/MZ) - Engine Logic & Variables
+    "\\V[", "\\v[", "\\N[", "\\n[", "\\P[", "\\p[",
     "v[", "s[", "V[", "S[", "if(", "en(", "req(", "cond(", "eval(",
+    # WOLF RPG Editor Spec - Database & System Variables
+    "\\cself[", "\\self[", "\\sself[",
+    "\\cdb[", "\\udb[", "\\sdb[",
+    "\\sys[", "\\sysS[", "\\syss[",
 )
 
 
@@ -138,7 +143,11 @@ def _compute_salt(text: str) -> str:
 def _is_critical_code(code: str) -> bool:
     """Determine if a code is critical for engine stability."""
     norm = code.strip()
-    return any(norm.startswith(prefix) for prefix in _CRITICAL_CODE_PREFIXES)
+    norm_lower = norm.lower()
+    return any(
+        norm.startswith(prefix) or norm_lower.startswith(prefix.lower())
+        for prefix in _CRITICAL_CODE_PREFIXES
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +332,66 @@ def _stage4_heuristic_levenshtein(text: str, remaining: Dict[str, str]) -> Tuple
     return res, remaining
 
 
+def _stage45_positional_recovery(
+    text: str,
+    remaining: Dict[str, str],
+    original_text: str,
+) -> Tuple[str, Dict[str, str]]:
+    """Stage 4.5: Intelligently recover missing codes (e.g. \\c[2], \\f[15], \\cself[1])
+    at their relative positions instead of dropping the translation or reverting to original text.
+    """
+    if not remaining or not original_text or not text:
+        return text, remaining
+
+    res = text
+    to_remove: List[str] = []
+
+    sorted_tokens = []
+    for full_key, original_code in remaining.items():
+        pos = original_text.find(original_code)
+        ratio = pos / len(original_text) if pos >= 0 and len(original_text) > 0 else 0.5
+        sorted_tokens.append((ratio, pos, full_key, original_code))
+
+    # Process in reverse order so insertions do not disturb earlier relative positions
+    sorted_tokens.sort(key=lambda x: x[1], reverse=True)
+
+    for ratio, pos, full_key, original_code in sorted_tokens:
+        if original_code in res:
+            to_remove.append(full_key)
+            continue
+
+        is_leading = pos == 0 or all(c.isspace() for c in original_text[:pos])
+        is_trailing = (pos + len(original_code) >= len(original_text)) or all(
+            c.isspace() for c in original_text[pos + len(original_code):]
+        )
+
+        if is_leading:
+            res = original_code + res
+            to_remove.append(full_key)
+        elif is_trailing:
+            res = res + original_code
+            to_remove.append(full_key)
+        elif not _is_critical_code(original_code):
+            target_idx = int(ratio * len(res))
+            boundary_idx = _find_word_boundary(res, target_idx)
+            left = res[:boundary_idx].rstrip()
+            right = res[boundary_idx:].lstrip()
+            if left and right:
+                res = f"{left} {original_code} {right}" if not original_code.startswith("\\") else f"{left} {original_code}{right}"
+            elif right:
+                res = f"{original_code}{right}"
+            elif left:
+                res = f"{left} {original_code}"
+            else:
+                res = original_code
+            to_remove.append(full_key)
+
+    for k in to_remove:
+        remaining.pop(k, None)
+
+    return res, remaining
+
+
 def _stage5_corruption_fallback(
     translated_text: str,
     original_text: str,
@@ -370,6 +439,8 @@ def restore_rpgm_syntax(
         res, rem = _stage05_bare_token_restore(res, rem)
     if rem:
         res, rem = _stage4_heuristic_levenshtein(res, rem)
+    if rem and original_text:
+        res, rem = _stage45_positional_recovery(res, rem, original_text)
 
     res = _stage5_corruption_fallback(res, original_text, rem)
     return res
@@ -416,9 +487,16 @@ def restore_rpgm_syntax_xml(
     result = ph_pattern.sub(replacer, text)
 
     if original_text:
+        unhandled = {
+            pid: code for pid, code in id_map.items()
+            if pid not in handled_keys
+        }
+        if unhandled:
+            result, unhandled = _stage45_positional_recovery(result, unhandled, original_text)
+
         missing_critical = [
-            code for pid, code in id_map.items()
-            if pid not in handled_keys and _is_critical_code(code)
+            code for pid, code in unhandled.items()
+            if _is_critical_code(code)
         ]
         if missing_critical:
             logger.warning(

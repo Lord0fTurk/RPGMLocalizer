@@ -3,10 +3,17 @@ import QtQuick.Controls 2.15
 import QtQuick.Controls.Material 2.15
 import QtQuick.Layouts 1.15
 
+import "../js/I18n.js" as I18n
+
 Item {
     id: root
     property var themeObj: null
     property var t: themeObj
+    property string searchQuery: ""
+    readonly property var filterCodes: ["All Levels", "ERROR", "WARNING", "SUCCESS", "INFO"]
+    readonly property var filterLabels: [
+        localeManager.strings.console.filter_all, "ERROR", "WARNING", "SUCCESS", "INFO"
+    ]
 
     // =========================================================
     // CONSOLE TAB
@@ -22,18 +29,52 @@ Item {
             Rectangle { width: parent.width; height: 1; anchors.bottom: parent.bottom; color: t ? t.border1 : "#2e2e3e" }
             RowLayout {
                 anchors { fill: parent; leftMargin: 28; rightMargin: 28 }
-                spacing: t ? t.spaceMD : 12
-                Text { text: "Console Log"; font.pixelSize: 20; font.bold: true; color: t ? t.textPrimary : "#f0f0ff" }
+                spacing: t ? t.spaceMD : 14
+                Text { text: localeManager.strings.console.title; font.pixelSize: 20; font.bold: true; color: t ? t.textPrimary : "#f0f0ff" }
                 Item { Layout.fillWidth: true }
+
+                // Live search bar
+                Rectangle {
+                    implicitWidth: 240; implicitHeight: 32; radius: 8
+                    color: t ? t.bg4 : "#2a2a3a"
+                    border.color: searchInput.activeFocus ? (t ? t.accent : "#7c6cf8") : (t ? t.border2 : "#3d3d55")
+                    border.width: 1
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 10; anchors.rightMargin: 8
+                        spacing: 6
+                        Text { text: "🔍"; font.pixelSize: 11; opacity: 0.7 }
+                        TextField {
+                            id: searchInput
+                            Layout.fillWidth: true
+                            placeholderText: localeManager.strings.console.search_placeholder
+                            color: t ? t.textPrimary : "#f0f0ff"
+                            placeholderTextColor: t ? t.textMuted : "#55556a"
+                            font.pixelSize: 11
+                            background: Item {}
+                            onTextChanged: root.searchQuery = text
+                        }
+                        Text {
+                            visible: searchInput.text.length > 0
+                            text: "✕"; font.pixelSize: 10; color: t ? t.textMuted : "#55556a"
+                            MouseArea {
+                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                onClicked: searchInput.text = ""
+                            }
+                        }
+                    }
+                }
+
                 // Line count badge
                 Rectangle {
                     Layout.alignment: Qt.AlignVCenter
-                    implicitWidth: lineCountText.implicitWidth + 20; implicitHeight: 26; radius: 13
+                    implicitWidth: lineCountText.implicitWidth + 20; implicitHeight: 28; radius: 14
                     color: Qt.rgba(255,255,255,0.05)
                     border.color: t ? t.border2 : "#3d3d55"; border.width: 1
                     Text {
                         id: lineCountText; anchors.centerIn: parent
-                        text: logModel.count + " lines"; font.pixelSize: 11
+                        text: I18n.format(localeManager.strings.console.line_count, {count: logModel.count}); font.pixelSize: 11
                         color: t ? t.textMuted : "#55556a"
                     }
                 }
@@ -45,12 +86,39 @@ Item {
             Layout.fillWidth: true; Layout.fillHeight: true
             color: t ? t.bg2 : "#1a1a24"
 
+            // Empty State
+            ColumnLayout {
+                anchors.centerIn: parent
+                spacing: 12
+                visible: logModel.count === 0
+
+                Rectangle {
+                    Layout.alignment: Qt.AlignHCenter
+                    width: 56; height: 56; radius: 16
+                    color: Qt.rgba(255, 255, 255, 0.04)
+                    border.color: t ? t.border1 : "#2e2e3e"
+                    border.width: 1
+                    Text { anchors.centerIn: parent; text: "⚡"; font.pixelSize: 24 }
+                }
+                Text {
+                    Layout.alignment: Qt.AlignHCenter
+                    text: localeManager.strings.console.empty_title
+                    font.pixelSize: 15; font.bold: true
+                    color: t ? t.textSecondary : "#9090b8"
+                }
+                Text {
+                    Layout.alignment: Qt.AlignHCenter
+                    text: localeManager.strings.console.empty_desc
+                    font.pixelSize: 12
+                    color: t ? t.textMuted : "#55556a"
+                }
+            }
+
             ListView {
                 id: logList
                 anchors { fill: parent; margins: 12; topMargin: 8 }
                 model: ListModel { id: logModel }
-                clip: true; spacing: 1
-                verticalLayoutDirection: ListView.BottomToTop
+                clip: true; spacing: 2
                 reuseItems: true
                 cacheBuffer: 400
 
@@ -58,7 +126,8 @@ Item {
 
                 delegate: Rectangle {
                     id: logDelegate
-                    property bool matchesFilter: logList.filterLevel === "All Levels" || model.level === logList.filterLevel
+                    property bool matchesFilter: (logList.filterLevel === "All Levels" || model.level === logList.filterLevel) &&
+                                                 (root.searchQuery === "" || (model.msg && model.msg.toLowerCase().indexOf(root.searchQuery.toLowerCase()) !== -1))
                     width: logList.width
                     height: matchesFilter ? (logText.implicitHeight + 10) : 0
                     visible: matchesFilter
@@ -72,6 +141,15 @@ Item {
                     RowLayout {
                         anchors { fill: parent; leftMargin: 10; rightMargin: 10; topMargin: 5; bottomMargin: 5 }
                         spacing: 10
+
+                        // Timestamp
+                        Text {
+                            text: model.time || ""
+                            font.pixelSize: 10; font.family: "Consolas"
+                            color: t ? t.textMuted : "#55556a"
+                            Layout.alignment: Qt.AlignVCenter
+                        }
+
                         // Level dot
                         Rectangle {
                             width: 6; height: 6; radius: 3
@@ -83,9 +161,10 @@ Item {
                                 return t ? t.textMuted : "#55556a"
                             }
                         }
+
                         // Level tag
                         Rectangle {
-                            implicitWidth: lvlText.implicitWidth + 10; implicitHeight: 16; radius: 4
+                            implicitWidth: lvlText.implicitWidth + 10; implicitHeight: 18; radius: 4
                             Layout.alignment: Qt.AlignVCenter
                             color: {
                                 if (model.level === "ERROR")   return Qt.rgba(248, 113, 113, 0.15)
@@ -104,6 +183,8 @@ Item {
                                 }
                             }
                         }
+
+                        // Message Text
                         Text {
                             id: logText; text: model.msg
                             font.pixelSize: t ? t.fontSizeSM : 12; font.family: "Consolas"
@@ -137,7 +218,7 @@ Item {
                     color: clrMouse.containsMouse ? Qt.rgba(255,255,255,0.06) : "transparent"
                     border.color: t ? t.border2 : "#3d3d55"; border.width: 1
                     Behavior on color { ColorAnimation { duration: 130 } }
-                    Text { anchors.centerIn: parent; text: "Clear"; font.pixelSize: t ? t.fontSizeSM : 12; color: t ? t.textSecondary : "#9090b8" }
+                    Text { anchors.centerIn: parent; text: localeManager.strings.console.clear_button; font.pixelSize: t ? t.fontSizeSM : 12; color: t ? t.textSecondary : "#9090b8" }
                     MouseArea {
                         id: clrMouse; anchors.fill: parent; hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor; onClicked: logModel.clear()
@@ -147,7 +228,7 @@ Item {
                 // Copy All button
                 Rectangle {
                     id: copyBtn
-                    implicitWidth: 88; implicitHeight: 30; radius: 8
+                    implicitWidth: 96; implicitHeight: 30; radius: 8
                     color: copyMouse.containsMouse ? Qt.rgba(255,255,255,0.06) : "transparent"
                     border.color: t ? t.border2 : "#3d3d55"; border.width: 1
                     Behavior on color { ColorAnimation { duration: 130 } }
@@ -156,7 +237,7 @@ Item {
 
                     Text {
                         anchors.centerIn: parent
-                        text: copyBtn.justCopied ? "✓ Copied!" : "📋 Copy All"
+                        text: copyBtn.justCopied ? localeManager.strings.console.copied_label : localeManager.strings.console.copy_all_label
                         font.pixelSize: t ? t.fontSizeSM : 12
                         color: copyBtn.justCopied ? (t ? t.success : "#4ade80") : (t ? t.textSecondary : "#9090b8")
                         Behavior on color { ColorAnimation { duration: 200 } }
@@ -166,13 +247,13 @@ Item {
                         id: copyMouse; anchors.fill: parent; hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
-                            // Build full log text
                             var lines = []
-                            for (var i = logModel.count - 1; i >= 0; i--) {
+                            for (var i = 0; i < logModel.count; i++) {
                                 var entry = logModel.get(i)
-                                lines.push("[" + (entry.level || "INFO") + "] " + entry.msg)
+                                var tStr = entry.time ? ("[" + entry.time + "] ") : ""
+                                lines.push(tStr + "[" + (entry.level || "INFO") + "] " + entry.msg)
                             }
-                            clipboardHelper.copyText(lines.join("\n"))
+                            appBackend.copyToClipboard(lines.join("\n"))
                             copyBtn.justCopied = true
                             copyResetTimer.restart()
                         }
@@ -187,7 +268,7 @@ Item {
                 Item { Layout.fillWidth: true }
 
                 // Auto-scroll toggle
-                Text { text: "Auto-scroll"; font.pixelSize: t ? t.fontSizeSM : 12; color: t ? t.textMuted : "#55556a" }
+                Text { text: localeManager.strings.console.auto_scroll_label; font.pixelSize: t ? t.fontSizeSM : 12; color: t ? t.textMuted : "#55556a" }
                 Rectangle {
                     id: autoScrollRect
                     width: 36; height: 20; radius: t ? t.radiusMD : 10
@@ -215,7 +296,7 @@ Item {
                     ComboBox {
                         id: filterCombo
                         anchors.fill: parent
-                        model: ["All Levels", "ERROR", "WARNING", "SUCCESS", "INFO"]
+                        model: root.filterLabels
                         Material.theme: Material.Dark
                         background: Item {}
                         contentItem: Text {
@@ -223,31 +304,23 @@ Item {
                             color: t ? t.textSecondary : "#9090b8"; font.pixelSize: 11
                             verticalAlignment: Text.AlignVCenter
                         }
-                        onCurrentTextChanged: logList.filterLevel = currentText
+                        onActivated: (index) => { logList.filterLevel = root.filterCodes[index] }
                     }
                 }
             }
         }
     }
 
-    // Clipboard helper via hidden TextEdit
-    TextEdit {
-        id: clipboardHelper
-        visible: false; width: 0; height: 0
-        function copyText(txt) {
-            text = txt
-            selectAll()
-            copy()
-            text = ""
-        }
-    }
-
     Connections {
         target: appBackend
         function onLogEmitted(level, msg) {
-            logModel.append({ "level": level, "msg": msg })
+            var now = new Date()
+            var timeStr = ("0" + now.getHours()).slice(-2) + ":" +
+                          ("0" + now.getMinutes()).slice(-2) + ":" +
+                          ("0" + now.getSeconds()).slice(-2)
+            logModel.append({ "level": level, "msg": msg, "time": timeStr })
             if (logModel.count > 5000) logModel.remove(0)
-            if (autoScrollRect.autoScroll) logList.positionViewAtBeginning()
+            if (autoScrollRect.autoScroll) logList.positionViewAtEnd()
         }
     }
 }

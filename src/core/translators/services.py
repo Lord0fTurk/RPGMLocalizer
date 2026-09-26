@@ -42,7 +42,7 @@ from .base import BaseTranslator, TranslationEngine, TranslationRequest, Transla
 try:
     from version import VERSION as _APP_VERSION
 except ImportError:
-    _APP_VERSION = "0.8.0"
+    _APP_VERSION = "1.0.0"
 
 logger = logging.getLogger("LLMServices")
 

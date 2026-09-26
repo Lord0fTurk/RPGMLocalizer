@@ -10,6 +10,8 @@ from .parsers.json_parser import JsonParser
 from .parsers.plain_text_parser import CreditsTextParser, SUPPORTED_TEXT_FILENAMES
 from .parsers.ruby_parser import RubyParser
 from .parsers.ts_adv_scenario_parser import TsAdvScenarioParser, TS_SCENARIO_EXTENSION
+from .parsers.wolf_parser import WolfParser
+from .parsers.wolf_evtext_parser import WolfEvtextParser, is_wolf_evtext_file
 from .parsers.base import BaseParser
 
 
@@ -46,15 +48,31 @@ def get_parser(file_path: str, settings: Optional[dict[str, Any]] = None) -> Opt
             translate_comments=settings.get('translate_comments', False),
             regex_blacklist=settings.get('regex_blacklist', [])
         )
-    elif ext == ".txt" and os.path.basename(file_path).lower() in SUPPORTED_TEXT_FILENAMES:
-        return CreditsTextParser(
-            regex_blacklist=settings.get('regex_blacklist', [])
-        )
+    elif ext == ".txt":
+        if is_wolf_evtext_file(file_path):
+            return WolfEvtextParser(
+                regex_blacklist=settings.get('regex_blacklist', []),
+                translate_comments=settings.get('translate_comments', False)
+            )
+        elif os.path.basename(file_path).lower() in SUPPORTED_TEXT_FILENAMES:
+            return CreditsTextParser(
+                regex_blacklist=settings.get('regex_blacklist', [])
+            )
     elif ext in [".rvdata2", ".rxdata", ".rvdata"]:
         return RubyParser(
             translate_notes=settings.get('translate_notes', False),
             translate_comments=settings.get('translate_comments', False),
             regex_blacklist=settings.get('regex_blacklist', [])
+        )
+    elif ext == ".mps":
+        return WolfParser(
+            regex_blacklist=settings.get('regex_blacklist', []),
+            translate_comments=settings.get('translate_comments', False)
+        )
+    elif ext == ".dat" and basename not in ("game.dat", "sysdatabasebasic.dat"):
+        return WolfParser(
+            regex_blacklist=settings.get('regex_blacklist', []),
+            translate_comments=settings.get('translate_comments', False)
         )
     
     return None
@@ -62,7 +80,7 @@ def get_parser(file_path: str, settings: Optional[dict[str, Any]] = None) -> Opt
 
 def get_supported_extensions() -> list:
     """Get list of supported file extensions."""
-    return ['.json', '.rvdata2', '.rxdata', '.rvdata', '.js', '.txt', '.csv', TS_SCENARIO_EXTENSION]
+    return ['.json', '.rvdata2', '.rxdata', '.rvdata', '.js', '.txt', '.csv', TS_SCENARIO_EXTENSION, '.mps', '.dat']
 
 
 def is_supported_file(file_path: str) -> bool:
@@ -72,5 +90,7 @@ def is_supported_file(file_path: str) -> bool:
     if basename == HENDRIX_CSV_FILENAME:
         return True
     if ext == '.txt':
-        return os.path.basename(file_path).lower() in SUPPORTED_TEXT_FILENAMES
+        return os.path.basename(file_path).lower() in SUPPORTED_TEXT_FILENAMES or is_wolf_evtext_file(file_path)
+    if ext == '.dat' and basename in ('game.dat', 'sysdatabasebasic.dat'):
+        return False
     return ext in get_supported_extensions()

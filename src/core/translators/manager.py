@@ -94,20 +94,38 @@ def _build_openai_translator(
 
 def _build_gemini_translator(
     settings: Dict[str, Any], concurrency: int, batch_size: int, timeout: int
-) -> OpenAICompatibleTranslator:
+) -> BaseTranslator:
     api_key = str(settings.get("gemini_api_key", "") or settings.get("api_key", ""))
-    if not api_key:
-        logger.warning("No API key configured for Gemini engine; requests will fail unless unauthenticated.")
-    model = str(settings.get("gemini_model", "gemini-2.0-flash"))
-    base_url = str(settings.get("gemini_base_url", "https://generativelanguage.googleapis.com/v1beta/openai"))
-    return OpenAICompatibleTranslator(
-        api_key=api_key,
-        model=model,
-        base_url=base_url,
-        concurrency=concurrency,
-        batch_size=batch_size,
-        timeout_seconds=timeout,
-    )
+    model = str(settings.get("gemini_model", "gemini-2.5-flash"))
+    safety_level = str(settings.get("gemini_safety_settings", "BLOCK_NONE"))
+
+    try:
+        from src.core.ai_translator import GeminiTranslator
+        gemini_tr = GeminiTranslator(
+            api_key=api_key,
+            model=model,
+            safety_level=safety_level,
+            concurrency=concurrency,
+            batch_size=batch_size,
+            timeout=float(timeout),
+        )
+        # Wire automatic secondary fallback delegation to GoogleTranslator
+        fallback_google = _build_google_translator(settings, concurrency, batch_size, timeout, "google")
+        gemini_tr.set_fallback_translator(fallback_google)
+        return gemini_tr
+    except (ImportError, Exception) as exc:
+        logger.warning(
+            "Native GeminiTranslator initialization failed (%s); falling back to OpenAI-compatible endpoint.", exc
+        )
+        base_url = str(settings.get("gemini_base_url", "https://generativelanguage.googleapis.com/v1beta/openai"))
+        return OpenAICompatibleTranslator(
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            concurrency=concurrency,
+            batch_size=batch_size,
+            timeout_seconds=timeout,
+        )
 
 
 def _build_local_llm_translator(

@@ -9,7 +9,7 @@ Item {
 
     Item {
         anchors.centerIn: parent
-        width: Math.min(parent.width - 80, 560)
+        width: Math.min(parent.width - 80, 640)
         implicitHeight: mainCol.implicitHeight
 
         ColumnLayout {
@@ -47,42 +47,86 @@ Item {
                     RowLayout {
                         spacing: t ? t.spaceLG : 16
 
-                        Rectangle {
-                            width: 56; height: 56; radius: t ? t.radiusLG : 14
-                            gradient: Gradient {
-                                orientation: Gradient.Horizontal
-                                GradientStop { position: 0.0; color: t ? t.accentDark : "#5a4dd4" }
-                                GradientStop { position: 1.0; color: t ? t.accent     : "#7c6cf8" }
+                        Item {
+                            width: 64; height: 64
+
+                            // Ambient glow behind logo
+                            Rectangle {
+                                anchors.centerIn: parent
+                                width: 64; height: 64
+                                radius: 16
+                                color: Qt.rgba(0, 240, 255, 0.08)
+                                border.color: Qt.rgba(0, 240, 255, 0.25)
+                                border.width: 1
                             }
+
                             Image {
                                 anchors.centerIn: parent
-                                width: 38; height: 38
+                                width: 64; height: 64
                                 source: appBackend.appIconUrl
                                 fillMode: Image.PreserveAspectFit
+                                mipmap: true
                                 visible: appBackend.appIconUrl.length > 0
                                 asynchronous: true
-                                sourceSize.width: 76
-                                sourceSize.height: 76
+                                sourceSize.width: 128
+                                sourceSize.height: 128
                             }
+
                             Text {
                                 anchors.centerIn: parent
                                 text: "⚡"
-                                font.pixelSize: 28
+                                font.pixelSize: 32
                                 visible: appBackend.appIconUrl.length === 0
                             }
                         }
 
                         ColumnLayout {
-                            spacing: 3
-                            Text {
-                                text: "RPGMLocalizer"
-                                font.pixelSize: 26; font.bold: true
-                                color: t ? t.textPrimary : "#f0f0ff"
+                            spacing: 5
+
+                            RowLayout {
+                                spacing: 4
+                                Text {
+                                    text: "RPGM"
+                                    font.pixelSize: 26
+                                    font.bold: true
+                                    font.letterSpacing: 0.5
+                                    color: t ? t.textPrimary : "#ffffff"
+                                }
+                                Text {
+                                    text: "Localizer"
+                                    font.pixelSize: 26
+                                    font.bold: true
+                                    font.letterSpacing: 0.5
+                                    color: t ? t.accentLight : "#a89bf9"
+                                }
                             }
-                            Text {
-                                text: appBackend.appVersion + "  ·  Autonomous Localization Engine"
-                                font.pixelSize: t ? t.fontSizeMD : 13
-                                color: t ? t.textMuted : "#55556a"
+
+                            RowLayout {
+                                spacing: 8
+
+                                Rectangle {
+                                    height: 20
+                                    width: aboutVersionText.implicitWidth + 12
+                                    radius: 10
+                                    color: Qt.rgba(124, 108, 248, 0.16)
+                                    border.color: Qt.rgba(124, 108, 248, 0.35)
+                                    border.width: 1
+
+                                    Text {
+                                        id: aboutVersionText
+                                        anchors.centerIn: parent
+                                        text: appBackend.appVersion
+                                        font.pixelSize: 11
+                                        font.bold: true
+                                        color: t ? t.accentLight : "#a89bf9"
+                                    }
+                                }
+
+                                Text {
+                                    text: localeManager.strings.about.tagline
+                                    font.pixelSize: t ? t.fontSizeMD : 13
+                                    color: t ? t.textMuted : "#55556a"
+                                }
                             }
                         }
                     }
@@ -91,7 +135,7 @@ Item {
 
                     Text {
                         Layout.fillWidth: true
-                        text: "High-performance translation and localization suite supporting Ruby RGSS 1/2/3 (.rxdata · .rvdata · .rvdata2) and MV/MZ JS (.json · .js) formats."
+                        text: localeManager.strings.about.description
                         font.pixelSize: t ? t.fontSizeMD : 13
                         color: t ? t.textSecondary : "#9090b8"
                         wrapMode: Text.Wrap
@@ -101,16 +145,22 @@ Item {
                     RowLayout {
                         spacing: t ? t.spaceSM : 8
                         Repeater {
-                            model: ["Python 3.12+", "PyQt6 + QML", "Segment-Safe", "GPL-3.0"]
+                            model: [
+                                localeManager.strings.about.tag_python,
+                                localeManager.strings.about.tag_pyqt,
+                                localeManager.strings.about.tag_segment_safe,
+                                localeManager.strings.about.tag_license,
+                            ]
                             delegate: Rectangle {
-                                implicitHeight: 22; radius: 11
+                                implicitHeight: 24; radius: 12
                                 implicitWidth: tagLbl.implicitWidth + 16
                                 color: Qt.rgba(124, 108, 248, 0.10)
                                 border.color: Qt.rgba(124, 108, 248, 0.25)
                                 border.width: 1
                                 Text {
                                     id: tagLbl; anchors.centerIn: parent
-                                    text: modelData; font.pixelSize: t ? t.fontSizeXS : 10
+                                    text: modelData; font.pixelSize: 11
+                                    font.bold: true
                                     color: t ? t.accentLight : "#a89bf9"
                                 }
                             }
@@ -123,27 +173,33 @@ Item {
             // === Support Card ===
             Rectangle {
                 Layout.fillWidth: true
-                implicitHeight: supportCol.implicitHeight + 40
-                radius: t ? t.radiusLG : 14
-                color: Qt.rgba(124, 108, 248, 0.06)
-                border.color: Qt.rgba(124, 108, 248, 0.2)
+                implicitHeight: supportCol.implicitHeight + 36
+                radius: 14
+                color: Qt.rgba(124, 108, 248, 0.05)
+                border.color: Qt.rgba(124, 108, 248, 0.20)
                 border.width: 1
 
                 ColumnLayout {
                     id: supportCol
                     anchors { fill: parent; margins: 20 }
-                    spacing: 14
+                    spacing: 12
 
-                    Text { text: "Support the Developer"; font.pixelSize: t ? t.fontSizeLG : 15; font.bold: true; color: t ? t.textPrimary : "#f0f0ff" }
+                    RowLayout {
+                        spacing: 8
+                        Text { text: "❤️"; font.pixelSize: 15 }
+                        Text { text: localeManager.strings.about.support_title; font.pixelSize: 14; font.bold: true; color: t ? t.textPrimary : "#f0f0ff" }
+                    }
+
                     Text {
-                        text: "If this project has been useful to you, consider supporting it on Patreon."
-                        font.pixelSize: t ? t.fontSizeMD : 13; color: t ? t.textSecondary : "#9090b8"
+                        text: localeManager.strings.about.support_desc
+                        font.pixelSize: 12; color: t ? t.textSecondary : "#9090b8"
                         Layout.fillWidth: true; wrapMode: Text.Wrap
                     }
 
-                    // Patreon Button
+                    // Refined Patreon Button
                     Rectangle {
-                        Layout.fillWidth: true; implicitHeight: 42; radius: t ? t.radiusMD : 10
+                        Layout.alignment: Qt.AlignHCenter
+                        implicitWidth: 260; implicitHeight: 38; radius: 9
                         gradient: Gradient {
                             orientation: Gradient.Horizontal
                             GradientStop { position: 0.0; color: "#e85d04" }
@@ -152,14 +208,14 @@ Item {
 
                         Rectangle {
                             anchors.fill: parent; radius: parent.radius
-                            color: patrMouse.containsMouse ? Qt.rgba(255,255,255,0.1) : "transparent"
+                            color: patrMouse.containsMouse ? Qt.rgba(255,255,255,0.12) : "transparent"
                             Behavior on color { ColorAnimation { duration: 130 } }
                         }
 
                         RowLayout {
-                            anchors.centerIn: parent; spacing: t ? t.spaceSM : 8
-                            Text { text: "❤️"; font.pixelSize: 16 }
-                            Text { text: "Support on Patreon"; color: "white"; font.pixelSize: 14; font.bold: true }
+                            anchors.centerIn: parent; spacing: 8
+                            Text { text: "☕"; font.pixelSize: 13 }
+                            Text { text: localeManager.strings.about.patreon_button; color: "white"; font.pixelSize: 13; font.bold: true }
                         }
 
                         MouseArea {
@@ -177,9 +233,9 @@ Item {
 
                 Repeater {
                     model: [
-                        { icon: "📦", label: "GitHub",       url: "https://github.com/Lord0fTurk/RPGMLocalizer" },
-                        { icon: "📘", label: "Documentation", url: "https://github.com/Lord0fTurk/RPGMLocalizer/wiki" },
-                        { icon: "🐞", label: "Report a Bug",  url: "https://github.com/Lord0fTurk/RPGMLocalizer/issues" },
+                        { icon: "📦", label: localeManager.strings.about.link_github, url: "https://github.com/Lord0fTurk/RPGMLocalizer" },
+                        { icon: "📘", label: localeManager.strings.about.link_docs,   url: "https://github.com/Lord0fTurk/RPGMLocalizer/wiki" },
+                        { icon: "🐞", label: localeManager.strings.about.link_bug,    url: "https://github.com/Lord0fTurk/RPGMLocalizer/issues" },
                     ]
                     delegate: Rectangle {
                         Layout.fillWidth: true; implicitHeight: 44; radius: t ? t.radiusMD : 10

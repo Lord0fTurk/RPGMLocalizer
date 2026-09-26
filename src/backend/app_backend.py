@@ -12,24 +12,29 @@ from PyQt6.QtWidgets import QApplication, QFileDialog, QSystemTrayIcon, QStyle
 from src.core.enums import PipelineStage
 from src.core.translation_pipeline import TranslationPipeline
 from src.utils.app_paths import get_cache_dir
-from src.utils.paths import existing_resource_path
+from src.utils.paths import existing_resource_path, local_path_from_url
 from src.backend.settings_backend import SettingsBackend
 
 try:
     from version import VERSION
 except ImportError:
-    VERSION = "0.8.0"
+    VERSION = "1.0.0"
 
 
 class AppBackend(QObject):
     """QObject backend bridge connecting QML UI to TranslationPipeline worker thread."""
 
     isRunningChanged = pyqtSignal()
+    projectPathChanged = pyqtSignal(str)
+    detectedEngineChanged = pyqtSignal(str)
+    detectedEngineCodeChanged = pyqtSignal(str)
     progressChanged = pyqtSignal()
     stageChanged = pyqtSignal(str)
     logEmitted = pyqtSignal(str, str)  # level, text
     infoNotice = pyqtSignal(str, str, str)  # notice_type, title, message
     finished = pyqtSignal(bool, str)  # success, summary
+    cacheAboutToBeCleared = pyqtSignal()
+    cacheCleared = pyqtSignal()
 
     def __init__(self, settings_backend: SettingsBackend, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -46,6 +51,7 @@ class AppBackend(QObject):
         self._stage_text: str = "Idle"
 
         self._project_path: str = str(self.settings_backend.projectPath or "")
+        self._detected_engine, self._detected_engine_code = self._detect_engine_type(self._project_path)
         self._tray_icon: QSystemTrayIcon | None = None
         self._init_tray()
 
@@ -53,6 +59,27 @@ class AppBackend(QObject):
         app = QApplication.instance()
         if app:
             app.aboutToQuit.connect(self.shutdown)
+
+    def _detect_engine_type(self, path: str) -> tuple[str, str]:
+        if not path or not os.path.isdir(path):
+            return "", ""
+        try:
+            from src.core.engine_profiler import EngineProfiler, RpgMakerEngine
+            profiler = EngineProfiler(path)
+            profile = profiler.detect_engine()
+            names = {
+                RpgMakerEngine.MV: "RPG Maker MV",
+                RpgMakerEngine.MZ: "RPG Maker MZ",
+                RpgMakerEngine.VX_ACE: "RPG Maker VX Ace",
+                RpgMakerEngine.VX: "RPG Maker VX",
+                RpgMakerEngine.XP: "RPG Maker XP",
+                RpgMakerEngine.WOLF_RPG: "WOLF RPG Editor",
+                RpgMakerEngine.UNKNOWN: "",
+            }
+            return names.get(profile.engine, ""), profile.engine.value
+        except Exception as e:
+            self.logger.debug(f"Engine detection failed: {e}")
+            return "", ""
 
     # --- Properties ---
 
@@ -87,7 +114,7 @@ class AppBackend(QObject):
     def stageText(self) -> str:
         return self._stage_text
 
-    @pyqtProperty(str, notify=isRunningChanged)
+    @pyqtProperty(str, notify=projectPathChanged)
     def projectPath(self) -> str:
         return self._project_path
 
@@ -96,13 +123,46 @@ class AppBackend(QObject):
         if self._project_path != val:
             self._project_path = val
             self.settings_backend.projectPath = val
+            self._detected_engine, self._detected_engine_code = self._detect_engine_type(val)
+            self.projectPathChanged.emit(val)
+            self.detectedEngineChanged.emit(self._detected_engine)
+            self.detectedEngineCodeChanged.emit(self._detected_engine_code)
             self.isRunningChanged.emit()
+
+    @pyqtProperty(str, notify=detectedEngineChanged)
+    def detectedEngine(self) -> str:
+        return self._detected_engine
+
+    @pyqtProperty(str, notify=detectedEngineCodeChanged)
+    def detectedEngineCode(self) -> str:
+        return self._detected_engine_code
 
     # --- Slots ---
 
+    @pyqtSlot()
+    def clearProjectPath(self) -> None:
+        self.projectPath = ""
+
+    @pyqtSlot(str)
+    def copyToClipboard(self, text: str) -> None:
+        try:
+            app = QApplication.instance()
+            if app:
+                cb = app.clipboard()
+                if cb:
+                    cb.setText(text)
+        except Exception as exc:
+            self.logger.warning(f"Failed to copy to clipboard: {exc}")
+
     @pyqtSlot(str)
     def setProjectPath(self, path: str) -> None:
-        self.projectPath = path
+        if not path:
+            self.projectPath = ""
+            return
+        cleaned = local_path_from_url(path)
+        if os.path.isfile(cleaned):
+            cleaned = os.path.dirname(cleaned)
+        self.projectPath = cleaned
 
     @pyqtSlot(result=str)
     def selectProjectDirectory(self) -> str:
@@ -176,17 +236,67 @@ class AppBackend(QObject):
     @pyqtSlot()
     def clearCache(self) -> None:
         try:
+            import gc
+            import stat
+            import time
+            from src.core.cache import reset_cache
             from src.utils.app_paths import get_project_id
+
+            # 1. Notify listeners (EditorBackend, etc.) to close SQLite DB connections & file locks
+            self.cacheAboutToBeCleared.emit()
+
+            # 2. Direct hook fallback if editor_backend is registered
+            if hasattr(self, "editor_backend") and self.editor_backend:
+                try:
+                    self.editor_backend.closeStore()
+                except Exception as exc:
+                    self.logger.warning(f"Error closing editor store: {exc}")
+
+            # 3. Reset the global translation cache singleton
+            reset_cache()
+
+            # 4. Force garbage collection to finalize any unreferenced file/sqlite handles
+            gc.collect()
+
             project_id = get_project_id(self._project_path) if self._project_path else None
             cache_dir = get_cache_dir(project_id=project_id)
-            if os.path.exists(cache_dir):
-                shutil.rmtree(cache_dir)
-                os.makedirs(cache_dir, exist_ok=True)
+            cache_dir_str = str(cache_dir)
+
+            if os.path.exists(cache_dir_str):
+                def _handle_remove_readonly(func, path, exc):
+                    try:
+                        os.chmod(path, stat.S_IWRITE)
+                        func(path)
+                    except Exception:
+                        pass
+
+                deleted = False
+                last_err = None
+                for attempt in range(4):
+                    try:
+                        try:
+                            shutil.rmtree(cache_dir_str, onexc=_handle_remove_readonly)
+                        except TypeError:
+                            shutil.rmtree(cache_dir_str, onerror=_handle_remove_readonly)
+                        deleted = True
+                        break
+                    except (PermissionError, OSError) as exc:
+                        last_err = exc
+                        time.sleep(0.15)
+                        gc.collect()
+
+                if not deleted and last_err:
+                    raise last_err
+
+                os.makedirs(cache_dir_str, exist_ok=True)
                 msg = f"Translation cache cleared for [{project_id}]." if project_id else "Translation cache cleared successfully."
+                self.cacheCleared.emit()
                 self.infoNotice.emit("success", "Cache Cleared", msg)
             else:
+                self.cacheCleared.emit()
                 self.infoNotice.emit("info", "Cache Empty", "No active cache directory found.")
         except Exception as e:
+            self.logger.exception(f"Failed to clear cache: {e}")
             self.infoNotice.emit("error", "Clear Cache Failed", f"Failed to clear cache: {e}")
 
     @pyqtSlot()
@@ -300,10 +410,8 @@ class AppBackend(QObject):
         message = summary or ("Project successfully translated." if success else "An error occurred during translation.")
         self._show_system_notification(title, message, success=success)
 
-        if success:
-            self.infoNotice.emit("success", title, message)
-        else:
-            self.infoNotice.emit("error", title, message)
+        # completionDialog handles the primary user-facing result dialog.
+        # Avoid emitting infoNotice("error") which spawns a redundant overlapping noticePopup.
         self.finished.emit(success, summary)
 
     def _cleanup_thread(self) -> None:

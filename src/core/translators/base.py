@@ -68,6 +68,13 @@ class BaseTranslator(ABC):
         self._connector: Optional[aiohttp.TCPConnector] = None
         self._session_lock = asyncio.Lock()
         self.timeout_seconds = timeout_seconds
+        self.fallback_translator: Optional[BaseTranslator] = None
+        self._fallback: Optional[BaseTranslator] = None
+
+    def set_fallback_translator(self, fallback: Optional[BaseTranslator]) -> None:
+        """Sets a secondary fallback translator to invoke if the primary engine fails."""
+        self.fallback_translator = fallback
+        self._fallback = fallback
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session and not self._session.closed:

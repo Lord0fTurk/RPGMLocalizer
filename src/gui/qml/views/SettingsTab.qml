@@ -63,21 +63,34 @@ Item {
         property string label: ""
         property real from: 0; property real to: 100; property real step: 1
         property real value: 0
+        property string unit: ""
         signal moved(real val)
-        spacing: 14; Layout.fillWidth: true
+        spacing: 16; Layout.fillWidth: true
 
         Text {
-            text: sliderRow.label + ": " + Math.round(sliderRow.value)
-            font.pixelSize: t ? t.fontSizeSM : 12; color: t ? t.textSecondary : "#9090b8"
-            Layout.preferredWidth: 210
+            text: sliderRow.label
+            font.pixelSize: t ? t.fontSizeMD : 13; font.bold: true; color: t ? t.textPrimary : "#f0f0ff"
+            Layout.preferredWidth: 230
         }
         Slider {
-            Layout.fillWidth: true
+            Layout.preferredWidth: 260
             from: sliderRow.from; to: sliderRow.to; stepSize: sliderRow.step
             value: sliderRow.value
             Material.theme: Material.Dark; Material.accent: t ? t.accent : "#7c6cf8"
             onMoved: sliderRow.moved(value)
         }
+        Rectangle {
+            implicitWidth: 68; implicitHeight: 28; radius: 6
+            color: t ? t.bg4 : "#2a2a3a"
+            border.color: t ? t.border2 : "#3d3d55"; border.width: 1
+            Text {
+                anchors.centerIn: parent
+                text: Math.round(sliderRow.value) + (sliderRow.unit ? (" " + sliderRow.unit) : "")
+                font.pixelSize: 12; font.bold: true
+                color: t ? t.accentLight : "#a89bf9"
+            }
+        }
+        Item { Layout.fillWidth: true }
     }
 
     // ---- Toggle Row ----
@@ -90,9 +103,9 @@ Item {
         spacing: t ? t.spaceMD : 12; Layout.fillWidth: true
 
         ColumnLayout {
-            Layout.fillWidth: true; spacing: 1
+            Layout.fillWidth: true; spacing: 2
             Text { text: toggleRowComp.label; font.pixelSize: t ? t.fontSizeMD : 13; color: t ? t.textPrimary : "#f0f0ff" }
-            Text { text: toggleRowComp.desc; font.pixelSize: 11; color: t ? t.textMuted : "#55556a"; visible: text.length > 0 }
+            Text { text: toggleRowComp.desc; font.pixelSize: 11; color: t ? t.textSecondary : "#9090b8"; opacity: 0.85; visible: text.length > 0 }
         }
 
         Rectangle {
@@ -115,6 +128,65 @@ Item {
         }
     }
 
+    // ---- Styled ComboBox (mirrors HomeTab.qml's StyledCombo) ----
+    component StyledCombo: ComboBox {
+        id: styledCombo
+        Material.theme: Material.Dark
+        implicitHeight: 36
+        background: Rectangle {
+            color: styledCombo.popup.visible ? (t ? t.bg4 : "#2a2a3a") : (styledCombo.hovered ? (t ? t.bgHover : "#32324a") : (t ? t.bg4 : "#22222f"))
+            border.color: styledCombo.popup.visible ? (t ? t.accent : "#7c6cf8") : (t ? t.border2 : "#3d3d55")
+            border.width: 1; radius: 8
+            Behavior on color { ColorAnimation { duration: t ? t.animFast : 130 } }
+            Behavior on border.color { ColorAnimation { duration: t ? t.animFast : 130 } }
+        }
+        contentItem: Text {
+            leftPadding: 12; rightPadding: styledCombo.indicator.width + 8
+            text: styledCombo.displayText; color: t ? t.textPrimary : "#f0f0ff"
+            font.pixelSize: t ? t.fontSizeMD : 13; verticalAlignment: Text.AlignVCenter
+        }
+        indicator: Text {
+            x: styledCombo.width - width - 10; y: (styledCombo.height - height) / 2
+            text: "▾"; color: t ? t.textSecondary : "#9090b8"; font.pixelSize: 11
+            rotation: styledCombo.popup.visible ? 180 : 0
+            Behavior on rotation { NumberAnimation { duration: 150 } }
+        }
+        popup: Popup {
+            y: styledCombo.height + 4; width: styledCombo.width
+            implicitHeight: contentItem.implicitHeight; padding: 4
+            background: Rectangle {
+                color: t ? t.bg3 : "#22222f"; border.color: t ? t.border2 : "#3d3d55"
+                border.width: 1; radius: t ? t.radiusMD : 10
+            }
+            contentItem: ListView {
+                clip: true; implicitHeight: Math.min(contentHeight, 280)
+                model: styledCombo.delegateModel
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+            }
+        }
+        delegate: ItemDelegate {
+            width: styledCombo.width - 8
+            highlighted: styledCombo.highlightedIndex === index
+            contentItem: Text {
+                text: modelData; font.pixelSize: t ? t.fontSizeMD : 13; leftPadding: 8
+                color: highlighted ? "white" : (t ? t.textSecondary : "#9090b8")
+                verticalAlignment: Text.AlignVCenter
+            }
+            background: Rectangle {
+                color: highlighted ? (t ? t.accentGlow : "#1c1c30") : "transparent"; radius: t ? t.radiusSM : 6
+            }
+        }
+    }
+
+    readonly property var uiLangList: localeManager.availableLanguages()
+    readonly property var uiLangCodes: root.uiLangList.map(function(l) { return l.code })
+    readonly property var uiLangNames: root.uiLangList.map(function(l) { return l.name })
+    function uiLangCodeToIndex(code) {
+        for (var i = 0; i < root.uiLangCodes.length; i++)
+            if (root.uiLangCodes[i] === code) return i
+        return 0
+    }
+
     // =========================================================
     ScrollView {
         id: scrollView
@@ -133,12 +205,45 @@ Item {
                 Rectangle { width: parent.width; height: 1; anchors.bottom: parent.bottom; color: t ? t.border1 : "#2e2e3e" }
                 RowLayout {
                     anchors { fill: parent; leftMargin: 28 }
-                    Text { text: "Settings"; font.pixelSize: 20; font.bold: true; color: t ? t.textPrimary : "#f0f0ff" }
+                    Text { text: localeManager.strings.settings.title; font.pixelSize: 20; font.bold: true; color: t ? t.textPrimary : "#f0f0ff" }
                 }
             }
 
             ColumnLayout {
                 Layout.fillWidth: true; Layout.margins: 28; spacing: t ? t.spaceLG : 16
+
+                // ===== CARD: Interface Language =====
+                AppCard {
+                    Layout.fillWidth: true
+                    implicitHeight: langCardCol.implicitHeight + 36
+                    ColumnLayout {
+                        id: langCardCol
+                        anchors { fill: parent; margins: 20 }
+                        spacing: 14
+                        RowLayout {
+                            spacing: t ? t.spaceSM : 8
+                            Rectangle { width: 4; height: 16; radius: 2; color: t ? t.accent : "#7c6cf8" }
+                            Text { text: localeManager.strings.settings.ui_language_card_title; font.pixelSize: 14; font.bold: true; color: t ? t.textPrimary : "#f0f0ff" }
+                        }
+                        Rectangle { Layout.fillWidth: true; height: 1; color: t ? t.border1 : "#2e2e3e" }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 16
+                            Text {
+                                text: localeManager.strings.settings.ui_language_desc
+                                font.pixelSize: t ? t.fontSizeSM : 12; color: t ? t.textSecondary : "#9090b8"
+                                wrapMode: Text.WordWrap; Layout.fillWidth: true
+                            }
+                            StyledCombo {
+                                id: uiLangCombo
+                                Layout.preferredWidth: 260
+                                model: root.uiLangNames
+                                currentIndex: root.uiLangCodeToIndex(localeManager.currentLanguage)
+                                onActivated: (index) => { localeManager.setLanguage(root.uiLangCodes[index]) }
+                            }
+                        }
+                    }
+                }
 
                 // ===== CARD: Engine & Performance =====
                 AppCard {
@@ -151,28 +256,28 @@ Item {
                         RowLayout {
                             spacing: t ? t.spaceSM : 8
                             Rectangle { width: 4; height: 16; radius: 2; color: t ? t.accent : "#7c6cf8" }
-                            Text { text: "Engine & Performance"; font.pixelSize: 14; font.bold: true; color: t ? t.textPrimary : "#f0f0ff" }
+                            Text { text: localeManager.strings.settings.card_engine_title; font.pixelSize: 14; font.bold: true; color: t ? t.textPrimary : "#f0f0ff" }
                         }
                         Rectangle { Layout.fillWidth: true; height: 1; color: t ? t.border1 : "#2e2e3e" }
                         StyledSlider {
-                            label: "Batch Size (Lines)"; from: 5; to: 50; step: 5
+                            label: localeManager.strings.settings.batch_size_label; from: 5; to: 50; step: 5
                             value: settingsBackend.batchSize
                             onMoved: (val) => { settingsBackend.batchSize = Math.round(val) }
                         }
                         StyledSlider {
-                            label: "Concurrent Requests"; from: 1; to: 20; step: 1
+                            label: localeManager.strings.settings.concurrent_requests_label; from: 1; to: 20; step: 1
                             value: settingsBackend.concurrentRequests
                             onMoved: (val) => { settingsBackend.concurrentRequests = Math.round(val) }
                         }
                         ToggleRow {
-                            label: "Multi-Endpoint Racing"
-                            desc: "Rotate Google mirror endpoints in parallel"
+                            label: localeManager.strings.settings.multi_endpoint_label
+                            desc: localeManager.strings.settings.multi_endpoint_desc
                             checked: settingsBackend.useMultiEndpoint
                             onToggled: (val) => { settingsBackend.useMultiEndpoint = val }
                         }
                         ToggleRow {
-                            label: "Lingva Fallback"
-                            desc: "Fall back to Lingva if Google fails"
+                            label: localeManager.strings.settings.lingva_fallback_label
+                            desc: localeManager.strings.settings.lingva_fallback_desc
                             checked: settingsBackend.enableLingvaFallback
                             onToggled: (val) => { settingsBackend.enableLingvaFallback = val }
                         }
@@ -190,31 +295,31 @@ Item {
                         RowLayout {
                             spacing: t ? t.spaceSM : 8
                             Rectangle { width: 4; height: 16; radius: 2; color: t ? t.accentLight : "#a89bf9" }
-                            Text { text: "AI & External Provider Credentials"; font.pixelSize: 14; font.bold: true; color: t ? t.textPrimary : "#f0f0ff" }
+                            Text { text: localeManager.strings.settings.card_ai_title; font.pixelSize: 14; font.bold: true; color: t ? t.textPrimary : "#f0f0ff" }
                         }
                         Rectangle { Layout.fillWidth: true; height: 1; color: t ? t.border1 : "#2e2e3e" }
 
                         // OpenAI / DeepSeek
-                        Text { text: "🤖 OpenAI / DeepSeek"; font.pixelSize: t ? t.fontSizeSM : 12; font.bold: true; color: t ? t.accentLight : "#a89bf9" }
+                        Text { text: localeManager.strings.settings.section_openai; font.pixelSize: t ? t.fontSizeSM : 12; font.bold: true; color: t ? t.accentLight : "#a89bf9" }
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: t ? t.spaceMD : 12
                             InputField {
-                                label: "API Key"
+                                label: localeManager.strings.settings.api_key_label
                                 text: settingsBackend.openaiApiKey
                                 placeholder: "sk-..."
                                 isPassword: true
                                 onEditingFinished: (newText) => { settingsBackend.openaiApiKey = newText }
                             }
                             InputField {
-                                label: "Model Name"
+                                label: localeManager.strings.settings.model_name_label
                                 text: settingsBackend.openaiModel
                                 placeholder: "gpt-4o-mini"
                                 onEditingFinished: (newText) => { settingsBackend.openaiModel = newText }
                             }
                         }
                         InputField {
-                            label: "Base URL (Set to https://api.deepseek.com/v1 for DeepSeek)"
+                            label: localeManager.strings.settings.openai_base_url_label
                             text: settingsBackend.openaiBaseUrl
                             placeholder: "https://api.openai.com/v1"
                             onEditingFinished: (newText) => { settingsBackend.openaiBaseUrl = newText }
@@ -223,19 +328,19 @@ Item {
                         Rectangle { Layout.fillWidth: true; height: 1; color: t ? t.border1 : "#2e2e3e" }
 
                         // Google Gemini
-                        Text { text: "✨ Google Gemini"; font.pixelSize: t ? t.fontSizeSM : 12; font.bold: true; color: t ? t.accentLight : "#a89bf9" }
+                        Text { text: localeManager.strings.settings.section_gemini; font.pixelSize: t ? t.fontSizeSM : 12; font.bold: true; color: t ? t.accentLight : "#a89bf9" }
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: t ? t.spaceMD : 12
                             InputField {
-                                label: "API Key"
+                                label: localeManager.strings.settings.api_key_label
                                 text: settingsBackend.geminiApiKey
                                 placeholder: "AIzaSy..."
                                 isPassword: true
                                 onEditingFinished: (newText) => { settingsBackend.geminiApiKey = newText }
                             }
                             InputField {
-                                label: "Model Name"
+                                label: localeManager.strings.settings.model_name_label
                                 text: settingsBackend.geminiModel
                                 placeholder: "gemini-2.0-flash"
                                 onEditingFinished: (newText) => { settingsBackend.geminiModel = newText }
@@ -245,18 +350,18 @@ Item {
                         Rectangle { Layout.fillWidth: true; height: 1; color: t ? t.border1 : "#2e2e3e" }
 
                         // Local LLM
-                        Text { text: "🦙 Local LLM (Ollama / LM Studio)"; font.pixelSize: t ? t.fontSizeSM : 12; font.bold: true; color: t ? t.accentLight : "#a89bf9" }
+                        Text { text: localeManager.strings.settings.section_local_llm; font.pixelSize: t ? t.fontSizeSM : 12; font.bold: true; color: t ? t.accentLight : "#a89bf9" }
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: t ? t.spaceMD : 12
                             InputField {
-                                label: "Base URL"
+                                label: localeManager.strings.settings.base_url_label
                                 text: settingsBackend.localLlmUrl
                                 placeholder: "http://localhost:11434/v1"
                                 onEditingFinished: (newText) => { settingsBackend.localLlmUrl = newText }
                             }
                             InputField {
-                                label: "Model Name"
+                                label: localeManager.strings.settings.model_name_label
                                 text: settingsBackend.localLlmModel
                                 placeholder: "llama3"
                                 onEditingFinished: (newText) => { settingsBackend.localLlmModel = newText }
@@ -272,9 +377,9 @@ Item {
                             ColumnLayout {
                                 Layout.fillWidth: true
                                 spacing: t ? t.spaceSM : 8
-                                Text { text: "🎯 DeepL"; font.pixelSize: t ? t.fontSizeSM : 12; font.bold: true; color: t ? t.accentLight : "#a89bf9" }
+                                Text { text: localeManager.strings.settings.section_deepl; font.pixelSize: t ? t.fontSizeSM : 12; font.bold: true; color: t ? t.accentLight : "#a89bf9" }
                                 InputField {
-                                    label: "API Key"
+                                    label: localeManager.strings.settings.api_key_label
                                     text: settingsBackend.deeplApiKey
                                     placeholder: "xxxxxxxx-xxxx-..."
                                     isPassword: true
@@ -284,9 +389,9 @@ Item {
                             ColumnLayout {
                                 Layout.fillWidth: true
                                 spacing: t ? t.spaceSM : 8
-                                Text { text: "🔓 LibreTranslate"; font.pixelSize: t ? t.fontSizeSM : 12; font.bold: true; color: t ? t.accentLight : "#a89bf9" }
+                                Text { text: localeManager.strings.settings.section_libretranslate; font.pixelSize: t ? t.fontSizeSM : 12; font.bold: true; color: t ? t.accentLight : "#a89bf9" }
                                 InputField {
-                                    label: "Server URL"
+                                    label: localeManager.strings.settings.server_url_label
                                     text: settingsBackend.libretranslateUrl
                                     placeholder: "http://localhost:5000"
                                     onEditingFinished: (newText) => { settingsBackend.libretranslateUrl = newText }
@@ -307,29 +412,29 @@ Item {
                         RowLayout {
                             spacing: t ? t.spaceSM : 8
                             Rectangle { width: 4; height: 16; radius: 2; color: t ? t.success : "#4ade80" }
-                            Text { text: "Formatting & Protection"; font.pixelSize: 14; font.bold: true; color: t ? t.textPrimary : "#f0f0ff" }
+                            Text { text: localeManager.strings.settings.card_format_title; font.pixelSize: 14; font.bold: true; color: t ? t.textPrimary : "#f0f0ff" }
                         }
                         Rectangle { Layout.fillWidth: true; height: 1; color: t ? t.border1 : "#2e2e3e" }
                         ToggleRow {
-                            label: "Auto Word-Wrap (<WordWrap>)"
-                            desc: "Inject automatic line breaks in standard dialogue"
+                            label: localeManager.strings.settings.auto_wordwrap_label
+                            desc: localeManager.strings.settings.auto_wordwrap_desc
                             checked: settingsBackend.autoWordwrap
                             onToggled: (val) => { settingsBackend.autoWordwrap = val }
                         }
                         StyledSlider {
-                            label: "Standard Dialogue Limit"; from: 25; to: 80; step: 1
+                            label: localeManager.strings.settings.standard_dialogue_limit_label; from: 25; to: 80; step: 1
                             value: settingsBackend.wordwrapLimitStandard
                             onMoved: (val) => { settingsBackend.wordwrapLimitStandard = Math.round(val) }
                         }
                         ToggleRow {
-                            label: "Translate Editor Notes"
-                            desc: "Include note tags and plugin parameters"
+                            label: localeManager.strings.settings.translate_notes_label
+                            desc: localeManager.strings.settings.translate_notes_desc
                             checked: settingsBackend.translateNotes
                             onToggled: (val) => { settingsBackend.translateNotes = val }
                         }
                         ToggleRow {
-                            label: "Plugin JS UI Labels"
-                            desc: "Extract translatable strings from plugins.js"
+                            label: localeManager.strings.settings.plugin_js_ui_label
+                            desc: localeManager.strings.settings.plugin_js_ui_desc
                             checked: settingsBackend.pluginJsUiExtraction
                             onToggled: (val) => { settingsBackend.pluginJsUiExtraction = val }
                         }
@@ -347,18 +452,18 @@ Item {
                         RowLayout {
                             spacing: t ? t.spaceSM : 8
                             Rectangle { width: 4; height: 16; radius: 2; color: t ? t.warning : "#facc15" }
-                            Text { text: "Safety & Cache"; font.pixelSize: 14; font.bold: true; color: t ? t.textPrimary : "#f0f0ff" }
+                            Text { text: localeManager.strings.settings.card_safety_title; font.pixelSize: 14; font.bold: true; color: t ? t.textPrimary : "#f0f0ff" }
                         }
                         Rectangle { Layout.fillWidth: true; height: 1; color: t ? t.border1 : "#2e2e3e" }
                         ToggleRow {
-                            label: "Backup Game Data"
-                            desc: "Copy original files to _backup/ before translation"
+                            label: localeManager.strings.settings.backup_label
+                            desc: localeManager.strings.settings.backup_desc
                             checked: settingsBackend.backupEnabled
                             onToggled: (val) => { settingsBackend.backupEnabled = val }
                         }
                         ToggleRow {
-                            label: "Persistent Translation Cache"
-                            desc: "Skip re-translating previously translated strings"
+                            label: localeManager.strings.settings.cache_label
+                            desc: localeManager.strings.settings.cache_desc
                             checked: settingsBackend.useCache
                             onToggled: (val) => { settingsBackend.useCache = val }
                         }
@@ -370,7 +475,7 @@ Item {
                                 color: clearMouse.pressed ? Qt.rgba(248, 113, 113, 0.25) : (clearMouse.containsMouse ? Qt.rgba(248, 113, 113, 0.15) : Qt.rgba(248, 113, 113, 0.08))
                                 border.color: Qt.rgba(248, 113, 113, 0.4); border.width: 1
                                 Behavior on color { ColorAnimation { duration: 130 } }
-                                Text { anchors.centerIn: parent; text: "🗑  Clear Cache"; font.pixelSize: t ? t.fontSizeSM : 12; color: t ? t.danger : "#f87171" }
+                                Text { anchors.centerIn: parent; text: localeManager.strings.settings.clear_cache_button; font.pixelSize: t ? t.fontSizeSM : 12; color: t ? t.danger : "#f87171" }
                                 MouseArea {
                                     id: clearMouse; anchors.fill: parent; hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor; onClicked: appBackend.clearCache()

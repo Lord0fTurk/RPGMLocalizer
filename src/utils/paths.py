@@ -21,3 +21,22 @@ def existing_resource_path(*relative_paths: str) -> Optional[str]:
         if os.path.exists(candidate):
             return candidate
     return None
+
+
+def local_path_from_url(raw: str) -> str:
+    """Normalise a dropped/pasted path that may be a ``file://`` URL.
+
+    Uses ``QUrl.toLocalFile`` so both ``file:///D:/game`` (Windows) and
+    ``file:///home/user/game`` (POSIX) resolve to the correct absolute path.
+    Plain filesystem paths are returned stripped of surrounding quotes.
+    """
+    cleaned = (raw or "").strip().strip('"').strip("'")
+    if cleaned.lower().startswith("file:"):
+        try:
+            from PyQt6.QtCore import QUrl
+            local = QUrl(cleaned).toLocalFile()
+            if local:
+                return local
+        except Exception:
+            pass
+    return cleaned

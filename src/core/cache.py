@@ -166,13 +166,26 @@ class TranslationCache:
         key_str = f"{source_lang}:{target_lang}:{text}"
         return hashlib.sha256(key_str.encode("utf-8")).hexdigest()[:32]
 
-    def get(self, text: str, source_lang: str, target_lang: str) -> Optional[str]:
+    def get(
+        self,
+        text: str,
+        source_lang: str = "auto",
+        target_lang: Optional[str] = None,
+    ) -> Optional[str]:
         """
         Get cached translation if available.
+
+        Accepts either:
+            get(text, source_lang, target_lang)
+            get(text, target_lang)  (defaults source_lang="auto")
 
         Returns:
             Cached translation or None if not found
         """
+        if target_lang is None:
+            target_lang = source_lang
+            source_lang = "auto"
+
         text_hash = self._hash_text(text, source_lang, target_lang)
 
         entry = self.cache.get(text_hash)

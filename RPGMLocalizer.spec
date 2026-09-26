@@ -16,13 +16,16 @@ software_opengl_dll = os.path.join(qt_bin_dir, 'opengl32sw.dll')
 version_ns = {}
 with open(os.path.join(project_dir, 'version.py'), 'r', encoding='utf-8') as f:
     exec(f.read(), version_ns)
-app_version = version_ns.get('VERSION', '0.8.0')
+app_version = version_ns.get('VERSION', '1.0.0')
 
 datas = [
     (os.path.join(project_dir, 'LICENSE'), '.'),
     # QML UI files — REQUIRED: without these the frozen exe crashes immediately
     # because QQmlApplicationEngine cannot find Main.qml at startup.
     (os.path.join(project_dir, 'src', 'gui', 'qml'), 'src/gui/qml'),
+    # UI locale JSON files — REQUIRED: LocaleManager loads these via
+    # existing_resource_path("src/gui/i18n/<code>.json") at runtime.
+    (os.path.join(project_dir, 'src', 'gui', 'i18n'), 'src/gui/i18n'),
 ]
 if os.path.exists(icon_png_path):
     datas.append((icon_png_path, '.'))
@@ -46,9 +49,14 @@ a = Analysis(
         'src.backend',
         'src.backend.app_backend',
         'src.backend.settings_backend',
-        'src.backend.game_registry',
-        'src.backend.endpoint_router',
-        'src.backend.llm_repair',
+        'src.backend.locale_manager',
+        'src.backend.editor_backend',
+        'src.core.editor',
+        'src.core.editor.editor_store',
+        'src.core.editor.syntax_checker',
+        'src.core.ai_translator',
+        'src.core.exceptions',
+        'src.core.llm_repair',
         'src.core',
         'src.core.translation_pipeline',
         'src.core.translator',

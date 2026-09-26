@@ -85,7 +85,7 @@ Popup {
                 Layout.fillWidth: true
 
                 Text {
-                    text: root.isSuccess ? "Translation Completed!" : "Operation Failed"
+                    text: root.isSuccess ? localeManager.strings.completion_dialog.success_title : localeManager.strings.completion_dialog.failure_title
                     font.pixelSize: 17
                     font.bold: true
                     color: root.themeObj ? root.themeObj.textPrimary : "#f0f0ff"
@@ -93,8 +93,8 @@ Popup {
 
                 Text {
                     text: root.isSuccess
-                          ? "Game texts have been successfully translated and saved."
-                          : "An issue occurred during the translation process."
+                          ? localeManager.strings.completion_dialog.success_desc
+                          : localeManager.strings.completion_dialog.failure_desc
                     font.pixelSize: 12
                     color: root.themeObj ? root.themeObj.textSecondary : "#9090b8"
                 }
@@ -126,12 +126,20 @@ Popup {
                     }
 
                     Text {
-                        text: root.summaryText || (root.isSuccess ? "Project successfully translated." : "An error occurred.")
+                        text: root.summaryText || (root.isSuccess ? localeManager.strings.completion_dialog.success_summary_fallback : localeManager.strings.completion_dialog.failure_summary_fallback)
                         font.pixelSize: 13
                         font.bold: true
                         color: root.themeObj ? root.themeObj.textPrimary : "#f0f0ff"
                         wrapMode: Text.Wrap
+                        textFormat: Text.RichText
                         Layout.fillWidth: true
+                        onLinkActivated: function(link) {
+                            if (typeof appBackend !== "undefined" && appBackend.openUrl) {
+                                appBackend.openUrl(link)
+                            } else {
+                                Qt.openUrlExternally(link)
+                            }
+                        }
                     }
                 }
 
@@ -181,7 +189,7 @@ Popup {
                     spacing: 6
                     Text { text: "📁"; font.pixelSize: 12 }
                     Text {
-                        text: "Open Folder"
+                        text: localeManager.strings.completion_dialog.open_folder_button
                         color: root.themeObj ? root.themeObj.textPrimary : "#f0f0ff"
                         font.pixelSize: 12
                         font.bold: true
@@ -216,7 +224,7 @@ Popup {
 
                 Text {
                     anchors.centerIn: parent
-                    text: "OK"
+                    text: localeManager.strings.common.ok
                     color: "white"
                     font.pixelSize: 13
                     font.bold: true

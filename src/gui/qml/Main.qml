@@ -95,6 +95,9 @@ ApplicationWindow {
             window.show()
             window.raise()
             window.requestActivate()
+            if (noticePopup.visible) {
+                noticePopup.close()
+            }
             completionDialog.openWith(success, summary, appBackend.projectPath)
         }
         function onInfoNotice(notice_type, title, message) {
@@ -155,7 +158,15 @@ ApplicationWindow {
                 font.pixelSize: 13
                 color: theme.textSecondary
                 wrapMode: Text.Wrap
+                textFormat: Text.RichText
                 Layout.fillWidth: true
+                onLinkActivated: function(link) {
+                    if (typeof appBackend !== "undefined" && appBackend.openUrl) {
+                        appBackend.openUrl(link)
+                    } else {
+                        Qt.openUrlExternally(link)
+                    }
+                }
             }
             Item { height: 4 }
             // OK Button
@@ -168,7 +179,7 @@ ApplicationWindow {
                 Behavior on color { ColorAnimation { duration: theme.animFast } }
                 Text {
                     anchors.centerIn: parent
-                    text: "OK"
+                    text: localeManager.strings.common.ok
                     color: "white"
                     font.pixelSize: 13
                     font.bold: true
@@ -214,52 +225,98 @@ ApplicationWindow {
                 // --- Brand Header ---
                 Rectangle {
                     Layout.fillWidth: true
-                    implicitHeight: 64
+                    implicitHeight: 70
                     color: "transparent"
 
                     RowLayout {
-                        anchors { fill: parent; leftMargin: 20; rightMargin: 16 }
-                        spacing: 10
+                        anchors { fill: parent; leftMargin: 16; rightMargin: 12 }
+                        spacing: 12
 
-                        // Icon circle
-                        Rectangle {
-                            width: 32; height: 32
-                            radius: 8
-                            gradient: Gradient {
-                                orientation: Gradient.Horizontal
-                                GradientStop { position: 0.0; color: theme.accentDark }
-                                GradientStop { position: 1.0; color: theme.accent }
+                        // Brand Icon
+                        Item {
+                            width: 40; height: 40
+                            Layout.alignment: Qt.AlignVCenter
+
+                            // Subtle ambient glow behind the icon
+                            Rectangle {
+                                anchors.centerIn: parent
+                                width: 40; height: 40
+                                radius: 10
+                                color: Qt.rgba(0, 240, 255, 0.08)
+                                border.color: Qt.rgba(0, 240, 255, 0.25)
+                                border.width: 1
                             }
+
                             Image {
                                 anchors.centerIn: parent
-                                width: 22; height: 22
+                                width: 40; height: 40
                                 source: appBackend.appIconUrl
                                 fillMode: Image.PreserveAspectFit
+                                mipmap: true
                                 visible: appBackend.appIconUrl.length > 0
                                 asynchronous: true
-                                sourceSize.width: 44
-                                sourceSize.height: 44
+                                sourceSize.width: 80
+                                sourceSize.height: 80
                             }
+
                             Text {
                                 anchors.centerIn: parent
                                 text: "⚡"
-                                font.pixelSize: 16
+                                font.pixelSize: 20
                                 visible: appBackend.appIconUrl.length === 0
                             }
                         }
 
+                        // Brand Name & Version Tag
                         ColumnLayout {
-                            spacing: 1
-                            Text {
-                                text: "RPGMLocalizer"
-                                font.pixelSize: 14
-                                font.bold: true
-                                color: theme.textPrimary
+                            spacing: 3
+                            Layout.fillWidth: true
+                            Layout.alignment: Qt.AlignVCenter
+
+                            RowLayout {
+                                spacing: 3
+                                Text {
+                                    text: "RPGM"
+                                    font.pixelSize: 15
+                                    font.bold: true
+                                    font.letterSpacing: 0.5
+                                    color: "#ffffff"
+                                }
+                                Text {
+                                    text: "Localizer"
+                                    font.pixelSize: 15
+                                    font.bold: true
+                                    font.letterSpacing: 0.3
+                                    color: theme.accentLight
+                                }
                             }
-                            Text {
-                                text: appBackend.appVersion
-                                font.pixelSize: 10
-                                color: theme.textMuted
+
+                            RowLayout {
+                                spacing: 6
+
+                                Rectangle {
+                                    height: 16
+                                    width: versionText.implicitWidth + 10
+                                    radius: 8
+                                    color: Qt.rgba(124, 108, 248, 0.16)
+                                    border.color: Qt.rgba(124, 108, 248, 0.35)
+                                    border.width: 1
+
+                                    Text {
+                                        id: versionText
+                                        anchors.centerIn: parent
+                                        text: appBackend.appVersion
+                                        font.pixelSize: 9
+                                        font.bold: true
+                                        color: theme.accentLight
+                                    }
+                                }
+
+                                Text {
+                                    text: localeManager.strings.main.engine_tag
+                                    font.pixelSize: 10
+                                    color: theme.textMuted
+                                }
                             }
                         }
                     }
@@ -274,7 +331,7 @@ ApplicationWindow {
 
                 // --- Nav Section label ---
                 Text {
-                    text: "NAVIGATION"
+                    text: localeManager.strings.main.nav_section_label
                     font.pixelSize: 9
                     font.bold: true
                     font.letterSpacing: 1.2
@@ -293,10 +350,11 @@ ApplicationWindow {
 
                     Repeater {
                         model: [
-                            { icon: "⚡", label: "Translate",       idx: 0 },
-                            { icon: "⚙",  label: "Settings",        idx: 1 },
-                            { icon: "📦", label: "Data & Dictionary", idx: 2 },
-                            { icon: "📋", label: "Console",          idx: 3 },
+                            { icon: "⚡", label: localeManager.strings.main.nav_auto_translate, idx: 0 },
+                            { icon: "✏️", label: localeManager.strings.main.nav_editor,          idx: 1 },
+                            { icon: "⚙",  label: localeManager.strings.main.nav_settings,        idx: 2 },
+                            { icon: "📦", label: localeManager.strings.main.nav_data,             idx: 3 },
+                            { icon: "📋", label: localeManager.strings.main.nav_console,          idx: 4 },
                         ]
 
                         delegate: Item {
@@ -366,7 +424,7 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     height: 50
 
-                    property bool isActive: stackLayout.currentIndex === 4
+                    property bool isActive: stackLayout.currentIndex === 5
 
                     Rectangle {
                         anchors.fill: parent
@@ -381,7 +439,7 @@ ApplicationWindow {
                         spacing: 10
                         Text { text: "ℹ️"; font.pixelSize: 14 }
                         Text {
-                            text: "About"
+                            text: localeManager.strings.main.nav_about
                             font.pixelSize: 13
                             color: aboutItem.isActive ? theme.textPrimary : theme.textSecondary
                             Behavior on color { ColorAnimation { duration: theme.animFast } }
@@ -393,7 +451,7 @@ ApplicationWindow {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: stackLayout.currentIndex = 4
+                        onClicked: stackLayout.currentIndex = 5
                     }
                 }
             }
@@ -418,17 +476,25 @@ ApplicationWindow {
                 // Home (default tab) and Console (must keep listening for
                 // log_message signals from app startup, or early log lines
                 // would be silently lost) are kept eager.
+                property bool editorVisited: false
                 property bool settingsVisited: false
                 property bool dataVisited: false
                 property bool aboutVisited: false
 
                 onCurrentIndexChanged: {
-                    if (currentIndex === 1) settingsVisited = true
-                    else if (currentIndex === 2) dataVisited = true
-                    else if (currentIndex === 4) aboutVisited = true
+                    if (currentIndex === 1) editorVisited = true
+                    else if (currentIndex === 2) settingsVisited = true
+                    else if (currentIndex === 3) dataVisited = true
+                    else if (currentIndex === 5) aboutVisited = true
                 }
 
                 HomeTab { themeObj: theme }
+
+                Loader {
+                    active: stackLayout.editorVisited
+                    asynchronous: true
+                    sourceComponent: Component { EditorTab { themeObj: theme } }
+                }
 
                 Loader {
                     active: stackLayout.settingsVisited

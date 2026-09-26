@@ -51,7 +51,7 @@ _TSS_SCRUB_RE = re.compile(
 _PROTECT_PATTERN_STR = (
     r'(\[\[.*?\]\]|'                     # [[escaped]]
     r'\{\{.*?\}\}|'                      # {{escaped}}
-    r'\\(?:[cCiIpPfFwWvVnNoOaAhHxXyY]|fs|fn|oc|ow|hc|ac|px|py|wc|tt|bg)\[(?:[^\[\]]*|\[[^\[\]]*\])*\]|'  # Nested brackets like \C[\V[1]] or \fs[\v[2]]
+    r'\\(?:[cCiIpPfFwWvVnNoOaAhHxXyY]|fs|fn|oc|ow|hc|ac|px|py|wc|tt|bg|cself|sself|self|cdb|udb|sdb|space|sysS|syss|sys|r)\[(?:[^\[\]]*|\[[^\[\]]*\])*\]|'  # Nested brackets like \C[\V[1]], \cself[66], \self[1], \cdb[0:1:0], \sys[10]
     r'\\c\[\d+\]|'                       # \c[n] - color
     r'\\C\[\d+\]|'                       # \C[n] - color (uppercase)
     r'\\i\[\d+\]|'                       # \i[n] - icon

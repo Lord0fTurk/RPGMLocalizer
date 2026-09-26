@@ -223,7 +223,44 @@ class TranslationPipeline(QObject):
         # Collect files
         files = self._collect_files(data_dir)
         if not files:
-            self.finished.emit(False, "No translatable files found")
+            # Check if this project contains packaged/encrypted WOLF archives
+            has_wolf_archive = False
+            try:
+                search_dirs = [project_path]
+                if data_dir and os.path.isdir(data_dir):
+                    search_dirs.append(data_dir)
+                for d in ("data", "Data"):
+                    sub_d = os.path.join(project_path, d)
+                    if os.path.isdir(sub_d) and sub_d not in search_dirs:
+                        search_dirs.append(sub_d)
+
+                for sdir in search_dirs:
+                    if os.path.isdir(sdir):
+                        if any(f.lower().endswith(".wolf") for f in os.listdir(sdir)):
+                            has_wolf_archive = True
+                            break
+            except Exception:
+                pass
+
+            from src.backend.locale_manager import LocaleManager
+            if has_wolf_archive:
+                msg = LocaleManager.get_text(
+                    "status_encrypted_wolf",
+                    default=(
+                        "Bu WOLF RPG oyunu paketli/şifreli (.wolf) arşiv içeriyor. "
+                        "Çeviri yapabilmek için lütfen önce arşivleri 'Data' klasörüne çıkartın.<br><br>"
+                        "👉 <a href=\"https://github.com/Sinflower/UberWolf/releases\" style=\"color: #9d8dfc; text-decoration: underline;\">"
+                        "UberWolf aracını buradan indirin (GitHub)</a>"
+                    ),
+                )
+                self.log_message.emit("warning", msg)
+                self.finished.emit(False, msg)
+            else:
+                msg = LocaleManager.get_text(
+                    "status_no_translatable_files",
+                    default="No translatable files found in the project data directory.",
+                )
+                self.finished.emit(False, msg)
             return
 
         self._emit_custom_surface_summary(files)
@@ -363,6 +400,56 @@ class TranslationPipeline(QObject):
                     self.logger.debug("Skipping non-JSON sidecar: %s", entry.name)
                     continue
                 files.append(entry.path)
+
+        # WOLF RPG Editor support (Data/MapData/**/*.mps, Data/BasicData/CommonEvent.dat, Data/BasicData/*.dat)
+        wolf_map_dir = self._find_child_case_insensitive(data_dir, "MapData", must_be_dir=True)
+        if wolf_map_dir:
+            for root, _, filenames in os.walk(wolf_map_dir):
+                for fn in sorted(filenames):
+                    if fn.lower().endswith(".mps"):
+                        files.append(os.path.join(root, fn))
+
+        wolf_basic_dir = self._find_child_case_insensitive(data_dir, "BasicData", must_be_dir=True)
+        if wolf_basic_dir:
+            for root, _, filenames in os.walk(wolf_basic_dir):
+                for fn in sorted(filenames):
+                    fn_lower = fn.lower()
+                    if fn_lower.endswith(".dat"):
+                        if fn_lower in ("game.dat", "sysdatabasebasic.dat"):
+                            continue
+                        if fn_lower == "commonevent.dat":
+                            files.append(os.path.join(root, fn))
+                        else:
+                            # Database file: only include if companion .project exists
+                            proj_fn = os.path.splitext(fn)[0] + ".project"
+                            if os.path.isfile(os.path.join(root, proj_fn)):
+                                files.append(os.path.join(root, fn))
+
+        # WOLF RPG Editor external scenario texts (Data/Evtext/**/*.txt)
+        wolf_evtext_dir = self._find_child_case_insensitive(data_dir, "Evtext", must_be_dir=True)
+        if wolf_evtext_dir:
+            for root, _, filenames in os.walk(wolf_evtext_dir):
+                for fn in sorted(filenames):
+                    if fn.lower().endswith(".txt"):
+                        files.append(os.path.join(root, fn))
+
+        # Check for direct .mps or .dat files in data_dir (e.g. flat directory layouts)
+        with os.scandir(data_dir) as entries:
+            for entry in entries:
+                if not entry.is_file():
+                    continue
+                name_lower = entry.name.lower()
+                if name_lower.endswith(".mps"):
+                    if entry.path not in files:
+                        files.append(entry.path)
+                elif name_lower.endswith(".dat") and name_lower not in ("game.dat", "sysdatabasebasic.dat"):
+                    if name_lower == "commonevent.dat":
+                        if entry.path not in files:
+                            files.append(entry.path)
+                    else:
+                        proj_file = os.path.splitext(entry.path)[0] + ".project"
+                        if os.path.isfile(proj_file) and entry.path not in files:
+                            files.append(entry.path)
         
         # MV Plugin configuration (js/plugins.js)
         # Search relative to data_dir (e.g. data is www/data, so js is ../js)
@@ -373,7 +460,7 @@ class TranslationPipeline(QObject):
             plugin_js = self._find_file_in_subdir_case_insensitive(os.path.dirname(project_root), "js", "plugins.js")
 
         if plugin_js and os.path.exists(plugin_js):
-            if self.settings.get("translate_plugins_js", True):
+            if self.settings.get("translate_plugins_js", False):
                 files.append(plugin_js)
             else:
                 self.log_message.emit("info", "Skipping js/plugins.js translation (disabled in settings)")
@@ -956,13 +1043,17 @@ class TranslationPipeline(QObject):
         """Return a stable project-relative path for reports."""
         return os.path.relpath(file_path, project_path).replace("\\", "/")
 
-    def _extract_all_text(self, files: List[str]) -> Tuple[List[Tuple], Dict, List[Tuple]]:
+    def _extract_all_text(
+        self,
+        files: List[str],
+        progress_callback: Optional[Any] = None,
+    ) -> Tuple[List[Tuple], Dict, List[Tuple]]:
         """Extract text from all files using parallel processing."""
         all_entries = []  # (file, path_key, text)
         all_listed = []  # (file, path_key, text) — uncertain, exported but not auto-translated
         parsed_files = {}  # file -> (parser, entries)
         
-        from concurrent.futures import ThreadPoolExecutor, wait as _cf_wait, ALL_COMPLETED
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         import threading
         
         lock = threading.Lock()
@@ -1011,36 +1102,32 @@ class TranslationPipeline(QObject):
 
         self.log_message.emit("info", f"Starting parallel extraction with {max_workers} workers...")
 
-        # Use submit()+wait(timeout)+shutdown(wait=False) instead of executor.map() +
-        # context-manager to avoid hanging forever if any worker thread gets stuck
-        # (e.g. a corrupt Marshal file or a very large plugin JSON).
         _EXTRACT_PER_FILE_SEC = 30
         _EXTRACT_TOTAL_SEC = min(_EXTRACT_PER_FILE_SEC * max(len(files), 1), 300)
 
         _extract_executor = ThreadPoolExecutor(max_workers=max_workers)
+        results = []
+        completed_count = 0
+        total_files = len(files)
+
         try:
             _extract_futures = {_extract_executor.submit(process_file, fp): fp for fp in files}
-            _done, _not_done = _cf_wait(_extract_futures, timeout=_EXTRACT_TOTAL_SEC,
-                                        return_when=ALL_COMPLETED)
-            if _not_done:
-                _hung = [os.path.basename(_extract_futures[f]) for f in _not_done]
-                self.logger.error(
-                    f"Extraction timeout ({_EXTRACT_TOTAL_SEC}s): {len(_not_done)} file(s) stuck "
-                    f"— {_hung[:10]}"
-                )
-                self.log_message.emit(
-                    "warning",
-                    f"{len(_not_done)} file(s) timed out during extraction and were skipped."
-                )
-            results = []
-            for _future in _done:
+            for fut in as_completed(_extract_futures, timeout=_EXTRACT_TOTAL_SEC):
+                completed_count += 1
+                fp = _extract_futures[fut]
+                if progress_callback:
+                    try:
+                        progress_callback(completed_count, total_files, f"Ayrıştırılıyor: {os.path.basename(fp)} ({completed_count}/{total_files})")
+                    except Exception:
+                        pass
                 try:
-                    results.append(_future.result())
+                    results.append(fut.result())
                 except Exception as _e:
-                    self.logger.error(f"Extraction future error: {_e}")
+                    self.logger.error(f"Extraction future error on {fp}: {_e}")
                     results.append(None)
-            for _ in _not_done:
-                results.append(None)
+        except TimeoutError:
+            self.logger.error(f"Extraction total timeout ({_EXTRACT_TOTAL_SEC}s)")
+            self.log_message.emit("warning", f"Extraction timed out after {_EXTRACT_TOTAL_SEC}s.")
         finally:
             _extract_executor.shutdown(wait=False, cancel_futures=True)
 
@@ -1516,6 +1603,11 @@ class TranslationPipeline(QObject):
                         else:
                             import rubymarshal.writer
                             rubymarshal.writer.write(f, new_data)
+                    elif file_ext in ('.mps', '.dat'):
+                        if isinstance(new_data, (bytes, bytearray)):
+                            f.write(new_data)
+                        else:
+                            return None, f"Expected binary payload for {basename}", time.time() - file_start
                     else:
                         return None, f"Unsupported extension: {file_ext}", time.time() - file_start
 
@@ -1589,6 +1681,21 @@ class TranslationPipeline(QObject):
                 manifest_dir = os.path.dirname(manifest_path)
                 self.log_message.emit("info", f"Backups created for {backup_count} files in: {manifest_dir}")
                 self.log_message.emit("info", f"Session backup manifest created: {os.path.basename(manifest_path)}")
+
+        # Isolate conflicting .wolf archives if WOLF RPG files were updated
+        try:
+            from src.core.parsers.wolf_isolation import isolate_conflicting_wolf_archives
+            project_path = self.settings.get("project_path") or (os.path.dirname(self._project_profile.project_path) if self._project_profile else None)
+            if project_path:
+                isolated = isolate_conflicting_wolf_archives(project_path)
+                if isolated:
+                    self.log_message.emit(
+                        "info",
+                        f"WOLF RPG motorunun çevrilmiş dosyaları okuyabilmesi için {len(isolated)} arşiv "
+                        f"otomatik olarak 'Data/_wolf_original/' klasörüne yedeklendi: {', '.join(isolated)}"
+                    )
+        except Exception as iso_err:
+            self.logger.warning("Failed to isolate WOLF archives: %s", iso_err)
 
 
     def _ensure_hendrix_target_language(self, updated_files: Any) -> None:

@@ -58,3 +58,12 @@ test_res_utf8.txt
 # Unrelated binaries
 kilo.exe
 opencode.exe
+
+# Database & Cache files
+*.db
+*.sqlite
+*.sqlite3
+
+# Agent workspace directories
+.agents/
+.omo/

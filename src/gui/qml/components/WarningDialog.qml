@@ -5,10 +5,10 @@ import QtQuick.Layouts 1.15
 Popup {
     id: root
     property var themeObj: null
-    property string title: "Warning"
+    property string title: localeManager.strings.warning_dialog.title_default
     property string message: ""
-    property string confirmText: "Confirm"
-    property string cancelText: "Cancel"
+    property string confirmText: localeManager.strings.common.confirm
+    property string cancelText: localeManager.strings.common.cancel
 
     signal confirmed()
     signal cancelled()

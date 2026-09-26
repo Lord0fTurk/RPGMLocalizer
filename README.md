@@ -6,9 +6,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Lord0fTurk/RPGMLocalizer/releases"><img src="https://img.shields.io/badge/Release-v0.8.0-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/Lord0fTurk/RPGMLocalizer/releases"><img src="https://img.shields.io/badge/Release-v1.0.0-blue.svg?style=flat-square" alt="Version"></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/Python-3.12%2B-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python 3.12+"></a>
-  <a href="#-supported-rpg-maker-engines"><img src="https://img.shields.io/badge/Engines-XP%20%7C%20VX%20%7C%20VXA%20%7C%20MV%20%7C%20MZ-orange.svg?style=flat-square" alt="Supported Engines"></a>
+  <a href="#-supported-engines"><img src="https://img.shields.io/badge/Engines-XP%20%7C%20VX%20%7C%20VXA%20%7C%20MV%20%7C%20MZ%20%7C%20WOLF-orange.svg?style=flat-square" alt="Supported Engines"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL%20v3-green.svg?style=flat-square" alt="License"></a>
   <a href="https://www.patreon.com/cw/LordOfTurk"><img src="https://img.shields.io/badge/Support-Patreon-FF424D.svg?style=flat-square&logo=patreon" alt="Patreon"></a>
 </p>
@@ -48,6 +48,7 @@ You don't need any programming knowledge to translate your favorite games:
 
 | Feature | Description |
 | :--- | :--- |
+| ✍️ **In-App Translation Editor** | Built-in Master-Detail editor with sub-millisecond SQLite FTS5 search across 100,000+ lines, real-time escape code validation, dialogue context viewer, and code-safe batch replace. |
 | 🛡️ **SyntaxGuard™ Protection** | Segment-based protection separates all control codes (`\C[n]`, `\V[n]`, note tags, icons) before sending text to translators. Zero chance of engine code corruption. |
 | 🎭 **Theatrical Scene Mode** | Groups consecutive dialogue lines into dramatic scenes with speaker attribution (`[0] Harold: ...`). AI translators understand context, banter, and tone instead of translating isolated sentences. |
 | 🤖 **Multi-Engine AI Suite** | Native support for **OpenAI** (GPT-4o), **DeepSeek**, **Google Gemini**, and **100% Free Offline Local LLMs** (via Ollama or LM Studio). |
@@ -60,12 +61,13 @@ You don't need any programming knowledge to translate your favorite games:
 
 ---
 
-## 🕹️ Supported RPG Maker Engines
-
-RPGMLocalizer seamlessly auto-detects and supports the entire RPG Maker lineage:
+## 🕹️ Supported Engines
+ 
+RPGMLocalizer seamlessly auto-detects and supports the entire RPG Maker lineage and WOLF RPG Editor:
 
 | Engine | Data Format | What Gets Localized | Status |
 | :--- | :--- | :--- | :---: |
+| **WOLF RPG Editor (ウディタ)** | Binary (`.mps`, `CommonEvent.dat`, `*.project` + `*.dat`) | Maps, Events, Choices, Common Events, Database records, LZ4 compressed payloads | ✅ Full Support |
 | **RPG Maker MZ** | JSON (`.json`) & JavaScript (`plugins.js`) | Dialogue, Choices, System terms, Database (Skills, Items, Enemies), Plugins, VisuStella WordWrap | ✅ Full Support |
 | **RPG Maker MV** | JSON (`.json`) & JavaScript (`plugins.js`) | Dialogue, Choices, System terms, Database, Common Events, Plugin parameters | ✅ Full Support |
 | **RPG Maker VX Ace** | Ruby Marshal (`.rvdata2`) | Dialogue, System terms, Descriptions, RGSS3 Scripts, Choices | ✅ Full Support |
@@ -73,7 +75,7 @@ RPGMLocalizer seamlessly auto-detects and supports the entire RPG Maker lineage:
 | **RPG Maker XP** | Ruby Marshal (`.rxdata`) | Classic 2004 titles: Maps, Events, Scripts, Database | ✅ Full Support |
 
 > [!NOTE]
-> **Encrypted Games**: If a game is packaged with encrypted archives (e.g. `.rgss3a`, `.pck`, or encrypted MV/MZ assets), the data files must be unpacked/decrypted before localization.
+> **Encrypted Games**: If a game is packaged with encrypted archives (e.g. `.wolf` archives, `.rgss3a`, `.pck`, or encrypted MV/MZ assets), the data files must be unpacked/decrypted before localization (e.g., using **UberWolf** or **WolfDec** for WOLF games).
 
 ---
 

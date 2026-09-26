@@ -16,10 +16,13 @@ Item {
     visible: opacity > 0.0
 
     function show(typeStr, titleStr, messageStr) {
+        var isDuplicate = (opacity > 0.1 && title === (titleStr || "") && message === (messageStr || ""))
         noticeType = typeStr || "info"
         title = titleStr || ""
         message = messageStr || ""
-        showAnim.restart()
+        if (!isDuplicate) {
+            showAnim.restart()
+        }
         autoHideTimer.restart()
     }
 
@@ -97,7 +100,15 @@ Item {
                 font.pixelSize: 12
                 color: root.themeObj ? root.themeObj.textSecondary : "#9090b8"
                 wrapMode: Text.WordWrap
+                textFormat: Text.RichText
                 Layout.fillWidth: true
+                onLinkActivated: function(link) {
+                    if (typeof appBackend !== "undefined" && appBackend.openUrl) {
+                        appBackend.openUrl(link)
+                    } else {
+                        Qt.openUrlExternally(link)
+                    }
+                }
             }
         }
     }

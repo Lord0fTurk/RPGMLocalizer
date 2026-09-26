@@ -2,6 +2,160 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0] - 2026-09-23
+
+### Added
+- **Multi-Engine Expansion: WOLF RPG Editor (ウディタ) Support**:
+  - **Low-Level Binary Parser & Serializer (`wolf_binary.py`)**: Full roundtrip binary extraction and serialization for Map files (`Data/MapData/**/*.mps`), Common Events (`Data/BasicData/CommonEvent.dat`), and Database tables (`Data/BasicData/*.project` + `*.dat`).
+  - **LZ4 Block Decompression & Compression**: Integrated `lz4>=4.0.0` supporting modern WOLF RPG Editor (v2.2+, v3.5-v3.7+) block-compressed map and database payloads.
+  - **Dynamic Character Encoding, CP932 Path Preservation & Transliteration**: Automatically identifies CP932 (Shift-JIS) vs. UTF-8 via the header's magic byte (`0x00` vs `0x55`). For legacy WOLF 2.x games (where runtime `Game.exe` requires ANSI file paths), guards Japanese resource paths (`Picture/タイトル画像.png`, audio, movies) in native CP932 and applies smart transliteration (`normalize_for_cp932`) for non-CP932 characters (e.g. Turkish `ğ->g, ş->s, ı->i`, German `ß->ss`, typographic quotes/dashes) to prevent mojibake file-read errors. For modern WOLF 3.50+ games, seamlessly supports full UTF-8 container upgrades.
+  - **Engine Profiler & Recursive Collector**: Added `RpgMakerEngine.WOLF_RPG` engine detection (100% confidence) and automated recursive discovery of `.mps` maps and companion `.dat` database files.
+  - **Database Record Name Extraction & Category Mapping**: Extracted player-facing record names (`DataRecord.name`) across custom and system databases (`DataBase.dat`, `CDataBase.dat`, `SysDatabase.dat` Type 0), enabling full localization for skill names, equipment/item names, battle commands, map/dungeon display titles, and stat upgrade labels while safely filtering internal flags, variables, and audio/graphics registers.
+  - **WOLF RPG Escape Code Protection & Punctuation Guard**: Extended regex patterns in `text_segmenter.py` and `syntax_guard_rpgm.py` to recognize `\cself[...]`, `\self[...]`, `\sself[...]`, `\cdb[...]`, `\udb[...]`, `\sdb[...]`, and `\space[...]` as atomic CODE segments, preventing translation engine corruption and bracket distortion. Also guarded `AutoTranslateWorker` against sending strings with no alphanumeric text (such as control code colons `\cself[66]：`) to translation APIs.
+  - **Pre-Write Shadow Deserialization (`Validator.validate_wolf_roundtrip`)**: Implemented deep byte validation for `.mps` and `.dat` files prior to disk write, verifying header magics, LZ4 block integrity, and struct completeness in memory.
+  - **Isolated Atomic Saves**: Eliminated uncontrolled companion `CommonEvent.dat` side-effect disk mutations when saving database `.dat` files; all modifications are now strictly scoped and backed up.
+  - **CID 122 State-Flag & Identifier Shield**: Protected game logic by filtering programmatic state identifiers (`FLAG_CLEAR`, `STAGE_01`, `EV_START`), boolean strings (`true/false`, `on/off`), and script phase tokens from CID 122 translation extraction, avoiding event softlocks.
+  - **Missing `.project` Diagnostic Logging**: Added explicit diagnostic warning logs when standalone `.dat` files lack their companion `.project` schema, clarifying why database entries are skipped.
+  - **Encrypted Archive Guidance & Profiler Recognition**: Added diagnostic detection for `.wolf` archives in `EngineProfiler`, automatically identifying packaged games as `WOLF_RPG` with archive guidance toast notifications rather than falling back to `UNKNOWN`.
+  - **Automated `.wolf` Archive Conflict Isolation (`wolf_isolation.py`)**: Automatically detects when `.wolf` archives remain in `Data/` alongside loose extracted files. Because WOLF RPG engine `Game.exe` unconditionally prioritizes `.wolf` archives over loose files, automatically moves conflicting archives into `Data/_wolf_original/` upon save/pipeline finish so modified translations load seamlessly in-game, with lossless rollback support.
+  - **WOLF RPG External Scenario Text Parser (`WolfEvtextParser`)**: Full recursive parsing and translation for scenario script files (`Data/Evtext/**/*.txt`), shielding control directives (`/`, `//`, `@`, `<`, `<<`) while extracting narrative dialogues and speaker labels with CP932 transliteration and UTF-8 support.
+  - **Clickable Archive Guidance Across 8 Locales**: Added clickable HTML link to `Sinflower/UberWolf` releases across modal dialogs (`CompletionDialog`, `NoticePopup`) and toast notifications with deep-merged i18n support.
+- **Integrated RPG Maker & WOLF RPG Translation & Dialogue Editor**:
+  - **Modern Fluent Master-Detail UI (`EditorTab.qml`)**:
+    - Embedded dedicated Editor navigation tab into QML sidebar with smooth page transitions and lazy loading.
+    - Added dedicated **Active Game Project Bar** with direct game folder picker (`📁 Oyun Seç...`), live status badge, and full drag-and-drop support (`DropArea`).
+    - Informative diagnostic empty states for unselected projects, non-RPG Maker directories, and empty filter queries.
+    - Master list view powered by `EditorTableModel` (`QAbstractTableModel`) with virtualized pagination (100 items/page).
+    - Detail pane with side-by-side original vs. translated comparison, line counter, character count, and real-time status badges.
+  - **High-Performance SQLite FTS5 Search Engine (`editor_store.py`)**:
+    - Instant sub-millisecond full-text search across 100,000+ strings with prefix and multi-term query matching.
+    - Turkish character normalization (`İ` -> `i`, `I` -> `ı`) in search queries and tokenizers.
+    - Persistent SQLite project cache (`editor_cache.db`) with file mtime validation for instant subsequent game loads.
+    - Concurrency protection with `threading.RLock()` across all database reads and writes.
+  - **Two-Tier Category & File Filtering**:
+    - Quick category chips: `Tümü`, `Diyalog`, `Seçenek`, `Sistem`, `Eklenti`, `Hata/Uyarı`.
+    - File-level filter dropdown dynamically populated with entry counts per data file.
+    - Translation status filtering (`Tümü`, `Çevrilmiş`, `Çevrilmemiş`, `Değiştirildi`).
+  - **Dialogue Context Preview & Navigation**:
+    - Previous and next dialogue line inspection for RPG Maker event sequences (`401` message continuation).
+    - One-click jump navigation between consecutive dialogue lines for contextual proofreading.
+  - **Syntax Checking & Escape Code Protection**:
+    - Interactive escape code chips (`\C[n]`, `\V[n]`, `\N[n]`, plugin tags): clicking an original code chip immediately inserts it into the editor at cursor position.
+    - Real-time syntax validation warning against missing, corrupted, or unclosed escape codes.
+    - RPG Maker 4-line dialogue overflow warning preventing text clipping in standard message windows.
+  - **Live Scanning Visualizer & Progress Stream**:
+    - Added rotating spinner icon (`🔄`), pulsing state badge, dynamic marching dots, and expandable project header card during scans.
+    - Integrated real-time file-by-file progress streaming (`scanProgressText`, `scanProgressCurrent`) powered by `as_completed` in `_extract_all_text()`, displaying the active parsing file and percentage in a sleek animated bar.
+  - **Code-Safe Batch Find & Replace (`BatchReplaceDialog.qml`)**:
+    - Scoped search and replace (current file or entire project).
+    - Powered by `text_segmenter.py` ensuring escape codes and tags within matched lines are completely shielded from accidental string substitution.
+  - **Auto-Translate Configuration Dialog & High-Throughput Engine (`AutoTranslateDialog.qml`, `AutoTranslateWorker`)**:
+    - **Scope-Based Partial Translation**: Added dynamic Translation Scope selector allowing users to translate the entire project, only the active data file (e.g. `Map001.json`), a specific category (e.g. `Dialogues`), or active search filter results with live untranslated count badges.
+    - **High-Throughput `TextMerger` Acceleration**: Integrated `TextMerger` into `AutoTranslateWorker`, batching 100 entries into dense structural blocks (`|||RPGMSEP_M|||`) for up to 5× faster throughput across Google Web and Gemini engines.
+    - **Keyset Pagination (`last_id`)**: Replaced offset pagination with indexed keyset iteration, preventing line skipping and eliminate database deep-offset stalls.
+    - Triggered before launching mass auto-translation in the Editor tab, allowing users to inspect and customize parameters interactively.
+    - Full language pairing selectors: Source Language (`auto`, `ja`, `en`, `ko`, `zh-CN`, `ru`...) and Target Language (`tr`, `en`, `de`, `fr`, `es`...).
+    - Real-time engine switcher with contextual parameter panels:
+      - **Google Web**: Unrestricted mode note; requires no API key.
+      - **Google Gemini**: API key field (password-masked), model selector (`gemini-2.5-flash`, `gemini-2.0-flash`), and Harm Category safety filter selector (`BLOCK_NONE` recommended for unrestricted RPG Maker games, `BLOCK_ONLY_HIGH`, `STANDARD`).
+      - **DeepL / OpenAI / DeepSeek**: Dedicated API credential and model input fields.
+    - Synchronizes chosen parameters with `SettingsBackend` upon confirmation so user preferences are saved and remembered.
+  - **Google Gemini Translation Engine Overhaul (Ported from RenLocalizer)**:
+    - **Harm Category Safety Filter Mapping**: Fully wired `gemini_safety_settings` (defaulting to `BLOCK_NONE`) across all 5 standard HarmCategories (`HARM_CATEGORY_HARASSMENT`, `HARM_CATEGORY_HATE_SPEECH`, `HARM_CATEGORY_SEXUALLY_EXPLICIT`, `HARM_CATEGORY_DANGEROUS_CONTENT`, `HARM_CATEGORY_CIVIC_INTEGRITY`) in `ai_translator.py`. Prevents Google's default `BLOCK_MEDIUM_AND_ABOVE` filter from rejecting mature/NSFW RPG Maker dialogue.
+    - **Zero Thinking Budget (`thinking_budget=0`)**: Integrated `types.ThinkingConfig(thinking_budget=0)` for Gemini 2.5/3.x series models (`gemini-2.5-flash`, `gemini-3.1-flash-lite`). Eliminates runaway reasoning tokens and stalls, accelerating translation speed up to 10×.
+    - **Token-Efficient XML Batching**: Replaced sequential calls with structured XML packaging (`<translations><item id="...">...`), reducing API calls by up to 15×, preventing free-tier RPM rate-limiting, and adding jittered exponential backoff.
+    - **BaseTranslator Fallback Delegation**: Added `set_fallback_translator` to `BaseTranslator` and wired `GoogleTranslator` as active failover whenever Gemini encounters unrecoverable rate limits or quota exhaustion.
+  - **Transactional Surgical Saving**:
+    - Saves only modified entries directly into RPG Maker data files (`.json`, `.rxdata`, `.rvdata`, `.rvdata2`).
+    - Automatic pre-write backup generation with `BackupManager`.
+    - Real-time synchronization with `TranslationCache` so manual edits immediately train and persist into the project's translation memory.
+- **Multi-Language Application UI (i18n)**:
+  - **`LocaleManager` Backend (`src/backend/locale_manager.py`)**: New `QObject` bridge exposing a reactive `strings` property (`notify=languageChanged`) backed by JSON locale files under `src/gui/i18n/`. QML bindings read through `localeManager.strings.<screen>.<key>`, so every label across the app updates instantly on language switch with no restart required — including labels nested inside `readonly property var` arrays (engine lists, language pickers).
+  - **8 Supported Interface Languages**: English, Türkçe, Deutsch, Français, Español, Português (Brasil), Русский, and فارسی (Persian) — selectable from a new **Interface Language** card at the top of the Settings tab, persisted via `SettingsBackend.uiLanguage` in `config.json`.
+  - **Structural Fallback Guarantee**: Every non-English locale is deep-merged onto the full English baseline at load time, so a partially translated locale file can never render a blank or `undefined` label — missing keys silently fall back to English.
+  - **Full Interface Coverage**: Converted all 12 QML screens/dialogs (`Main`, `HomeTab`, `SettingsTab`, `EditorTab`, `AboutTab`, `ConsoleTab`, `DataTab`, `AutoTranslateDialog`, `BatchReplaceDialog`, `CompletionDialog`, `WarningDialog`) — 170+ previously hardcoded strings (a mix of English and Turkish literals depending on the screen) — plus the Editor's category filter chips and the file-scope dropdown, which are sourced from the Python backend (`editor_store.py`'s `CATEGORY_LABELS`) and are now mapped through the same locale system for display.
+  - **`I18n.js` Formatting Helper (`src/gui/qml/js/I18n.js`)**: Lightweight `{placeholder}` interpolation for dynamic strings (progress counters, pagination labels, scan status) without breaking binding reactivity.
+  - **PyInstaller Packaging**: `src/gui/i18n/` bundled as a new `datas` entry in `RPGMLocalizer.spec` so frozen builds resolve locale files via `existing_resource_path()`.
+  - **Automatic OS System Language Detection (`detect_system_language`)**: Detects operating system UI locale on first launch via `QLocale.system()`. Automatically maps Turkish and Turkic family languages (`az`, `uz`, `kk`, `ky`, `tk`, `ug`, `tt`, `ba`, `cv`, `gag`) to Türkçe (`tr`), European locales (`de`, `fr`, `es`, `pt-BR`) and Cyrillic/Persian families (`ru`, `fa`) to their respective supported locales, while falling back cleanly to English (`en`). User selection in Settings remains persistently saved in `config.json`.
+  - Note: German, French, Spanish, Portuguese (BR), Russian, and Persian translations (plus the English/Turkish cross-translation of previously single-language screens) were machine-translated during development; community review is welcomed before treating non-EN/TR locales as fully polished. Persian renders left-to-right per-label via Qt's automatic bidi text shaping — full RTL layout mirroring (sidebar/button order) was intentionally scoped out.
+
+### Fixed & Hardened
+- **SyntaxGuard Stage 4.5 Positional Recovery & Critical Code Prefix Refinement**:
+  - Refined `_CRITICAL_CODE_PREFIXES` in `syntax_guard_rpgm.py` to differentiate between true engine-breaking script/logic variables (`\V[n]`, `\N[n]`, `\cself[n]`, `\cdb[...]`, `if(...)`, `eval(...)`) and harmless cosmetic styling tags (`\c[n]`, `\C[n]`, `\f[n]`, `\fs[n]`, `\i[n]`, `\space[n]`, `\r[n]`).
+  - Added `_stage45_positional_recovery` (Stage 4.5) to both unicode bracket and XML restoration pipelines (`restore_rpgm_syntax`, `restore_rpgm_syntax_xml`). When translation APIs (Google Web, Lingva, LLM) drop or mangle placeholder tokens for boundary codes (such as leading speaker tags `\cself[1]:` or surrounding color tags `\c[2]...\c[0]`) or cosmetic tags, the engine automatically re-injects them into the translated text at their original relative word boundaries.
+  - Completely eliminates premature `SyntaxGuard Corruption Fallback` triggering that previously discarded completed translations and reverted lines back to original Japanese/source text over lost color or font codes.
+- **WOLF RPG Database Companion Schema Staging in Editor Backup Extraction**:
+  - In `_extract_entries_from_backup`, staged companion `.project` schema files alongside `.dat` database files in temporary backup extraction directories (`rpgm_editor_bak_*`).
+  - Completely resolves false-positive diagnostic warning `WOLF database file '...DataBase.dat' skipped: Companion schema '...DataBase.project' not found` during project scanning and original-text resolution.
+- **WOLF RPG CID 250 Runtime Data-Name Validation & Engine Crash Neutralization**:
+  - Neutralized bit 17 (`0x20000`) on `CID_DB_ACCESS` (250) commands across common events and maps whenever direct numerical record indices exist (`0 <= args[1] < 1_000_000`).
+  - Completely resolves fatal runtime crash `[DB operation] the data name does not exist in typeXX` caused by WOLF RPG engine string comparisons against translated Japanese record names.
+  - Proactively neutralizes companion `CommonEvent.dat` upon database saves in `WolfParser.apply_translation`.
+- **WOLF RPG Modded & Mixed Encoding Resilience**:
+  - Enhanced `ByteReader.read_string` with automatic alternative-encoding fallback (CP932 ↔ UTF-8) and graceful `errors="ignore"` recovery against stray lead bytes, incomplete multibyte sequences, and modded string artifacts.
+- **Editor Pre-Release Audit Fixes**:
+  - **Backups no longer written into the game folder**: the editor's scan and save paths passed the project path as the backup *directory*, dropping `Map001_<timestamp>.json` and `manifest_<timestamp>.json` next to (or inside) `data/`, where the next scan picked them up as game files. Both paths now use the same `.rpgm_backup/` convention as the pipeline.
+  - **Vanilla-vs-translation resolution now works**: `ScanWorker` called non-existent parser APIs (`load_file`, `extract_text(original_data=)`), so after a pipeline run the editor showed translated text as the "original" and counted everything as untranslated. Backups are now staged under their original filename and re-extracted, restoring the intended original/translated split.
+  - **Search with capital `I` / Turkish `İ ı`**: FTS5 queries were pre-folded with Turkish rules (`I → ı`) while the index folds `I → i`, so queries such as `Island`, `ISLAND` or `SAVAŞÇI` returned nothing. Each token is now matched as an OR of both variants.
+  - **Merged-block mismatch retry in `AutoTranslateWorker`**: when the engine drops a `|||RPGMSEP_M|||` separator, the block is retried line-by-line (same policy as the pipeline) instead of writing the whole blob into the first entry. Code-only entries are no longer flagged as modified.
+  - **Unsaved edits survive forced rescans**: `EditorStore.load_entries()` carries `is_modified` rows over to the rebuilt table, so a pipeline run no longer silently discards editor work.
+  - **Pre-write validation on editor save**: JSON structural roundtrip, tree-sitter JS syntax and Ruby Marshal roundtrip checks (previously pipeline-only) now guard editor saves; failures restore from backup. `.sl` scenario files can be saved from the editor. Cache entries are keyed with the configured `source_lang` to match scan-time lookups.
+  - **Save button flushes the open detail edit** so text typed but not yet applied with Ctrl+Enter is included.
+  - **Gemini `thinking_budget=0` is gated by model**: only Gemini ≥ 2.5 Flash / Flash-Lite variants receive a `ThinkingConfig`; `gemini-2.0-flash` and `-pro` models previously rejected every request (400) and silently fell back to Google Web.
+  - **Locale parity**: added the six `auto_translate.scope_*` keys to de/es/fa/fr/pt-BR/ru; list-row category badges now use localized labels.
+  - **`file://` drop URLs** are resolved via `QUrl.toLocalFile()` (POSIX roots were previously truncated to relative paths).
+  - **Test isolation**: an autouse fixture redirects `SettingsStore` to a temp file — `tests/test_gemini_engine.py` had been overwriting the developer's real `config.json` (engine, source language, Gemini key).
+  - Removed stale PyInstaller hidden imports and added the editor / AI translator modules.
+- **`TranslationCache.get()` Argument Resilience & Defensive Loading**:
+  - Enhanced `TranslationCache.get()` to flexibly accept both `(text, source_lang, target_lang)` and `(text, target_lang)` (defaulting `source_lang="auto"`), resolving `missing 1 required positional argument` errors during editor database population.
+  - Wrapped cache lookups in defensive exception blocks in `load_entries()` so individual cache read errors never interrupt the scan process.
+- **Disabled `plugins.js` Translation by Default**:
+  - Defaulted `translate_plugins_js` (`translatePluginsJs`) to `False` across backend, settings store, and pipeline.
+  - Eliminates engine crashes, save stalls, and syntax corruption caused by translating complex plugin parameters.
+  - Clarified UI descriptions in `HomeTab.qml` and `SettingsTab.qml` to differentiate between main `plugins.js` translation and safe plugin script UI extraction.
+- **Dynamic QML Application Version Binding**:
+  - Dynamically bound UI title bar and about interface to `AppBackend.appVersion` sourcing directly from `version.py`.
+- **Thread-Safe Automatic Pre-Write Backups & Session Manifest**:
+  - Enforced automatic file backup before atomic write operations with thread-safe `threading.Lock` synchronization.
+  - Automatically generates SHA-256 session backup manifests (`manifest_<timestamp>.json`) for transactional verification.
+- **Granular Cache Resolution & Atomic Storage**:
+  - Pre-resolves cached lines individually before text merging (`|||RPGMSEP_M|||`), dispatching only untranslated constituents to translation APIs.
+  - Stores translated constituent entries back into project cache and guarantees atomic disk writes via `safe_write`.
+- **Quote-Preserving JS Source Injection & Pre-Write AST Syntax Validation**:
+  - Preserves exact original quotation styles (single vs. double quotes) when applying translations to JavaScript plugin sources.
+  - Added pre-write `tree-sitter` AST JavaScript syntax validation preventing corrupt JS files from being saved.
+- **GUI Language Selection & Project Path Persistence**:
+  - Fixed ComboBox `onActivated` index mapping in `SettingsTab.qml` ensuring target and source languages persist reliably.
+  - Persists last opened `projectPath` into `config.json` across app launches.
+
+### Documentation
+- Redesigned and modernized `README.md` with dynamic badges, comprehensive v0.8.x feature overviews, and user-friendly quickstart guides.
+
+### Changed
+- **Fluent Desktop UI & Ergonomics Modernization (Home, Settings, Data, Console, About)**:
+  - **Dynamic Engine Profiling & Telemetry Badges (`AppBackend`)**: Wired reactive `detectedEngine` and `detectedEngineCode` properties powered by `EngineProfiler`. Project cards and primary headers dynamically badge detected engines (`WOLF RPG Editor`, `RPG Maker MZ/MV`, etc.) with quick actions (`📁 Open Folder`, `📋 Copy Path`, `✕ Clear`).
+  - **Ergonomic Desktop Form & Slider Sizing (`SettingsTab.qml`)**: Neutralized the full-width slider anti-pattern by bounding sliders to an ergonomic 260px track with numeric value badges and unit indicators. Streamlined interface language selection into a balanced horizontal card eliminating dead space.
+  - **Balanced Language Pairing & Interactive Swap (`HomeTab.qml`)**: Restructured engine and language selection into a proportional grid with an interactive `⇄ Swap Languages` button. Refined `plugins.js` toggle layout with enhanced typography and contrast.
+  - **Desktop Primary Action Row (`HomeTab.qml`)**: Replaced full-width 1000px start button with a weighted, centered action button paired with dynamic project engine telemetry and compact-to-expanded state-aware progress visualization.
+  - **Natural Console Log Flow & Live Search Filter (`ConsoleTab.qml`)**: Removed inverted `BottomToTop` list view direction in favor of standard `TopToBottom` natural flow with auto-scroll. Integrated real-time log search filtering, timestamps (`[HH:MM:SS]`), and an informative empty state visualizer.
+  - **Full i18n Integration Across 8 Locales (`src/gui/i18n/`)**: Extracted and synchronized all new UI strings, search placeholders, engine labels, and telemetry across English, Turkish, German, Spanish, French, Portuguese (BR), Russian, and Persian.
+  - **Proportional About Layout & Support Card (`AboutTab.qml`)**: Solved the floating island syndrome by expanding card width to 640px and refining the Patreon call-to-action into a balanced, elegant card that harmonizes with app branding.
+- **Brand Logo & App Icon Overhaul**:
+  - Rebuilt `icon.png` from scratch using 4× supersampling: neon gamepad + `A文` translation badge now fills **85% of the canvas** (was ~36%) on a midnight navy squircle background with a radial gradient and thin neon cyan rim.
+  - Regenerated multi-size `icon.ico` (16 → 256 px) via `scripts/generate_icons.py` so the taskbar, window title, and About hero all render at full native crispness.
+- **Sidebar Brand Header (`Main.qml`)**:
+  - Increased brand icon to 40×40 px, enabling the gamepad/`A文` emblem to be clearly readable in the sidebar.
+  - Replaced single-color title with dual-tone typography: **`RPGM`** in opaque white + **`Localizer`** in `accentLight` lavender.
+  - Replaced plain version text with a compact **pill-badge** (`[ v0.8.1 ]`) styled with a translucent accent fill and hairline border, alongside a subtle `Engine` label.
+  - Removed redundant purple gradient background behind the icon; icon's own squircle/neon styling is now self-contained.
+- **About Tab Hero Card (`AboutTab.qml`)**:
+  - Scaled hero icon to 64×64 px with matching squircle ambient glow.
+  - Applied identical dual-tone `RPGM` + `Localizer` heading and pill-badge version display for visual consistency.
+- **Navigation Labels Renamed for Clarity**:
+  - `Translate` → **`Auto Translate`** (⚡): makes it explicit that the tab runs the automatic translation pipeline.
+  - `Editor` → **`Translation Editor`** (✏️): clarifies this is the manual review and editing workspace, not a general editor.
+
+
 ## [0.8.0] - 2026-09-12
 
 ### High-Performance Translation & Network Subsystem (Ported from RenLocalizer)

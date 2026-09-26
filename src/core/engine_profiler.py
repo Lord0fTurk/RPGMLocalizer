@@ -19,6 +19,7 @@ class RpgMakerEngine(Enum):
     VX_ACE = "vx_ace"
     VX = "vx"
     XP = "xp"
+    WOLF_RPG = "wolf_rpg"
     UNKNOWN = "unknown"
 
 
@@ -264,6 +265,13 @@ class EngineProfiler:
             total_weight += evidence_data["total"]
             self._evidence.extend(evidence_data["items"])
 
+        if engine == RpgMakerEngine.UNKNOWN:
+            # Fallback to WOLF RPG detection if still unknown
+            engine, evidence_data = self._detect_from_wolf_files()
+            matched_weight += evidence_data["weight"]
+            total_weight += evidence_data["total"]
+            self._evidence.extend(evidence_data["items"])
+
         if total_weight == 0:
             confidence = 0.0
         else:
@@ -498,6 +506,79 @@ class EngineProfiler:
             ".rvdata2": RpgMakerEngine.VX_ACE,
         }
         return mapping.get(variant, RpgMakerEngine.UNKNOWN)
+
+    def _detect_from_wolf_files(self) -> tuple[RpgMakerEngine, Dict[str, Any]]:
+        """Detect WOLF RPG Editor project layout (Data/BasicData/*.dat, Data/MapData/*.mps)."""
+        evidence_items: list[DetectionEvidence] = []
+        basic_data = os.path.join(self.project_path, "Data", "BasicData")
+        map_data = os.path.join(self.project_path, "Data", "MapData")
+
+        if not os.path.isdir(basic_data):
+            for d in ("data", "Data"):
+                p = os.path.join(self.project_path, d)
+                if os.path.isdir(p):
+                    for b in ("basicdata", "BasicData"):
+                        bp = os.path.join(p, b)
+                        if os.path.isdir(bp):
+                            basic_data = bp
+                            break
+                    for m in ("mapdata", "MapData"):
+                        mp = os.path.join(p, m)
+                        if os.path.isdir(mp):
+                            map_data = mp
+                            break
+                    break
+
+        has_game_dat = os.path.isfile(os.path.join(basic_data, "Game.dat")) or os.path.isfile(os.path.join(basic_data, "game.dat"))
+        has_ce = os.path.isfile(os.path.join(basic_data, "CommonEvent.dat")) or os.path.isfile(os.path.join(basic_data, "commonevent.dat"))
+        has_mps = False
+        if os.path.isdir(map_data):
+            try:
+                has_mps = any(f.lower().endswith(".mps") for f in os.listdir(map_data))
+            except Exception:
+                pass
+
+        if has_game_dat or has_ce or has_mps:
+            evidence_items.append(
+                DetectionEvidence(
+                    source="Wolf Files",
+                    pattern="Data/BasicData/*.dat or Data/MapData/*.mps",
+                    weight=100,
+                    description="WOLF RPG Editor project files detected",
+                )
+            )
+            return RpgMakerEngine.WOLF_RPG, {"weight": 100, "total": 100, "items": evidence_items}
+
+        # Check for packaged / encrypted WOLF archives (.wolf)
+        has_wolf_archive = False
+        archive_names: list[str] = []
+        try:
+            search_dirs = [self.project_path]
+            for d in ("data", "Data"):
+                sub_d = os.path.join(self.project_path, d)
+                if os.path.isdir(sub_d):
+                    search_dirs.append(sub_d)
+            for sdir in search_dirs:
+                if os.path.isdir(sdir):
+                    for fn in os.listdir(sdir):
+                        if fn.lower().endswith(".wolf"):
+                            has_wolf_archive = True
+                            archive_names.append(fn)
+        except Exception:
+            pass
+
+        if has_wolf_archive:
+            evidence_items.append(
+                DetectionEvidence(
+                    source="Wolf Archives",
+                    pattern="*.wolf",
+                    weight=100,
+                    description=f"WOLF RPG packaged archive(s) detected: {', '.join(archive_names[:3])}",
+                )
+            )
+            return RpgMakerEngine.WOLF_RPG, {"weight": 100, "total": 100, "items": evidence_items, "has_wolf_archive": True}
+
+        return RpgMakerEngine.UNKNOWN, {"weight": 0, "total": 1, "items": []}
 
     def _analyze_plugins(self) -> Dict[str, Any]:
         """Analyze plugins.js for plugin statistics."""

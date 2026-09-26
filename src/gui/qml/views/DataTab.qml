@@ -2,6 +2,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Controls.Material 2.15
 import QtQuick.Layouts 1.15
+import "../js/I18n.js" as I18n
 
 Item {
     id: root
@@ -24,9 +25,9 @@ Item {
         signal toggled(bool val)
         spacing: t ? t.spaceMD : 12; Layout.fillWidth: true
         ColumnLayout {
-            Layout.fillWidth: true; spacing: 1
+            Layout.fillWidth: true; spacing: 2
             Text { text: toggleRowComp.label; font.pixelSize: t ? t.fontSizeMD : 13; color: t ? t.textPrimary : "#f0f0ff" }
-            Text { text: toggleRowComp.desc; font.pixelSize: 11; color: t ? t.textMuted : "#55556a"; visible: text.length > 0 }
+            Text { text: toggleRowComp.desc; font.pixelSize: 11; color: t ? t.textSecondary : "#9090b8"; opacity: 0.85; visible: text.length > 0 }
         }
         Rectangle {
             width: 42; height: 24; radius: 12
@@ -106,8 +107,37 @@ Item {
                     anchors { fill: parent; leftMargin: 28; rightMargin: 28 }
                     ColumnLayout {
                         spacing: 2
-                        Text { text: "Data Tools"; font.pixelSize: 20; font.bold: true; color: t ? t.textPrimary : "#f0f0ff" }
-                        Text { text: "Export, import and manage translation sidecars"; font.pixelSize: t ? t.fontSizeSM : 12; color: t ? t.textMuted : "#55556a" }
+                        Text { text: localeManager.strings.data.header_title; font.pixelSize: 20; font.bold: true; color: t ? t.textPrimary : "#f0f0ff" }
+                        Text { text: localeManager.strings.data.header_subtitle; font.pixelSize: t ? t.fontSizeSM : 12; color: t ? t.textMuted : "#55556a" }
+                    }
+                    Item { Layout.fillWidth: true }
+                    // Telemetry Pill Badge
+                    Rectangle {
+                        implicitHeight: 28
+                        implicitWidth: teleTxt.implicitWidth + 24
+                        radius: 14
+                        color: appBackend.projectPath ? Qt.rgba(124, 108, 248, 0.12) : Qt.rgba(255, 255, 255, 0.05)
+                        border.color: appBackend.projectPath ? Qt.rgba(124, 108, 248, 0.3) : (t ? t.border1 : "#2e2e3e")
+                        border.width: 1
+
+                        RowLayout {
+                            anchors.centerIn: parent
+                            spacing: 8
+                            Rectangle {
+                                width: 7; height: 7; radius: 3.5
+                                color: appBackend.projectPath ? (t ? t.accentLight : "#a89bf9") : (t ? t.textMuted : "#55556a")
+                            }
+                            Text {
+                                id: teleTxt
+                                text: appBackend.projectPath ?
+                                      (editorBackend.totalProjectCount > 0 ?
+                                       I18n.format(localeManager.strings.data.telemetry_loaded, {count: editorBackend.totalProjectCount}) :
+                                       (appBackend.detectedEngine.length > 0 ? ("🎮 " + appBackend.detectedEngine) : "📁 " + (appBackend.projectPath.split(/[/\\]/).pop() || ""))) :
+                                      localeManager.strings.data.telemetry_none
+                                font.pixelSize: t ? t.fontSizeSM : 12
+                                color: appBackend.projectPath ? (t ? t.textPrimary : "#f0f0ff") : (t ? t.textMuted : "#55556a")
+                            }
+                        }
                     }
                 }
             }
@@ -125,21 +155,21 @@ Item {
                         RowLayout {
                             spacing: t ? t.spaceSM : 8
                             Rectangle { width: 4; height: 16; radius: 2; color: t ? t.accent : "#7c6cf8" }
-                            Text { text: "Export Sidecar"; font.pixelSize: 14; font.bold: true; color: t ? t.textPrimary : "#f0f0ff" }
+                            Text { text: localeManager.strings.data.export_card_title; font.pixelSize: 14; font.bold: true; color: t ? t.textPrimary : "#f0f0ff" }
                             Item { Layout.fillWidth: true }
                             // Format badge
                             Rectangle {
                                 implicitHeight: 20; radius: t ? t.radiusMD : 10; implicitWidth: fmtTxt.implicitWidth + 14
                                 color: Qt.rgba(124, 108, 248, 0.12); border.color: Qt.rgba(124, 108, 248, 0.3); border.width: 1
-                                Text { id: fmtTxt; anchors.centerIn: parent; text: "CSV · JSON · PO"; font.pixelSize: 9; color: t ? t.accentLight : "#a89bf9" }
+                                Text { id: fmtTxt; anchors.centerIn: parent; text: localeManager.strings.data.format_csv_json_po; font.pixelSize: 9; color: t ? t.accentLight : "#a89bf9" }
                             }
                         }
                         Rectangle { Layout.fillWidth: true; height: 1; color: t ? t.border1 : "#2e2e3e" }
 
                         FilePicker {
-                            placeholder: "Select output file path..."
+                            placeholder: localeManager.strings.data.export_path_placeholder
                             value: settingsBackend.exportPath
-                            buttonLabel: "Save As..."
+                            buttonLabel: localeManager.strings.data.save_as_button
                             onBrowse: {
                                 var p = appBackend.selectExportFile()
                                 if (p) settingsBackend.exportPath = p
@@ -147,14 +177,14 @@ Item {
                         }
 
                         ToggleRow {
-                            label: "Export Only Mode"
-                            desc: "Do not write translations back to game data files"
+                            label: localeManager.strings.data.export_only_label
+                            desc: localeManager.strings.data.export_only_desc
                             checked: settingsBackend.exportOnly
                             onToggled: (val) => { settingsBackend.exportOnly = val }
                         }
                         ToggleRow {
-                            label: "Distinct Entries Only"
-                            desc: "Group identical source strings to reduce file size"
+                            label: localeManager.strings.data.export_distinct_label
+                            desc: localeManager.strings.data.export_distinct_desc
                             checked: settingsBackend.exportDistinct
                             onToggled: (val) => { settingsBackend.exportDistinct = val }
                         }
@@ -171,26 +201,26 @@ Item {
                         RowLayout {
                             spacing: t ? t.spaceSM : 8
                             Rectangle { width: 4; height: 16; radius: 2; color: t ? t.success : "#4ade80" }
-                            Text { text: "Import Sidecar"; font.pixelSize: 14; font.bold: true; color: t ? t.textPrimary : "#f0f0ff" }
+                            Text { text: localeManager.strings.data.import_card_title; font.pixelSize: 14; font.bold: true; color: t ? t.textPrimary : "#f0f0ff" }
                             Item { Layout.fillWidth: true }
                             Rectangle {
                                 implicitHeight: 20; radius: t ? t.radiusMD : 10; implicitWidth: impFmtTxt.implicitWidth + 14
                                 color: Qt.rgba(74, 222, 128, 0.10); border.color: Qt.rgba(74, 222, 128, 0.25); border.width: 1
-                                Text { id: impFmtTxt; anchors.centerIn: parent; text: "CSV · JSON · PO"; font.pixelSize: 9; color: t ? t.success : "#4ade80" }
+                                Text { id: impFmtTxt; anchors.centerIn: parent; text: localeManager.strings.data.format_csv_json_po; font.pixelSize: 9; color: t ? t.success : "#4ade80" }
                             }
                         }
                         Rectangle { Layout.fillWidth: true; height: 1; color: t ? t.border1 : "#2e2e3e" }
 
                         Text {
-                            text: "Apply a previously exported sidecar file to inject translations directly into the game data."
+                            text: localeManager.strings.data.import_desc
                             font.pixelSize: t ? t.fontSizeSM : 12; color: t ? t.textMuted : "#55556a"
                             wrapMode: Text.Wrap; Layout.fillWidth: true
                         }
 
                         FilePicker {
-                            placeholder: "Select translated sidecar file..."
+                            placeholder: localeManager.strings.data.import_path_placeholder
                             value: settingsBackend.importPath
-                            buttonLabel: "Browse..."
+                            buttonLabel: localeManager.strings.data.browse_button
                             onBrowse: {
                                 var p = appBackend.selectImportFile()
                                 if (p) settingsBackend.importPath = p
@@ -209,33 +239,33 @@ Item {
                         RowLayout {
                             spacing: t ? t.spaceSM : 8
                             Rectangle { width: 4; height: 16; radius: 2; color: t ? t.warning : "#facc15" }
-                            Text { text: "Glossary Dictionary"; font.pixelSize: 14; font.bold: true; color: t ? t.textPrimary : "#f0f0ff" }
+                            Text { text: localeManager.strings.data.glossary_card_title; font.pixelSize: 14; font.bold: true; color: t ? t.textPrimary : "#f0f0ff" }
                             Item { Layout.fillWidth: true }
                             Rectangle {
                                 implicitHeight: 20; radius: t ? t.radiusMD : 10; implicitWidth: glossFmtTxt.implicitWidth + 14
                                 color: Qt.rgba(250, 204, 21, 0.08); border.color: Qt.rgba(250, 204, 21, 0.25); border.width: 1
-                                Text { id: glossFmtTxt; anchors.centerIn: parent; text: "JSON · CSV"; font.pixelSize: 9; color: t ? t.warning : "#facc15" }
+                                Text { id: glossFmtTxt; anchors.centerIn: parent; text: localeManager.strings.data.glossary_format_badge; font.pixelSize: 9; color: t ? t.warning : "#facc15" }
                             }
                         }
                         Rectangle { Layout.fillWidth: true; height: 1; color: t ? t.border1 : "#2e2e3e" }
 
                         Text {
-                            text: "Define term mappings that override automatic translation for specific words (e.g. character names, skill names)."
+                            text: localeManager.strings.data.glossary_desc
                             font.pixelSize: t ? t.fontSizeSM : 12; color: t ? t.textMuted : "#55556a"
                             wrapMode: Text.Wrap; Layout.fillWidth: true
                         }
 
                         ToggleRow {
-                            label: "Use Custom Glossary"
-                            desc: "Apply the selected dictionary during translation"
+                            label: localeManager.strings.data.use_glossary_label
+                            desc: localeManager.strings.data.use_glossary_desc
                             checked: settingsBackend.useGlossary
                             onToggled: (val) => { settingsBackend.useGlossary = val }
                         }
 
                         FilePicker {
-                            placeholder: "Select glossary JSON/CSV file..."
+                            placeholder: localeManager.strings.data.glossary_path_placeholder
                             value: settingsBackend.glossaryPath
-                            buttonLabel: "Browse..."
+                            buttonLabel: localeManager.strings.data.browse_button
                             onBrowse: appBackend.selectGlossaryFile()
                         }
                     }

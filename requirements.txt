@@ -33,3 +33,6 @@ json5>=0.9.25
 # AI Translation Engines (OpenAI, DeepSeek, Local LLM, Gemini)
 openai>=1.50.0
 google-genai>=0.1.0
+
+# WOLF RPG Editor block decompression and compression
+lz4>=4.0.0

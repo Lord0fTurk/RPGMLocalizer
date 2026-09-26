@@ -217,12 +217,52 @@ class BackupManager:
                         logger.warning(f"Failed to delete backup {path}: {e}")
     
     def get_backups_for_file(self, file_path: str) -> List[str]:
-        """Get list of available backups for a file."""
-        backups = []
-        for original, backup, _ in self.backup_log:
-            if original == file_path and os.path.exists(backup):
-                backups.append(backup)
-        return backups
+        """Get list of available backups for a file, checking in-memory log and disk."""
+        with self._lock:
+            backups: List[str] = []
+            seen = set()
+            norm_file = os.path.normcase(os.path.abspath(file_path))
+
+            # 1. Check in-memory log
+            for original, backup, _ in self.backup_log:
+                if os.path.normcase(os.path.abspath(original)) == norm_file and os.path.exists(backup):
+                    norm_bak = os.path.normcase(os.path.abspath(backup))
+                    if norm_bak not in seen:
+                        seen.add(norm_bak)
+                        backups.append(backup)
+
+            # 2. Check candidate backup directories on disk
+            candidate_dirs = []
+            if self.backup_dir:
+                candidate_dirs.append(self.backup_dir)
+            file_dir = os.path.dirname(file_path)
+            dot_rpgm = os.path.join(file_dir, '.rpgm_backup')
+            if dot_rpgm not in candidate_dirs:
+                candidate_dirs.append(dot_rpgm)
+
+            filename = os.path.basename(file_path)
+            name, ext = os.path.splitext(filename)
+
+            for b_dir in candidate_dirs:
+                if not os.path.exists(b_dir):
+                    continue
+                disk_backups = []
+                try:
+                    for entry in os.scandir(b_dir):
+                        if entry.is_file():
+                            ename = entry.name
+                            if ename == f"{filename}.bak" or (ename.startswith(f"{name}_") and ename.endswith(ext)):
+                                norm_path = os.path.normcase(os.path.abspath(entry.path))
+                                if norm_path not in seen:
+                                    seen.add(norm_path)
+                                    disk_backups.append((entry.path, entry.stat().st_mtime))
+                    disk_backups.sort(key=lambda x: x[1])
+                    for bp, _ in disk_backups:
+                        backups.append(bp)
+                except Exception as exc:
+                    logger.debug(f"Failed to scan backup dir {b_dir}: {exc}")
+
+            return backups
     
     def get_backup_stats(self) -> dict:
         """Get statistics about backups."""

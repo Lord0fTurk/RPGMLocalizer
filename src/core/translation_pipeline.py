@@ -15,6 +15,8 @@ import logging
 import re
 import time
 import tempfile
+import hashlib
+import threading
 
 import orjson
 from collections import Counter
@@ -24,6 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from PyQt6.QtCore import QObject, pyqtSignal as Signal
 
 from .translator import GoogleTranslator, TranslationRequest, create_translator
+from .translators.services import HyMT2Translator
 from .parser_factory import get_parser
 from .parsers.js_ast_extractor import JavaScriptAstAuditExtractor
 from .parsers.hendrix_csv_parser import HENDRIX_CSV_FILENAME
@@ -31,10 +34,11 @@ from .parsers.plain_text_parser import SUPPORTED_TEXT_FILENAMES
 from .parsers.ts_adv_scenario_parser import TS_SCENARIO_EXTENSION
 from .glossary import Glossary
 from .cache import TranslationCache, get_cache
-from src.utils.app_paths import get_project_id
+from src.utils.app_paths import get_cache_dir, get_project_id
 from .export_import import TranslationExporter, TranslationImporter
 from src.utils.backup import BackupManager, get_backup_manager
 from .validation import Validator
+from .translation_quality import translation_issues
 from .enums import PipelineStage
 from src.utils.file_ops import safe_write
 from .text_merger import TextMerger
@@ -48,6 +52,9 @@ from .constants import (
     DEFAULT_ENABLE_LINGVA_FALLBACK
 )
 from .engine_profiler import EngineProfiler, ProjectProfile
+
+
+_JS_EXTRACTION_LOCK = threading.Lock()
 
 
 class TranslationPipeline(QObject):
@@ -98,7 +105,7 @@ class TranslationPipeline(QObject):
         batch_size = self.settings.get("batch_size", DEFAULT_BATCH_SIZE)
         
         self.translator = create_translator(self.settings)
-        self.merger = TextMerger(batch_size=batch_size)
+        self.merger = TextMerger(batch_size=1 if isinstance(self.translator, HyMT2Translator) else batch_size)
         self.logger = logging.getLogger("Pipeline")
         self.js_ast_audit_extractor = JavaScriptAstAuditExtractor()
         
@@ -116,6 +123,7 @@ class TranslationPipeline(QObject):
         
         # Store parsed data for deferred backup (avoid re-parsing)
         self._parsed_data_cache: dict[str, Any] = {}
+        self.quality_issues: list[dict[str, str]] = []
         
         # Initialize optional components based on settings
         self._init_components()
@@ -124,7 +132,7 @@ class TranslationPipeline(QObject):
         """Initialize optional components based on settings."""
         # Glossary
         glossary_path = self.settings.get('glossary_path')
-        if glossary_path and os.path.exists(glossary_path):
+        if self.settings.get('use_glossary', False) and glossary_path and os.path.exists(glossary_path):
             self.glossary = Glossary(glossary_path)
             self.logger.info(f"Loaded glossary with {len(self.glossary)} terms")
         
@@ -139,12 +147,41 @@ class TranslationPipeline(QObject):
                 self.logger.info(f"Using translation cache: [{project_id}] ({target_lang})")
             else:
                 self.logger.info("Translation cache enabled (global)")
-        
+
         # Backup
         if self.settings.get('backup_enabled', True):
             backup_dir = self.settings.get('backup_dir')
             self.backup_manager = BackupManager(backup_dir)
             self.logger.info("Backup system enabled")
+
+    def _cache_source_lang(self, source_lang: str) -> str:
+        """Keep Hy-MT2 jobs with different model, glossary or style apart."""
+        if not isinstance(self.translator, HyMT2Translator):
+            return source_lang
+        glossary_path = self.settings.get("glossary_path", "")
+        glossary_data = b""
+        if self.glossary and glossary_path and os.path.isfile(glossary_path):
+            with open(glossary_path, "rb") as file:
+                glossary_data = file.read()
+        context = "\x00".join((
+            self.translator.model, self.translator.style,
+            self.translator.base_url,
+        )).encode("utf-8") + glossary_data
+        return source_lang + "#hy:" + hashlib.sha256(context).hexdigest()[:16]
+
+    def _quality_report_path(self) -> str:
+        if self.cache:
+            return os.path.join(self.cache.cache_dir, "quality_review.json")
+        project_id = get_project_id(self.settings.get("project_path", ""))
+        return os.path.join(os.fspath(get_cache_dir(project_id=project_id, target_lang=self.settings.get("target_lang", "tr"))), "quality_review.json")
+
+    def _save_quality_report(self) -> None:
+        path = self._quality_report_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with safe_write(path, "w", encoding="utf-8") as file:
+            json.dump({"version": 1, "issues": self.quality_issues}, file, ensure_ascii=False, indent=2)
+        if self.quality_issues:
+            self.log_message.emit("warning", f"{len(self.quality_issues)} translations need review: {path}")
 
     def run(self):
         """Main entry point - runs the pipeline."""
@@ -282,7 +319,13 @@ class TranslationPipeline(QObject):
 
         # Parse all files
         self.stage_changed.emit(PipelineStage.PARSING.value, "Extracting text...")
-        all_entries, parsed_files, all_listed = self._extract_all_text(files)
+        self.progress_updated.emit(0, len(files), f"Parsing files... 0/{len(files)}")
+        all_entries, parsed_files, all_listed = self._extract_all_text(
+            files,
+            progress_callback=lambda current, total, _message: self.progress_updated.emit(
+                current, total, f"Parsing files... {current}/{total}"
+            ),
+        )
         
         if not all_entries and not all_listed:
             self.finished.emit(True, "No text found to translate.")
@@ -290,6 +333,18 @@ class TranslationPipeline(QObject):
 
         total = len(all_entries)
         self.log_message.emit("info", f"Extracted {total} text entries ({len(all_listed)} listed for review)")
+        if self.settings.get("retry_review_only"):
+            try:
+                with open(self._quality_report_path(), "r", encoding="utf-8") as file:
+                    review_data = json.load(file)
+                wanted = {(item["file"], item["key"]) for item in review_data.get("issues", [])}
+            except (OSError, ValueError, KeyError, TypeError):
+                wanted = set()
+            all_entries = [entry for entry in all_entries if (entry[0], entry[1]) in wanted]
+            self.log_message.emit("info", f"Retrying {len(all_entries)} review entries")
+            if not all_entries:
+                self.finished.emit(False, "No review entries found for retry.")
+                return
         
         # Export option (if requested)
         export_path = self.settings.get('export_path')
@@ -1054,15 +1109,17 @@ class TranslationPipeline(QObject):
         parsed_files = {}  # file -> (parser, entries)
         
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        import threading
-        
-        lock = threading.Lock()
         
         # Determine worker count based on project profile
         if self._project_profile:
             max_workers = self._project_profile.suggested_worker_count
         else:
-            max_workers = min(os.cpu_count() or 4, 8)
+            max_workers = os.cpu_count() or 4
+        # Large map JSON files are fully materialized while being parsed. Keep
+        # concurrent copies bounded so a busy game cannot exhaust desktop RAM.
+        max_workers = max(1, min(max_workers, 4))
+        if any(os.path.getsize(path) >= 4 * 1024 * 1024 for path in files):
+            max_workers = min(max_workers, 2)
         
         def process_file(file_path):
             if self.should_stop:
@@ -1077,7 +1134,13 @@ class TranslationPipeline(QObject):
             t_extract = time.monotonic()
             
             try:
-                entries = parser.extract_text(file_path)
+                if file_path.lower().endswith(".js"):
+                    # Concurrent plugin parsing triggered a native AST access
+                    # violation on Windows. Keep JS files serial within a scan.
+                    with _JS_EXTRACTION_LOCK:
+                        entries = parser.extract_text(file_path)
+                else:
+                    entries = parser.extract_text(file_path)
                 elapsed = time.monotonic() - t_extract
                 if entries:
                     filtered = [
@@ -1109,17 +1172,26 @@ class TranslationPipeline(QObject):
         results = []
         completed_count = 0
         total_files = len(files)
+        regular_files = [path for path in files if not path.lower().endswith(".js")]
+        js_files = [path for path in files if path.lower().endswith(".js")]
+
+        def report_completed(path: str) -> None:
+            nonlocal completed_count
+            completed_count += 1
+            if progress_callback:
+                try:
+                    progress_callback(
+                        completed_count, total_files,
+                        f"Ayrıştırılıyor: {os.path.basename(path)} ({completed_count}/{total_files})",
+                    )
+                except Exception:
+                    pass
 
         try:
-            _extract_futures = {_extract_executor.submit(process_file, fp): fp for fp in files}
+            _extract_futures = {_extract_executor.submit(process_file, fp): fp for fp in regular_files}
             for fut in as_completed(_extract_futures, timeout=_EXTRACT_TOTAL_SEC):
-                completed_count += 1
                 fp = _extract_futures[fut]
-                if progress_callback:
-                    try:
-                        progress_callback(completed_count, total_files, f"Ayrıştırılıyor: {os.path.basename(fp)} ({completed_count}/{total_files})")
-                    except Exception:
-                        pass
+                report_completed(fp)
                 try:
                     results.append(fut.result())
                 except Exception as _e:
@@ -1129,7 +1201,15 @@ class TranslationPipeline(QObject):
             self.logger.error(f"Extraction total timeout ({_EXTRACT_TOTAL_SEC}s)")
             self.log_message.emit("warning", f"Extraction timed out after {_EXTRACT_TOTAL_SEC}s.")
         finally:
-            _extract_executor.shutdown(wait=False, cancel_futures=True)
+            _extract_executor.shutdown(wait=True, cancel_futures=True)
+
+        # Native JS AST parsing can crash when it overlaps other extraction
+        # workers on Windows. Process plugin scripts only after they finish.
+        for fp in js_files:
+            if self.should_stop:
+                break
+            results.append(process_file(fp))
+            report_completed(fp)
 
         for res in results:
             if res:
@@ -1162,6 +1242,8 @@ class TranslationPipeline(QObject):
         """Translate all entries using the translation engine with robust error handling."""
         results_map = {}  # (file, path) -> translated_text
         total = len(entries)
+        cache_source_lang = self._cache_source_lang(source_lang)
+        pending_issues: dict[tuple[str, str], dict[str, str]] = {}
 
         retry_entries: List[Tuple[str, str, str, str]] = []  # (file, path, text, tag)
         retry_seen = set()
@@ -1173,16 +1255,22 @@ class TranslationPipeline(QObject):
                     continue
                 retry_seen.add(key)
                 retry_entries.append((file_path, path, text, tag))
+
+        def _mark_issue(file_path: str, path: str, original: str, candidate: str, reason: str) -> None:
+            pending_issues[(file_path, path)] = {
+                "file": file_path, "key": path, "original": original,
+                "candidate": candidate, "reason": reason,
+            }
         
         # 1. Pre-merge Cache Check on Individual Entries
         uncached_entries: List[Tuple[str, str, str, str]] = []
         cache_hits = 0
-        if self.cache:
+        if self.cache and not self.settings.get("retry_review_only"):
             for file_path, path, text, tag in entries:
                 if not text or not text.strip():
                     continue
-                cached = self.cache.get(text, source_lang, target_lang)
-                if cached is not None:
+                cached = self.cache.get(text, cache_source_lang, target_lang)
+                if cached is not None and not translation_issues(text, cached):
                     results_map[(file_path, path)] = cached
                     cache_hits += 1
                 else:
@@ -1194,6 +1282,8 @@ class TranslationPipeline(QObject):
 
         if not uncached_entries:
             self.log_message.emit("info", "All entries found in cache!")
+            self.quality_issues = []
+            self._save_quality_report()
             return results_map
 
         # Determine efficient batching strategy via TextMerger for remaining uncached entries
@@ -1206,9 +1296,9 @@ class TranslationPipeline(QObject):
             meta = req['metadata']
             
             # Cache Check
-            if self.cache:
-                cached = self.cache.get(text, source_lang, target_lang)
-                if cached:
+            if self.cache and not self.settings.get("retry_review_only"):
+                cached = self.cache.get(text, cache_source_lang, target_lang)
+                if cached and not translation_issues(text, cached):
                     # Handle Cache Hit
                     if meta.get('is_merged'):
                         original_entries = merged_map.get(f"{meta['file']}::{meta['key']}")
@@ -1252,6 +1342,8 @@ class TranslationPipeline(QObject):
 
         if not final_requests:
             self.log_message.emit("info", "All entries found in cache!")
+            self.quality_issues = []
+            self._save_quality_report()
             return results_map
 
         # PHASE SPLIT (Database first, then Maps/Events)
@@ -1270,17 +1362,17 @@ class TranslationPipeline(QObject):
 
         # 2. Async Execution (Result Pattern)
         async def process_all():
+            if isinstance(self.translator, HyMT2Translator):
+                await self.translator.verify_connection()
             processed_count = 0
             total_reqs = len(final_requests)
+            self.progress_updated.emit(0, total_reqs, f"Translating... 0/{total_reqs}")
             
             def on_progress(count: int = 1):
                 nonlocal processed_count
                 processed_count += (count if count is not None else 1)
-                current_time = time.time() * 1000
-                if current_time - self._last_progress_update >= self._progress_throttle_ms:
-                    self._last_progress_update = current_time
-                    visible_count = min(processed_count, total_reqs)
-                    self.progress_updated.emit(visible_count, total_reqs, f"Translating... {visible_count}/{total_reqs}")
+                visible_count = min(processed_count, total_reqs)
+                self.progress_updated.emit(visible_count, total_reqs, f"Translating... {visible_count}/{total_reqs}")
 
             success_total, fail_total = 0, 0
             dynamic_glossary = {}
@@ -1294,6 +1386,16 @@ class TranslationPipeline(QObject):
                     if res.success:
                         translated_text = res.translated_text
                         glossary_map = meta.get('glossary_map', {})
+                        if glossary_map and any(token not in translated_text for token in glossary_map):
+                            raw_orig = meta.get('original_text') or res.original_text
+                            if meta.get('is_merged'):
+                                original_entries = merged_map.get(f"{meta['file']}::{meta['key']}", [])
+                                _queue_retry(meta['file'], original_entries)
+                            else:
+                                _mark_issue(meta['file'], meta['key'], raw_orig, translated_text, "glossary marker missing")
+                                _queue_retry(meta['file'], [(meta.get('description', ''), meta['key'], raw_orig)])
+                            fal += 1
+                            continue
                         if self.glossary and glossary_map:
                             translated_text = self.glossary.restore_terms(translated_text, glossary_map)
 
@@ -1306,37 +1408,69 @@ class TranslationPipeline(QObject):
                                     self.logger.warning(f"Merged translation mismatch for {lookup_key}. Retrying without merge.")
                                     _queue_retry(meta['file'], original_entries)
                                 else:
+                                    merged_valid = True
                                     for idx, (sp_key, sp_text) in enumerate(split_pairs):
+                                        orig_single = original_entries[idx][2]
+                                        reasons = translation_issues(orig_single, sp_text)
+                                        if reasons:
+                                            merged_valid = False
+                                            _mark_issue(meta['file'], sp_key, orig_single, sp_text, "; ".join(reasons))
+                                            _queue_retry(meta['file'], [original_entries[idx]])
+                                            continue
                                         results_map[(meta['file'], sp_key)] = sp_text
                                         if self.cache and idx < len(original_entries):
-                                            orig_single = original_entries[idx][2]
                                             if orig_single and orig_single.strip():
-                                                self.cache.set(orig_single, sp_text, source_lang, target_lang)
+                                                self.cache.set(orig_single, sp_text, cache_source_lang, target_lang)
                                     # Also cache the full merged block for whole-block cache lookups
                                     raw_orig_block = meta.get('original_text') or res.original_text
-                                    if self.cache and raw_orig_block:
-                                        self.cache.set(raw_orig_block, translated_text, source_lang, target_lang)
+                                    if merged_valid and self.cache and raw_orig_block:
+                                        self.cache.set(raw_orig_block, translated_text, cache_source_lang, target_lang)
                                     suc += 1
                             else:
                                 self.logger.error(f"Missing merge map for key: {lookup_key}")
                         else:
                             raw_orig = meta.get('original_text') or res.original_text
+                            reasons = translation_issues(raw_orig, translated_text)
+                            if reasons:
+                                _mark_issue(meta['file'], meta['key'], raw_orig, translated_text, "; ".join(reasons))
+                                _queue_retry(meta['file'], [(meta.get('description', ''), meta['key'], raw_orig)])
+                                fal += 1
+                                continue
                             if self.cache and raw_orig:
-                                self.cache.set(raw_orig, translated_text, source_lang, target_lang)
+                                self.cache.set(raw_orig, translated_text, cache_source_lang, target_lang)
                             results_map[(meta['file'], meta['key'])] = translated_text
                             suc += 1
                     else:
                         fal += 1
                         self.logger.warning(f"Translation Failed: {meta.get('key')} - {res.error}")
+                        raw_orig = meta.get('original_text') or res.original_text
+                        if not meta.get('is_merged'):
+                            _mark_issue(meta['file'], meta['key'], raw_orig, "", res.error or "translation failed")
+                            _queue_retry(meta['file'], [(meta.get('description', ''), meta['key'], raw_orig)])
                 if self.cache and self.cache._modified:
                     self.cache.save()
                 return suc, fal
 
+            async def run_phase(requests: list[dict]) -> tuple[list, int, int]:
+                results = []
+                success = failed = 0
+                window_size = max(1, min(100, self.translator.batch_size)) if isinstance(self.translator, HyMT2Translator) else len(requests)
+                for start in range(0, len(requests), window_size):
+                    if self.should_stop:
+                        break
+                    window_results = await self.translator.translate_batch(
+                        requests[start:start + window_size], progress_callback=on_progress
+                    )
+                    results.extend(window_results)
+                    window_success, window_failed = await process_results_batch(window_results)
+                    success += window_success
+                    failed += window_failed
+                return results, success, failed
+
             # Execute Phase 1
             if phase1_requests:
                 self.log_message.emit("info", "Running Phase 1: Database Lexicon Translation")
-                p1_results = await self.translator.translate_batch(phase1_requests, progress_callback=on_progress)
-                s1, f1 = await process_results_batch(p1_results)
+                p1_results, s1, f1 = await run_phase(phase1_requests)
                 success_total += s1
                 fail_total += f1
                 
@@ -1359,15 +1493,14 @@ class TranslationPipeline(QObject):
                     req['metadata']['dynamic_context'] = dynamic_glossary
 
             # Execute Phase 2
-            if phase2_requests:
+            if phase2_requests and not self.should_stop:
                 self.log_message.emit("info", "Running Phase 2: Maps and Events Translation")
-                p2_results = await self.translator.translate_batch(phase2_requests, progress_callback=on_progress)
-                s2, f2 = await process_results_batch(p2_results)
+                _p2_results, s2, f2 = await run_phase(phase2_requests)
                 success_total += s2
                 fail_total += f2
 
             # Retry mismatched merged blocks as single entries
-            if retry_entries:
+            if retry_entries and not self.should_stop:
                 self.logger.info(f"Retrying {len(retry_entries)} entries without merge...")
 
                 retry_requests = []
@@ -1403,23 +1536,39 @@ class TranslationPipeline(QObject):
                     if res.success:
                         translated_text = res.translated_text
                         glossary_map = meta.get('glossary_map', {})
+                        if glossary_map and any(token not in translated_text for token in glossary_map):
+                            raw_orig = meta.get('original_text') or res.original_text
+                            _mark_issue(meta['file'], meta['key'], raw_orig, translated_text, "glossary marker missing")
+                            fail_total += 1
+                            continue
                         if self.glossary and glossary_map:
                             translated_text = self.glossary.restore_terms(translated_text, glossary_map)
                         # Restoration handled by Translator
 
                         raw_orig = meta.get('original_text') or res.original_text
+                        reasons = translation_issues(raw_orig, translated_text)
+                        if reasons:
+                            _mark_issue(meta['file'], meta['key'], raw_orig, translated_text, "; ".join(reasons))
+                            fail_total += 1
+                            continue
                         if self.cache and raw_orig:
-                            self.cache.set(raw_orig, translated_text, source_lang, target_lang)
+                            self.cache.set(raw_orig, translated_text, cache_source_lang, target_lang)
 
                         results_map[(meta['file'], meta['key'])] = translated_text
+                        pending_issues.pop((meta['file'], meta['key']), None)
                     else:
                         self.logger.warning(f"Retry Translation Failed: {meta.get('key')} - {res.error}")
+                        raw_orig = meta.get('original_text') or res.original_text
+                        _mark_issue(meta['file'], meta['key'], raw_orig, "", res.error or "retry failed")
                         fail_total += 1
 
                 if self.cache and self.cache._modified:
                     self.cache.save()
             
             self.log_message.emit("info", f"Batch Completed. Success: {success_total}, Failed: {fail_total}")
+            self.quality_issues = list(pending_issues.values())
+            if not self.should_stop:
+                self._save_quality_report()
             
             # Cleanup
             await self.translator.close()

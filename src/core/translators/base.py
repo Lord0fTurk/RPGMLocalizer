@@ -23,6 +23,7 @@ class TranslationEngine(Enum):
     OPENAI = "openai"
     GEMINI = "gemini"
     LOCAL_LLM = "local_llm"
+    HY_MT2 = "hy_mt2"
     OLLAMA = "ollama"
     DEEPSEEK = "deepseek"
     LIBRETRANSLATE = "libretranslate"

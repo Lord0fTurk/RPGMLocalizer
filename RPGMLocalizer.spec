@@ -69,6 +69,7 @@ a = Analysis(
         'src.core.glossary',
         'src.core.cache',
         'src.core.parser_factory',
+        'src.core.parsers.js_ast_worker',
         'src.core.export_import',
         'src.core.text_segmenter',
         'src.core.text_merger',

@@ -260,7 +260,7 @@ Item {
                         }
                         Rectangle { Layout.fillWidth: true; height: 1; color: t ? t.border1 : "#2e2e3e" }
                         StyledSlider {
-                            label: localeManager.strings.settings.batch_size_label; from: 5; to: 50; step: 5
+                            label: localeManager.strings.settings.batch_size_label; from: 1; to: 100; step: 1
                             value: settingsBackend.batchSize
                             onMoved: (val) => { settingsBackend.batchSize = Math.round(val) }
                         }
@@ -345,6 +345,45 @@ Item {
                                 placeholder: "gemini-2.0-flash"
                                 onEditingFinished: (newText) => { settingsBackend.geminiModel = newText }
                             }
+                        }
+
+                        Rectangle { Layout.fillWidth: true; height: 1; color: t ? t.border1 : "#2e2e3e" }
+
+                        // Local LLM
+                        Text { text: "Hy-MT2 (Local)"; font.pixelSize: t ? t.fontSizeSM : 12; font.bold: true; color: t ? t.accentLight : "#a89bf9" }
+                        Component.onCompleted: settingsBackend.refreshHyMt2Models()
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: t ? t.spaceMD : 12
+                            InputField {
+                                label: localeManager.strings.settings.base_url_label
+                                text: settingsBackend.hyMt2Url
+                                placeholder: "http://127.0.0.1:1234/v1"
+                                onEditingFinished: (newText) => { settingsBackend.hyMt2Url = newText }
+                            }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 10
+                            StyledCombo {
+                                Layout.fillWidth: true
+                                model: [localeManager.strings.settings.model_name_label].concat(settingsBackend.hyMt2Models)
+                                currentIndex: settingsBackend.hyMt2Models.indexOf(settingsBackend.hyMt2Model) + 1
+                                onActivated: (index) => { settingsBackend.hyMt2Model = index > 0 ? settingsBackend.hyMt2Models[index - 1] : "" }
+                            }
+                            Button { text: "↻"; onClicked: settingsBackend.refreshHyMt2Models() }
+                            Text { text: settingsBackend.hyMt2ModelStatus; color: t ? t.textSecondary : "#9090b8"; font.pixelSize: 11 }
+                        }
+                        StyledSlider {
+                            label: "Hy-MT2 workers"; from: 1; to: 8; step: 1
+                            value: settingsBackend.hyMt2Workers
+                            onMoved: (val) => { settingsBackend.hyMt2Workers = Math.round(val) }
+                        }
+                        InputField {
+                            label: "Çeviri üslubu / Translation style"
+                            text: settingsBackend.hyMt2Style
+                            placeholder: "Örn: doğal, tutarlı ve fantastik RPG dili"
+                            onEditingFinished: (newText) => { settingsBackend.hyMt2Style = newText }
                         }
 
                         Rectangle { Layout.fillWidth: true; height: 1; color: t ? t.border1 : "#2e2e3e" }

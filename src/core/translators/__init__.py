@@ -17,6 +17,7 @@ from .services import (
     DeepSeekTranslator,
     LibreTranslateTranslator,
     LocalLLMTranslator,
+    HyMT2Translator,
     OpenAICompatibleTranslator,
     PseudoTranslator,
     SegmentBatchTranslator,
@@ -36,6 +37,7 @@ __all__ = [
     "OpenAICompatibleTranslator",
     "DeepSeekTranslator",
     "LocalLLMTranslator",
+    "HyMT2Translator",
     "SegmentBatchTranslator",
     "create_translator",
 ]

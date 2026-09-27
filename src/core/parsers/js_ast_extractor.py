@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import ast
 import logging
+import threading
 from dataclasses import dataclass
 from collections import Counter
 from typing import Any, Iterable
 
 logger = logging.getLogger(__name__)
+_TREE_SITTER_LOCK = threading.RLock()
 
 from .js_tokenizer import JSStringTokenizer
 from src.utils.file_ops import read_text_file
@@ -151,8 +153,9 @@ class JavaScriptAstAuditExtractor:
 
     def __init__(self) -> None:
         self._tokenizer = JSStringTokenizer()
-        self._language = self._build_language()
-        self._parser = Parser(self._language) if self._language is not None and Parser is not None else None
+        with _TREE_SITTER_LOCK:
+            self._language = self._build_language()
+            self._parser = Parser(self._language) if self._language is not None and Parser is not None else None
 
     @property
     def engine_name(self) -> str:
@@ -176,6 +179,10 @@ class JavaScriptAstAuditExtractor:
 
     def extract_safe_sink_entries_from_source(self, js_code: str) -> tuple[list[AuditEntry], str]:
         """Extract strings only from semantically safe JS sinks."""
+        with _TREE_SITTER_LOCK:
+            return self._extract_safe_sink_entries_unlocked(js_code)
+
+    def _extract_safe_sink_entries_unlocked(self, js_code: str) -> tuple[list[AuditEntry], str]:
         if not js_code.strip():
             return [], self.engine_name
 
@@ -207,6 +214,10 @@ class JavaScriptAstAuditExtractor:
         js_code: str,
     ) -> tuple[list[JavaScriptAuditCandidate], str]:
         """Extract scored audit-only string candidates from JS source."""
+        with _TREE_SITTER_LOCK:
+            return self._extract_audit_candidates_unlocked(js_code)
+
+    def _extract_audit_candidates_unlocked(self, js_code: str) -> tuple[list[JavaScriptAuditCandidate], str]:
         if not js_code.strip():
             return [], self.engine_name
 
@@ -305,14 +316,21 @@ class JavaScriptAstAuditExtractor:
             return None
 
     def _iter_string_nodes(self, node: Any) -> Iterable[Any]:
-        if node.type == "string":
-            yield node
-        elif node.type == "template_string":
-            if not any(child.type == "template_substitution" for child in node.named_children):
-                yield node
-
-        for child in node.children:
-            yield from self._iter_string_nodes(child)
+        # TreeCursor walks deep plugin trees without materializing children at
+        # every level. Node.children can overflow a Windows worker's C stack.
+        cursor = node.walk()
+        while True:
+            current = cursor.node
+            if current.type == "string":
+                yield current
+            elif current.type == "template_string":
+                if not any(child.type == "template_substitution" for child in current.named_children):
+                    yield current
+            if cursor.goto_first_child():
+                continue
+            while not cursor.goto_next_sibling():
+                if not cursor.goto_parent():
+                    return
 
     def _decode_string_value(self, source_bytes: bytes, node: Any) -> str:
         raw_text = source_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="ignore")

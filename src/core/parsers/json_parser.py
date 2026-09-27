@@ -8,6 +8,8 @@ import re
 import logging
 import copy
 import threading
+import subprocess
+import sys
 from collections import Counter
 from typing import List, Dict, Any, Tuple, Set
 from .base import BaseParser
@@ -254,7 +256,7 @@ class JsonParser(BaseParser):
         self.translate_comments = translate_comments
         self.extracted: List[Tuple[str, str, str]] = []
         self._js_tokenizer = JSStringTokenizer()
-        self._js_safe_sink_extractor = JavaScriptAstAuditExtractor()
+        self._js_safe_sink_extractor = None
         self._surface_registry = ExtractionSurfaceRegistry()
         self._plugin_family_registry = PluginFamilyRegistry()
         self._skip_fields = self.SKIP_FIELDS.copy()
@@ -1643,10 +1645,33 @@ class JsonParser(BaseParser):
                 continue
             target.append((f"{path}.parameters.0.@MVCMD{quote_index}", segment_text, "dialogue_block"))
 
-    def _filter_js_strings_by_safe_sinks(self, js_code: str) -> List[Tuple[int, int, str, str]]:
+    def _filter_js_strings_by_safe_sinks(self, js_code: str, isolate_native: bool = False) -> List[Tuple[int, int, str, str]]:
         """Keep tokenizer strings only when a safe AST sink confirms them."""
         tokenizer_strings = self._js_tokenizer.extract_translatable_strings(js_code)
-        safe_entries, _engine = self._js_safe_sink_extractor.extract_safe_sink_entries_from_source(js_code)
+        if not tokenizer_strings:
+            return []
+        if sys.platform == "win32" and isolate_native:
+            command = ([sys.executable, "--js-ast-worker"] if getattr(sys, "frozen", False)
+                       else [sys.executable, "-m", "src.core.parsers.js_ast_worker"])
+            try:
+                completed = subprocess.run(
+                    command, input=js_code.encode("utf-8", errors="replace"),
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    timeout=90, check=False,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                if completed.returncode != 0:
+                    logger.warning("JS AST helper failed (%s); skipping unsafe JS strings: %s",
+                                   completed.returncode, completed.stderr.decode("utf-8", errors="replace")[-300:])
+                    return []
+                safe_entries = json.loads(completed.stdout.decode("utf-8"))
+            except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+                logger.warning("JS AST helper unavailable; skipping unsafe JS strings: %s", exc)
+                return []
+        else:
+            if self._js_safe_sink_extractor is None:
+                self._js_safe_sink_extractor = JavaScriptAstAuditExtractor()
+            safe_entries, _engine = self._js_safe_sink_extractor.extract_safe_sink_entries_from_source(js_code)
         if not safe_entries:
             return []
 
@@ -3007,7 +3032,7 @@ class JsonParser(BaseParser):
 
     def _extract_from_js_source(self, content: str):
         """Extract hardcoded translatable strings from JS plugin files."""
-        strings = self._filter_js_strings_by_safe_sinks(content)
+        strings = self._filter_js_strings_by_safe_sinks(content, isolate_native=True)
         for idx, (start, end, text, quote) in enumerate(strings):
             if not text: continue
             

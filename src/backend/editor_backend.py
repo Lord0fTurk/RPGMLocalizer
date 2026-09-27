@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from typing import Any, Dict, List, Optional
 
 from PyQt6.QtCore import (
@@ -339,6 +340,8 @@ class AutoTranslateWorker(QThread):
         from src.core.translators.base import TranslationRequest
         from src.core.text_segmenter import SegmentType, clean_text, reassemble
         from src.core.text_merger import TextMerger
+        from src.core.glossary import Glossary
+        from src.core.translation_quality import translation_issues
 
         source_lang: str = self.settings.get("source_lang", "auto")
         target_lang: str = self.settings.get("target_lang", "tr")
@@ -354,13 +357,20 @@ class AutoTranslateWorker(QThread):
             return
 
         translator = create_translator(self.settings)
+        glossary_path = self.settings.get("glossary_path", "")
+        glossary = Glossary(glossary_path) if self.settings.get("use_glossary") and glossary_path and os.path.isfile(glossary_path) else None
+        from src.core.translators.services import HyMT2Translator
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
         completed = 0
+        translated_count = 0
         last_id = 0
 
         try:
+            if isinstance(translator, HyMT2Translator):
+                loop.run_until_complete(translator.verify_connection())
+            started_at = time.monotonic()
             while not self._cancel:
                 batch = self.store.get_untranslated_batch(
                     last_id=last_id,
@@ -378,13 +388,16 @@ class AutoTranslateWorker(QThread):
                 # Segment each entry and package through TextMerger
                 segments_by_id: dict[int, list] = {}
                 pairs: list[tuple[int, str]] = []
-                merger = TextMerger(batch_size=15)
+                merger = TextMerger(batch_size=1 if isinstance(translator, HyMT2Translator) else 15)
 
                 clean_by_id: dict[int, str] = {}
+                terms_by_id: dict[int, dict] = {}
+                original_by_id: dict[int, str] = {}
 
                 for entry in batch:
                     orig: str = entry["original_text"]
-                    clean, segs = clean_text(orig)
+                    protected, term_map = glossary.protect_terms(orig) if glossary else (orig, {})
+                    clean, segs = clean_text(protected)
                     has_translatable_text = any(
                         any(c.isalnum() for c in s.content)
                         for s in segs if s.type == SegmentType.TEXT
@@ -395,6 +408,8 @@ class AutoTranslateWorker(QThread):
 
                     segments_by_id[entry["id"]] = segs
                     clean_by_id[entry["id"]] = clean
+                    terms_by_id[entry["id"]] = term_map
+                    original_by_id[entry["id"]] = orig
                     merger.add(
                         key=str(entry["id"]),
                         text=clean,
@@ -407,11 +422,36 @@ class AutoTranslateWorker(QThread):
                     except (ValueError, TypeError):
                         return
                     segs = segments_by_id.get(eid)
-                    pairs.append((eid, reassemble(translated, segs) if segs else translated))
+                    if any(token not in translated for token in terms_by_id.get(eid, {})):
+                        return
+                    restored = reassemble(translated, segs) if segs else translated
+                    if glossary:
+                        restored = glossary.restore_terms(restored, terms_by_id.get(eid, {}))
+                    if translation_issues(original_by_id[eid], restored):
+                        if eid not in retry_ids:
+                            retry_ids.append(eid)
+                        return
+                    pairs.append((eid, restored))
 
                 merged_requests = merger.get_requests()
                 retry_ids: list[int] = []
                 if merged_requests:
+                    batch_progress = 0
+
+                    def on_item_done(count: int = 1) -> None:
+                        nonlocal batch_progress
+                        batch_progress += count
+                        current = min(total_untranslated, completed + batch_progress)
+                        elapsed = max(time.monotonic() - started_at, 0.001)
+                        speed = current / elapsed
+                        eta = int((total_untranslated - current) / speed) if speed > 0 else 0
+                        minutes, seconds = divmod(eta, 60)
+                        pct = min(100, int(current / total_untranslated * 100))
+                        self.progress.emit(
+                            pct, 100,
+                            f"{current}/{total_untranslated} · {speed:.1f} metin/sn · kalan {minutes}dk {seconds}sn",
+                        )
+
                     req_objs = [
                         TranslationRequest(
                             text=req["text"],
@@ -421,7 +461,7 @@ class AutoTranslateWorker(QThread):
                         for req in merged_requests
                     ]
                     results = loop.run_until_complete(
-                        translator.translate_batch(req_objs)
+                        translator.translate_batch(req_objs, progress_callback=on_item_done)
                     )
 
                     for req, res in zip(merged_requests, results):
@@ -466,25 +506,26 @@ class AutoTranslateWorker(QThread):
 
                 if pairs:
                     self.store.bulk_apply_auto_translations(pairs)
+                    translated_count += len(pairs)
 
                 completed += len(batch)
                 pct = min(100, int(completed / max(total_untranslated, 1) * 100))
                 self.progress.emit(
                     pct, 100,
-                    f"{completed} / {total_untranslated} metin çevrildi…",
+                    f"{completed}/{total_untranslated} · {completed / max(time.monotonic() - started_at, 0.001):.1f} metin/sn",
                 )
 
         except Exception as exc:
-            self.finished.emit(completed, f"Otomatik çeviri hatası: {exc}")
+            self.finished.emit(translated_count, f"Otomatik çeviri hatası: {exc}")
             return
         finally:
             loop.run_until_complete(translator.close())
             loop.close()
 
         if self._cancel:
-            self.finished.emit(completed, f"İptal edildi. {completed} metin çevrildi.")
+            self.finished.emit(translated_count, f"İptal edildi. {translated_count} metin çevrildi.")
         else:
-            self.finished.emit(completed, f"Tamamlandı! {completed} metin başarıyla çevrildi.")
+            self.finished.emit(translated_count, f"Tamamlandı! {translated_count} metin başarıyla çevrildi.")
 
 
 class EditorBackend(QObject):
@@ -525,6 +566,7 @@ class EditorBackend(QObject):
         self._auto_translate_status: str = ""
 
         self._project_loaded: bool = False
+        self._scan_attempted: bool = False
         self._is_scanning: bool = False
         self._scan_progress_current: int = 0
         self._scan_progress_total: int = 100
@@ -571,6 +613,10 @@ class EditorBackend(QObject):
     @pyqtProperty(bool, notify=projectLoadedChanged)
     def projectLoaded(self) -> bool:
         return self._project_loaded
+
+    @pyqtProperty(bool, notify=projectLoadedChanged)
+    def scanAttempted(self) -> bool:
+        return self._scan_attempted
 
     @pyqtProperty(bool, notify=isScanningChanged)
     def isScanning(self) -> bool:
@@ -722,7 +768,7 @@ class EditorBackend(QObject):
 
     @pyqtSlot(str)
     def setProjectPath(self, path: str) -> None:
-        """Update active project path across the application and trigger rescan."""
+        """Select a folder in the editor and load it on this explicit action."""
         if not path:
             return
         cleaned = os.path.normpath(local_path_from_url(path))
@@ -737,6 +783,7 @@ class EditorBackend(QObject):
                 self.app_backend.setProjectPath(cleaned)
             elif hasattr(self.app_backend, "projectPath"):
                 self.app_backend.projectPath = cleaned
+            self.loadProject(force_rescan=False)
 
     @pyqtSlot()
     def closeStore(self) -> None:
@@ -764,6 +811,7 @@ class EditorBackend(QObject):
                 self._store = None
 
         self._project_loaded = False
+        self._scan_attempted = False
         self._table_model.set_rows([])
         self._set_selected_entry_dict({})
         self._total_project_count = 0
@@ -789,6 +837,9 @@ class EditorBackend(QObject):
 
         if self._is_scanning:
             return
+
+        self._scan_attempted = True
+        self.projectLoadedChanged.emit()
 
         project_id = get_project_id(project_path)
         db_dir = get_cache_dir(project_id)
@@ -1276,7 +1327,7 @@ class EditorBackend(QObject):
         raise ValueError(f"Unsupported extension for editor save: {file_ext}")
 
     def _on_project_path_changed(self, new_path: str = "") -> None:
-        """Reset or auto-load when user selects a different game folder."""
+        """Clear stale editor state when another tab changes the active folder."""
         if self._scan_worker and self._scan_worker.isRunning():
             try:
                 self._scan_worker.progress.disconnect()
@@ -1291,6 +1342,7 @@ class EditorBackend(QObject):
             self._store.close()
             self._store = None
         self._project_loaded = False
+        self._scan_attempted = False
         self._selected_entry = {}
         self._selected_entry_id = 0
         self._table_model.set_rows([])
@@ -1299,10 +1351,6 @@ class EditorBackend(QObject):
         self.projectLoadedChanged.emit()
         self.selectedEntryChanged.emit()
         self._refresh_stats()
-
-        target_path = new_path or getattr(self.app_backend, "projectPath", "")
-        if target_path and os.path.exists(target_path):
-            self.loadProject(force_rescan=False)
 
     def _on_pipeline_finished(self, success: bool, _summary: str) -> None:
         """When automatic translation pipeline finishes, refresh editor database."""

@@ -1,17 +1,19 @@
 import logging
+import json
 import os
 import shutil
 import sys
+import time
 import webbrowser
 from typing import Any, Dict
 
 from PyQt6.QtCore import QObject, QThread, Qt, QUrl, pyqtProperty, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QIcon
+from PyQt6.QtGui import QDesktopServices, QIcon
 from PyQt6.QtWidgets import QApplication, QFileDialog, QSystemTrayIcon, QStyle
 
 from src.core.enums import PipelineStage
 from src.core.translation_pipeline import TranslationPipeline
-from src.utils.app_paths import get_cache_dir
+from src.utils.app_paths import get_cache_dir, get_project_id
 from src.utils.paths import existing_resource_path, local_path_from_url
 from src.backend.settings_backend import SettingsBackend
 
@@ -35,6 +37,7 @@ class AppBackend(QObject):
     finished = pyqtSignal(bool, str)  # success, summary
     cacheAboutToBeCleared = pyqtSignal()
     cacheCleared = pyqtSignal()
+    qualityIssuesChanged = pyqtSignal()
 
     def __init__(self, settings_backend: SettingsBackend, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -48,10 +51,16 @@ class AppBackend(QObject):
         self._progress_current: int = 0
         self._progress_total: int = 0
         self._progress_text: str = "Ready"
+        self._progress_started_at: float | None = None
+        self._translation_speed: float = 0.0
+        self._remaining_seconds: int = -1
         self._stage_text: str = "Idle"
+        self._quality_issues: list[dict[str, str]] = []
+        self._retry_review_only = False
 
         self._project_path: str = str(self.settings_backend.projectPath or "")
         self._detected_engine, self._detected_engine_code = self._detect_engine_type(self._project_path)
+        self._load_quality_issues()
         self._tray_icon: QSystemTrayIcon | None = None
         self._init_tray()
 
@@ -110,6 +119,47 @@ class AppBackend(QObject):
     def progressText(self) -> str:
         return self._progress_text
 
+    @pyqtProperty(float, notify=progressChanged)
+    def translationSpeed(self) -> float:
+        return self._translation_speed
+
+    @pyqtProperty(int, notify=progressChanged)
+    def remainingSeconds(self) -> int:
+        return self._remaining_seconds
+
+    @pyqtProperty('QVariantList', notify=qualityIssuesChanged)
+    def qualityIssues(self) -> list[dict[str, str]]:
+        return self._quality_issues
+
+    def _quality_report_path(self) -> str:
+        custom_cache = self.settings_backend.get_dict().get("cache_dir")
+        if custom_cache:
+            return os.path.join(os.fspath(custom_cache), "quality_review.json")
+        project_id = get_project_id(self._project_path) if self._project_path else None
+        return os.fspath(get_cache_dir(project_id=project_id, target_lang=self.settings_backend.targetLang) / "quality_review.json")
+
+    def _load_quality_issues(self) -> None:
+        try:
+            with open(self._quality_report_path(), "r", encoding="utf-8") as file:
+                issues = json.load(file).get("issues", [])
+            self._quality_issues = issues if isinstance(issues, list) else []
+        except (OSError, ValueError, AttributeError):
+            self._quality_issues = []
+        self.qualityIssuesChanged.emit()
+
+    @pyqtSlot()
+    def openQualityReport(self) -> None:
+        path = self._quality_report_path()
+        if os.path.isfile(path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    @pyqtSlot()
+    def retryQualityIssues(self) -> None:
+        if self._is_running or not self._quality_issues:
+            return
+        self._retry_review_only = True
+        self.startPipeline()
+
     @pyqtProperty(str, notify=stageChanged)
     def stageText(self) -> str:
         return self._stage_text
@@ -124,6 +174,7 @@ class AppBackend(QObject):
             self._project_path = val
             self.settings_backend.projectPath = val
             self._detected_engine, self._detected_engine_code = self._detect_engine_type(val)
+            self._load_quality_issues()
             self.projectPathChanged.emit(val)
             self.detectedEngineChanged.emit(self._detected_engine)
             self.detectedEngineCodeChanged.emit(self._detected_engine_code)
@@ -309,8 +360,17 @@ class AppBackend(QObject):
 
         settings = self.settings_backend.get_dict()
         settings["project_path"] = self._project_path
+        settings["retry_review_only"] = self._retry_review_only
+        self._retry_review_only = False
 
         self._is_running = True
+        self._progress_current = 0
+        self._progress_total = 0
+        self._progress_text = "Preparing translation..."
+        self._progress_started_at = None
+        self._translation_speed = 0.0
+        self._remaining_seconds = -1
+        self.progressChanged.emit()
         self.isRunningChanged.emit()
 
         self._thread = QThread()
@@ -343,12 +403,25 @@ class AppBackend(QObject):
             self._stage_text = stage_val.value.capitalize()
         else:
             self._stage_text = str(stage_val).capitalize()
+        if self._stage_text.lower() == "translating" and self._progress_started_at is None:
+            self._progress_started_at = time.monotonic()
+        if _message and self._stage_text.lower() in ("validating", "parsing"):
+            self._progress_text = _message
+            self.progressChanged.emit()
         self.stageChanged.emit(self._stage_text)
 
     def _on_progress_updated(self, current: int, total: int, text: str) -> None:
         self._progress_current = current
         self._progress_total = total
         self._progress_text = text
+        if total > 0 and self._progress_started_at is not None and self._stage_text.lower() == "translating":
+            elapsed = max(time.monotonic() - self._progress_started_at, 0.001)
+            self._translation_speed = current / elapsed
+            self._remaining_seconds = (
+                0 if current >= total else
+                int((total - current) / self._translation_speed)
+                if self._translation_speed > 0 else -1
+            )
         self.progressChanged.emit()
 
     def _on_log_message(self, level: str, msg: str) -> None:
@@ -405,6 +478,7 @@ class AppBackend(QObject):
     def _on_pipeline_finished(self, success: bool, summary: str) -> None:
         self._is_running = False
         self.isRunningChanged.emit()
+        self._load_quality_issues()
 
         title = "Translation Completed" if success else "Translation Failed"
         message = summary or ("Project successfully translated." if success else "An error occurred during translation.")

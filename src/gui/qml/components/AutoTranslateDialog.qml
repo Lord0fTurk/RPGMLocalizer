@@ -135,7 +135,8 @@ Popup {
         { id: "deepl",      name: localeManager.strings.auto_translate.engine_names.deepl },
         { id: "openai",     name: localeManager.strings.auto_translate.engine_names.openai },
         { id: "deepseek",   name: localeManager.strings.auto_translate.engine_names.deepseek },
-        { id: "local_llm",  name: localeManager.strings.auto_translate.engine_names.local_llm }
+        { id: "local_llm",  name: localeManager.strings.auto_translate.engine_names.local_llm },
+        { id: "hy_mt2",    name: "Hy-MT2 (Local)" }
     ]
 
     readonly property var geminiSafetyOptions: [
@@ -555,7 +556,7 @@ Popup {
                 // 6. Local LLM Settings
                 ColumnLayout {
                     Layout.fillWidth: true; spacing: 4
-                    visible: engineCombo.currentIndex === 5 // Local LLM
+                    visible: engineCombo.currentIndex === 5 || engineCombo.currentIndex === 6
                     Text {
                         text: localeManager.strings.auto_translate.local_llm_note
                         font.pixelSize: 11

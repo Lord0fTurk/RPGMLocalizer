@@ -5,6 +5,7 @@ Translation Manager and Engine Factory
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, Optional
 
 from .base import BaseTranslator, TranslationEngine
@@ -14,6 +15,7 @@ from .services import (
     DeepSeekTranslator,
     LibreTranslateTranslator,
     LocalLLMTranslator,
+    HyMT2Translator,
     OpenAICompatibleTranslator,
     PseudoTranslator,
 )
@@ -133,7 +135,24 @@ def _build_local_llm_translator(
 ) -> LocalLLMTranslator:
     api_key = str(settings.get("local_llm_api_key", "") or settings.get("api_key", ""))
     model = str(settings.get("local_llm_model", "") or settings.get("local_model", "llama3"))
-    base_url = str(settings.get("local_llm_base_url", "") or settings.get("local_base_url", "http://localhost:11434/v1"))
+    base_url = str(
+        settings.get("local_llm_url")
+        or settings.get("local_llm_base_url")
+        or settings.get("local_base_url")
+        or "http://localhost:11434/v1"
+    )
+    if re.search(r"hy[-_ ]?mt2", model, re.IGNORECASE):
+        logger.info("Hy-MT2 model selected in Local LLM settings; using Hy-MT2 translator")
+        return HyMT2Translator(
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            style=str(settings.get("hy_mt2_style") or ""),
+            concurrency=max(1, min(8, int(settings.get("hy_mt2_workers", concurrency)))),
+            batch_size=max(1, min(100, batch_size)),
+            timeout_seconds=max(180, int(settings.get("request_timeout", timeout))),
+            max_retries=max(2, int(settings.get("max_retries", 3))),
+        )
     return LocalLLMTranslator(
         model=model,
         base_url=base_url,
@@ -141,6 +160,19 @@ def _build_local_llm_translator(
         concurrency=concurrency,
         batch_size=batch_size,
         timeout_seconds=timeout,
+    )
+
+
+def _build_hy_mt2_translator(settings: Dict[str, Any]) -> HyMT2Translator:
+    return HyMT2Translator(
+        model=str(settings.get("hy_mt2_model") or ""),
+        base_url=str(settings.get("hy_mt2_url") or "http://127.0.0.1:1234/v1"),
+        api_key=str(settings.get("hy_mt2_api_key") or ""),
+        style=str(settings.get("hy_mt2_style") or ""),
+        concurrency=max(1, min(8, int(settings.get("hy_mt2_workers", 2)))),
+        batch_size=max(1, min(100, int(settings.get("batch_size", 15)))),
+        timeout_seconds=max(180, int(settings.get("request_timeout", 180))),
+        max_retries=max(2, int(settings.get("max_retries", 3))),
     )
 
 
@@ -166,6 +198,8 @@ def create_translator(settings: Dict[str, Any]) -> BaseTranslator:
             return _build_gemini_translator(settings, concurrency, batch_size, timeout)
         case "local_llm" | "ollama" | "local" | "lmstudio":
             return _build_local_llm_translator(settings, concurrency, batch_size, timeout)
+        case "hy_mt2":
+            return _build_hy_mt2_translator(settings)
         case _:
             return _build_google_translator(settings, concurrency, batch_size, timeout, engine_name)
 

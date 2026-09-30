@@ -1,7 +1,8 @@
 import json
 import logging
 from typing import Any, Dict, List
-from PyQt6.QtCore import QObject, pyqtProperty, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QObject, QUrl, pyqtProperty, pyqtSignal, pyqtSlot
+from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
 from src.utils.settings_store import SettingsStore
 
@@ -10,6 +11,7 @@ class SettingsBackend(QObject):
     """QObject backend bridge for managing application settings in QML."""
 
     settingsChanged = pyqtSignal()
+    hyMt2ModelsChanged = pyqtSignal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -57,12 +59,19 @@ class SettingsBackend(QObject):
             "gemini_safety_settings": "BLOCK_NONE",
             "local_llm_url": "http://localhost:11434/v1",
             "local_llm_model": "llama3",
+            "hy_mt2_url": "http://127.0.0.1:1234/v1",
+            "hy_mt2_model": "",
+            "hy_mt2_workers": 2,
+            "hy_mt2_style": "",
             "deepl_api_key": "",
             "libretranslate_url": "http://localhost:5000",
             "libretranslate_api_key": "",
             "project_path": "",
             "ui_language": "",
         }
+        self._hy_mt2_models: list[str] = []
+        self._hy_mt2_model_status = ""
+        self._hy_mt2_network = QNetworkAccessManager(self)
         self.load()
 
     @pyqtSlot()
@@ -295,7 +304,7 @@ class SettingsBackend(QObject):
 
     @batchSize.setter
     def batchSize(self, val: int) -> None:
-        self._set("batch_size", val)
+        self._set("batch_size", max(1, min(100, int(val))))
 
     @pyqtProperty(int, notify=settingsChanged)
     def concurrentRequests(self) -> int:
@@ -418,6 +427,87 @@ class SettingsBackend(QObject):
     @localLlmModel.setter
     def localLlmModel(self, val: str) -> None:
         self._set("local_llm_model", val)
+
+    @pyqtProperty(str, notify=settingsChanged)
+    def hyMt2Url(self) -> str:
+        return str(self._get("hy_mt2_url", "http://127.0.0.1:1234/v1"))
+
+    @hyMt2Url.setter
+    def hyMt2Url(self, val: str) -> None:
+        self._set("hy_mt2_url", val)
+        self.refreshHyMt2Models()
+
+    @pyqtProperty(str, notify=settingsChanged)
+    def hyMt2Model(self) -> str:
+        return str(self._get("hy_mt2_model", ""))
+
+    @hyMt2Model.setter
+    def hyMt2Model(self, val: str) -> None:
+        self._set("hy_mt2_model", val)
+
+    @pyqtProperty(int, notify=settingsChanged)
+    def hyMt2Workers(self) -> int:
+        return max(1, min(8, int(self._get("hy_mt2_workers", 2))))
+
+    @hyMt2Workers.setter
+    def hyMt2Workers(self, val: int) -> None:
+        self._set("hy_mt2_workers", max(1, min(8, int(val))))
+
+    @pyqtProperty(str, notify=settingsChanged)
+    def hyMt2Style(self) -> str:
+        return str(self._get("hy_mt2_style", ""))
+
+    @hyMt2Style.setter
+    def hyMt2Style(self, val: str) -> None:
+        self._set("hy_mt2_style", val.strip())
+
+    @pyqtProperty(list, notify=hyMt2ModelsChanged)
+    def hyMt2Models(self) -> list[str]:
+        return self._hy_mt2_models
+
+    @pyqtProperty(str, notify=hyMt2ModelsChanged)
+    def hyMt2ModelStatus(self) -> str:
+        return self._hy_mt2_model_status
+
+    @pyqtSlot()
+    def refreshHyMt2Models(self) -> None:
+        """Read model IDs from the configured local OpenAI-compatible server."""
+        url = QUrl(self.hyMt2Url.rstrip("/") + "/models")
+        if url.scheme() not in ("http", "https") or not url.host():
+            self._hy_mt2_models = []
+            self._hy_mt2_model_status = "Invalid server URL"
+            self.hyMt2ModelsChanged.emit()
+            return
+        self._hy_mt2_model_status = "Loading models..."
+        self.hyMt2ModelsChanged.emit()
+        request = QNetworkRequest(url)
+        reply = self._hy_mt2_network.get(request)
+        reply.finished.connect(lambda: self._on_hy_mt2_models_reply(reply))
+
+    def _on_hy_mt2_models_reply(self, reply: QNetworkReply) -> None:
+        if reply.request().url() != QUrl(self.hyMt2Url.rstrip("/") + "/models"):
+            reply.deleteLater()
+            return
+        if reply.error() != QNetworkReply.NetworkError.NoError:
+            self._hy_mt2_models = []
+            self._hy_mt2_model_status = reply.errorString()
+        else:
+            try:
+                data = json.loads(bytes(reply.readAll()))
+                self._hy_mt2_models = [
+                    item["id"] for item in data.get("data", [])
+                    if isinstance(item, dict) and isinstance(item.get("id"), str)
+                ]
+                self._hy_mt2_model_status = f"{len(self._hy_mt2_models)} models available"
+                if self.hyMt2Model and self.hyMt2Model not in self._hy_mt2_models:
+                    self.hyMt2Model = ""
+                if len(self._hy_mt2_models) == 1 and not self.hyMt2Model:
+                    self.hyMt2Model = self._hy_mt2_models[0]
+            except (ValueError, TypeError, AttributeError, KeyError):
+                self._hy_mt2_models = []
+                self._hy_mt2_model_status = "Invalid model list response"
+        reply.deleteLater()
+        self.hyMt2ModelsChanged.emit()
 
     @pyqtProperty(str, notify=settingsChanged)
     def deeplApiKey(self) -> str:

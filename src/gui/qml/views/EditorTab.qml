@@ -29,13 +29,6 @@ Item {
         return animDotCount === 1 ? "." : (animDotCount === 2 ? ".." : (animDotCount === 3 ? "..." : ""))
     }
 
-    // Initialize/scan on visit if project is selected and editor not yet loaded
-    Component.onCompleted: {
-        if (appBackend.projectPath && !editorBackend.projectLoaded && !editorBackend.isScanning) {
-            editorBackend.scanOrLoadProject()
-        }
-    }
-
     function selectRow(entryId) {
         if (editorBackend.selectedEntry && editorBackend.selectedEntry.id && typeof transTextArea !== "undefined" && transTextArea.text !== (editorBackend.selectedEntry.translated_text || "")) {
             editorBackend.updateSelectedTranslation(transTextArea.text)
@@ -166,10 +159,10 @@ Item {
 
             // Rescan Button
             TactileButton {
-                label: localeManager.strings.editor.rescan_button
+                label: editorBackend.scanAttempted ? localeManager.strings.editor.rescan_button : (localeManager.strings.editor.load_project_button || "Projeyi Yükle")
                 variant: "ghost"
                 enabled_: !editorBackend.isScanning && !appBackend.isRunning && !editorBackend.isAutoTranslating && editorBackend.projectPath.length > 0
-                onClicked: editorBackend.loadProject(true)
+                onClicked: editorBackend.loadProject(editorBackend.scanAttempted)
             }
 
             // Auto Translate All button
@@ -640,8 +633,10 @@ Item {
                             Layout.alignment: Qt.AlignHCenter
                             text: !editorBackend.projectPath
                                 ? "📂"
+                                : editorBackend.isScanning
+                                    ? "🔄"
                                 : (!editorBackend.projectLoaded
-                                    ? "⚠️"
+                                    ? (editorBackend.scanAttempted ? "⚠️" : "📂")
                                     : (editorBackend.totalProjectCount === 0 ? "⚠️" : "🔍"))
                             font.pixelSize: 36
                         }
@@ -656,9 +651,14 @@ Item {
                             color: t ? t.textPrimary : "#ffffff"
                             text: !editorBackend.projectPath
                                 ? localeManager.strings.editor.empty_no_folder_title
-                                : (!editorBackend.projectLoaded || editorBackend.totalProjectCount === 0
+                                : editorBackend.isScanning
+                                    ? localeManager.strings.editor.status_scanning
+                                : (!editorBackend.projectLoaded && !editorBackend.scanAttempted
+                                    ? (localeManager.strings.editor.empty_not_loaded_title || "Project not loaded")
+                                    : (!editorBackend.projectLoaded || editorBackend.totalProjectCount === 0
                                     ? localeManager.strings.editor.empty_no_data_title
                                     : localeManager.strings.editor.empty_no_match_title)
+                                    )
                         }
 
                         Text {
@@ -670,21 +670,32 @@ Item {
                             color: t ? t.textMuted : "#777790"
                             text: !editorBackend.projectPath
                                 ? localeManager.strings.editor.empty_no_folder_desc
-                                : (!editorBackend.projectLoaded || editorBackend.totalProjectCount === 0
+                                : editorBackend.isScanning
+                                    ? editorBackend.scanProgressText
+                                : (!editorBackend.projectLoaded && !editorBackend.scanAttempted
+                                    ? (localeManager.strings.editor.empty_not_loaded_desc || "Use Load Project to scan the selected folder.")
+                                    : (!editorBackend.projectLoaded || editorBackend.totalProjectCount === 0
                                     ? I18n.format(localeManager.strings.editor.empty_no_data_desc, {path: editorBackend.projectPath})
                                     : localeManager.strings.editor.empty_no_match_desc)
+                                    )
                         }
 
                         Item { height: 4 }
 
                         TactileButton {
                             Layout.alignment: Qt.AlignHCenter
-                            label: (!editorBackend.projectLoaded || editorBackend.totalProjectCount === 0)
+                            visible: !editorBackend.isScanning
+                            label: (!editorBackend.projectLoaded && editorBackend.projectPath && !editorBackend.scanAttempted)
+                                ? (localeManager.strings.editor.load_project_button || "Projeyi Yükle")
+                                : ((!editorBackend.projectLoaded || editorBackend.totalProjectCount === 0)
                                 ? localeManager.strings.editor.select_game_folder_button
                                 : localeManager.strings.editor.clear_filters_button
+                                )
                             variant: "accent"
                             onClicked: {
-                                if (!editorBackend.projectLoaded || editorBackend.totalProjectCount === 0) {
+                                if (!editorBackend.projectLoaded && editorBackend.projectPath && !editorBackend.scanAttempted) {
+                                    editorBackend.loadProject(false)
+                                } else if (!editorBackend.projectLoaded || editorBackend.totalProjectCount === 0) {
                                     editorBackend.selectGameFolder()
                                 } else {
                                     if (typeof searchInput !== "undefined") {

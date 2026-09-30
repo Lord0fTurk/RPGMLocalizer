@@ -2,6 +2,10 @@ import os
 import sys
 import threading
 
+if len(sys.argv) > 1 and sys.argv[1] == "--js-ast-worker":
+    from src.core.parsers.js_ast_worker import main as run_js_ast_worker
+    raise SystemExit(run_js_ast_worker())
+
 from src.utils.paths import existing_resource_path
 from src.utils.qt_bootstrap import (
     apply_qt_application_attributes,

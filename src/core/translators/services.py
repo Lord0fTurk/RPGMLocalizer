@@ -150,17 +150,28 @@ class SegmentBatchTranslator(BaseTranslator):
                     source_lang=src,
                     target_lang=tgt,
                     success=success,
+                    error=None if success else "Translation server returned no valid text; check server logs and model selection",
                     metadata=req.get("metadata", {}),
                 )
 
     async def translate_batch(
         self,
-        requests: List[Dict[str, Any]],
+        requests: List[Dict[str, Any] | TranslationRequest],
         progress_callback: Optional[Any] = None,
     ) -> List[TranslationResult]:
         """Translate requests via LLM with segment protection and deduplication."""
         if not requests:
             return []
+
+        requests = [
+            {
+                "text": req.text,
+                "source_lang": req.source_lang,
+                "target_lang": req.target_lang,
+                "metadata": req.metadata,
+            } if isinstance(req, TranslationRequest) else req
+            for req in requests
+        ]
 
         results: List[Optional[TranslationResult]] = [None] * len(requests)
         unique_map: Dict[str, List[int]] = {}
@@ -170,19 +181,34 @@ class SegmentBatchTranslator(BaseTranslator):
         cleaned_info = [(txt, *segmenter_clean(txt)) for txt in unique_map.keys()]
         needs_indices = self._populate_code_only(cleaned_info, unique_map, requests, results)
 
+        live_progress = isinstance(self, HyMT2Translator)
+        if live_progress:
+            for orig, clean, _ in cleaned_info:
+                if not clean.strip():
+                    BaseTranslator.notify_progress(progress_callback, len(unique_map[orig]))
+
         if needs_indices:
             clean_batch = [cleaned_info[idx][1] for idx in needs_indices]
+            if live_progress:
+                self._group_progress_callback = lambda index: BaseTranslator.notify_progress(
+                    progress_callback, len(unique_map[cleaned_info[needs_indices[index]][0]])
+                )
             req0 = requests[unique_map[cleaned_info[needs_indices[0]][0]][0]]
             meta0 = req0.get("metadata", {})
             src = req0.get("source_lang") or meta0.get("source_lang") or "auto"
             tgt = req0.get("target_lang") or meta0.get("target_lang") or "en"
 
-            translated_clean = await self._translate_with_retry_and_fallback(clean_batch, src, tgt)
-            self._populate_translated_results(
-                needs_indices, cleaned_info, translated_clean, unique_map, requests, src, tgt, results
-            )
+            try:
+                translated_clean = await self._translate_with_retry_and_fallback(clean_batch, src, tgt)
+                self._populate_translated_results(
+                    needs_indices, cleaned_info, translated_clean, unique_map, requests, src, tgt, results
+                )
+            finally:
+                if live_progress:
+                    self._group_progress_callback = None
 
-        BaseTranslator.notify_progress(progress_callback, len(results))
+        if not live_progress:
+            BaseTranslator.notify_progress(progress_callback, len(results))
 
         return [r for r in results if r is not None]
 
@@ -327,6 +353,213 @@ class LocalLLMTranslator(OpenAICompatibleTranslator):
         **kwargs: Any,
     ) -> None:
         super().__init__(api_key=api_key, model=model, base_url=base_url, **kwargs)
+
+
+HY_MT2_LANGUAGES: Dict[str, str] = {
+    "zh": "Chinese", "zh-Hant": "Traditional Chinese", "zh-TW": "Traditional Chinese",
+    "en": "English", "fr": "French", "pt": "Portuguese", "es": "Spanish",
+    "ja": "Japanese", "tr": "Turkish", "ru": "Russian", "ar": "Arabic",
+    "ko": "Korean", "th": "Thai", "it": "Italian", "de": "German",
+    "vi": "Vietnamese", "ms": "Malay", "id": "Indonesian", "fil": "Filipino",
+    "tl": "Filipino", "hi": "Hindi", "pl": "Polish", "cs": "Czech",
+    "nl": "Dutch", "km": "Khmer", "my": "Burmese", "fa": "Persian",
+    "gu": "Gujarati", "ur": "Urdu", "te": "Telugu", "mr": "Marathi",
+    "he": "Hebrew", "bn": "Bengali", "ta": "Tamil", "uk": "Ukrainian",
+    "bo": "Tibetan", "kk": "Kazakh", "mn": "Mongolian", "ug": "Uyghur",
+    "yue": "Cantonese",
+}
+
+
+class HyMT2Translator(LocalLLMTranslator):
+    """Hy-MT2 via a local OpenAI-compatible llama.cpp, Ollama, or LM Studio server."""
+
+    def __init__(
+        self,
+        model: str = "",
+        base_url: str = "http://127.0.0.1:1234/v1",
+        api_key: str = "",
+        style: str = "",
+        **kwargs: Any,
+    ) -> None:
+        kwargs.setdefault("timeout_seconds", 180)
+        super().__init__(model=model, base_url=base_url, api_key=api_key, **kwargs)
+        self._engine = TranslationEngine.HY_MT2
+        self._resolved_model: Optional[str] = model or None
+        self._group_progress_callback: Optional[Any] = None
+        self.style = style.strip()
+
+    async def _translate_with_retry_and_fallback(
+        self, clean_batch: List[str], src: str, tgt: str
+    ) -> Optional[List[Optional[str]]]:
+        # Each worker retries its own request. A whole-batch retry would count
+        # completed entries twice and resend successful translations.
+        return await self._translate_clean_texts(clean_batch, src, tgt)
+
+    async def verify_connection(self) -> None:
+        """Fail before a game run when the server or selected model is unavailable."""
+        try:
+            session = await self._get_session()
+            async with session.get(
+                self.base_url.rstrip("/") + "/models",
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    raise RuntimeError(f"Local model server returned HTTP {resp.status} for /models")
+                data = await resp.json(content_type=None)
+                models = [
+                    item["id"] for item in data.get("data", [])
+                    if isinstance(item, dict) and isinstance(item.get("id"), str)
+                ]
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, AttributeError, TypeError) as exc:
+            raise RuntimeError(f"Cannot connect to local model server at {self.base_url}: {exc}") from exc
+        if self._resolved_model:
+            if self._resolved_model not in models:
+                raise RuntimeError(f"Selected model '{self._resolved_model}' is unavailable at {self.base_url}")
+        elif len(models) == 1:
+            self._resolved_model = models[0]
+        else:
+            raise RuntimeError(f"Select a model from the local server ({len(models)} available)")
+
+    async def _get_model_id(self) -> Optional[str]:
+        if self._resolved_model:
+            return self._resolved_model
+        try:
+            session = await self._get_session()
+            async with session.get(
+                self.base_url.rstrip("/") + "/models",
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    logger.error("Could not list local models: HTTP %s", resp.status)
+                    return None
+                data = await resp.json(content_type=None)
+                ids = [item.get("id") for item in data.get("data", []) if isinstance(item, dict)]
+                ids = [item for item in ids if isinstance(item, str)]
+                if len(ids) == 1:
+                    self._resolved_model = ids[0]
+                    logger.info("Using local model: %s", ids[0])
+                    return ids[0]
+                logger.error("Found %s local models; select one from the server model list", len(ids))
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+            logger.error("Cannot connect to local model list: %s", exc)
+        return None
+
+    async def _translate_clean_texts(
+        self,
+        clean_texts: List[str],
+        source_lang: str,
+        target_lang: str,
+    ) -> List[Optional[str]]:
+        if not clean_texts:
+            return []
+        model_id = await self._get_model_id()
+        if not model_id:
+            return [None] * len(clean_texts)
+        target_name = HY_MT2_LANGUAGES.get(target_lang)
+        if target_name is None:
+            logger.error("Hy-MT2 does not support target language %s", target_lang)
+            return [None] * len(clean_texts)
+
+        # Official Hy-MT2 prompts use the full language name and no system role.
+        # Translate segments independently so one malformed answer cannot shift a batch.
+        is_moe = "30b-a3b" in model_id.lower()
+        sampling = {
+            "temperature": 0.7,
+            "top_p": 1.0 if is_moe else 0.6,
+            "top_k": -1 if is_moe else 20,
+            "repeat_penalty": 1.0 if is_moe else 1.05,
+            "max_tokens": 4096,
+        }
+        semaphore = asyncio.Semaphore(max(1, min(self.concurrency, 8)))
+
+        async def translate_one(text: str) -> Optional[str]:
+            if not re.search(r"\w", text, re.UNICODE):
+                return text
+            async with semaphore:
+                instruction = (
+                    f"Translate the following text into {target_name}. "
+                    "Note that you should only output the translated result without any additional explanation:"
+                )
+                if self.style:
+                    instruction = (
+                        f"Please translate the following text into {target_name}. "
+                        f"The translation style must strictly conform to [{self.style}]. "
+                        "Only output the translated result without any additional explanation:"
+                    )
+                payload: Dict[str, Any] = {
+                    "model": model_id,
+                    "messages": [{"role": "user", "content": instruction + "\n" + text}],
+                    **sampling,
+                }
+                headers = {"Content-Type": "application/json"}
+                if self.api_key:
+                    headers["Authorization"] = f"Bearer {self.api_key}"
+                for attempt in range(max(1, self.max_retries)):
+                    try:
+                        session = await self._get_session()
+                        async with session.post(
+                            self.endpoint, json=payload, headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=self.timeout_seconds),
+                        ) as resp:
+                            if resp.status == 400 and "top_k" in payload:
+                                # Some OpenAI-compatible servers reject llama.cpp sampling extensions.
+                                payload.pop("top_k")
+                                payload.pop("repeat_penalty")
+                                continue
+                            if resp.status == 200:
+                                data = await resp.json(content_type=None)
+                                choices = data.get("choices", [])
+                                translated = (choices[0].get("message", {}).get("content") or "").strip() if choices else ""
+                                if translated:
+                                    return translated
+                                logger.warning("Hy-MT2 returned an empty result")
+                                return None
+                            logger.warning("Hy-MT2 server returned HTTP %s", resp.status)
+                            if resp.status not in (429, 500, 502, 503, 504):
+                                return None
+                    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                        logger.warning("Hy-MT2 server request failed: %s", exc)
+                    if attempt + 1 < self.max_retries:
+                        await asyncio.sleep(min(2 ** attempt, 8))
+                return None
+
+        translated_groups: List[Optional[str]] = []
+        for start in range(0, len(clean_texts), max(1, min(self.batch_size, 100))):
+            chunk = clean_texts[start:start + self.batch_size]
+            # The model may rewrite the pipeline separator. Never expose it to inference.
+            parts_by_group = [text.split("|||TXTSEG|||") for text in chunk]
+            results_by_group: List[List[Optional[str]]] = [
+                [None] * len(parts) for parts in parts_by_group
+            ]
+            remaining_parts = [len(parts) for parts in parts_by_group]
+            queue: asyncio.Queue[Tuple[int, int, str]] = asyncio.Queue()
+            for group_index, parts in enumerate(parts_by_group):
+                for part_index, part in enumerate(parts):
+                    queue.put_nowait((group_index, part_index, part))
+
+            async def worker() -> None:
+                while not queue.empty():
+                    try:
+                        group_index, part_index, part = queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    try:
+                        results_by_group[group_index][part_index] = await translate_one(part)
+                    finally:
+                        remaining_parts[group_index] -= 1
+                        if remaining_parts[group_index] == 0 and self._group_progress_callback:
+                            self._group_progress_callback(start + group_index)
+                        queue.task_done()
+
+            await asyncio.gather(*(
+                worker() for _ in range(min(max(1, self.concurrency), 8, queue.qsize()))
+            ))
+            for parts in results_by_group:
+                translated_groups.append(
+                    None if any(part is None for part in parts)
+                    else "|||TXTSEG|||".join(part for part in parts if part is not None)
+                )
+        return translated_groups
 
 
 class PseudoTranslator(BaseTranslator):

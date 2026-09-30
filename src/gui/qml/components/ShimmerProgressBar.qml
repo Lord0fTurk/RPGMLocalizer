@@ -8,6 +8,7 @@ Item {
     property real value: 0.0     // 0.0 to 1.0
     property string statusText: ""
     property bool isIndeterminate: false
+    property bool showLoadingLight: false
 
     implicitHeight: col.implicitHeight
     Layout.fillWidth: true
@@ -48,6 +49,7 @@ Item {
             // Active fill bar
             Rectangle {
                 id: fillBar
+                visible: !root.isIndeterminate
                 anchors.left: parent.left
                 anchors.top: parent.top
                 anchors.bottom: parent.bottom
@@ -80,11 +82,34 @@ Item {
 
                     NumberAnimation on x {
                         from: -60
-                        to: track.width
+                        to: fillBar.width
                         duration: 1400
                         loops: Animation.Infinite
-                        running: root.value > 0.0 && root.value < 1.0 || root.isIndeterminate
+                        running: !root.isIndeterminate && root.value > 0.0 && root.value < 1.0
                     }
+                }
+            }
+
+            // Small light that travels across the full track while progress is unknown.
+            Rectangle {
+                id: loadingLight
+                visible: root.isIndeterminate || root.showLoadingLight
+                width: Math.min(64, Math.max(30, track.width * 0.14))
+                height: track.height
+                radius: track.radius
+                gradient: Gradient {
+                    orientation: Gradient.Horizontal
+                    GradientStop { position: 0.0; color: "transparent" }
+                    GradientStop { position: 0.35; color: root.themeObj ? root.themeObj.accent : "#7c6cf8" }
+                    GradientStop { position: 0.65; color: "#ffffff" }
+                    GradientStop { position: 1.0; color: "transparent" }
+                }
+                NumberAnimation on x {
+                    from: -loadingLight.width
+                    to: track.width
+                    duration: 1350
+                    loops: Animation.Infinite
+                    running: root.isIndeterminate || root.showLoadingLight
                 }
             }
         }

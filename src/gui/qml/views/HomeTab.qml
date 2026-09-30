@@ -10,6 +10,16 @@ Item {
     property var themeObj: null
     property var t: themeObj
 
+    function formatRemaining(seconds) {
+        if (seconds < 0) return "—"
+        var hours = Math.floor(seconds / 3600)
+        var minutes = Math.floor((seconds % 3600) / 60)
+        var secs = seconds % 60
+        if (hours > 0) return hours + "h " + minutes + "m"
+        if (minutes > 0) return minutes + "m " + secs + "s"
+        return secs + "s"
+    }
+
     // =========================================================
     // REUSABLE COMPONENTS
     // =========================================================
@@ -453,6 +463,7 @@ Item {
                         { id: "deepseek",       name: "DeepSeek",           icon: "🐳", desc: localeManager.strings.home.engine_desc_deepseek },
                         { id: "gemini",         name: "Google Gemini",      icon: "✨", desc: localeManager.strings.home.engine_desc_gemini },
                         { id: "local_llm",      name: "Local LLM (Ollama)", icon: "🦙", desc: localeManager.strings.home.engine_desc_local_llm },
+                        { id: "hy_mt2",         name: "Hy-MT2 (Local)",     icon: "🈯", desc: localeManager.strings.home.engine_desc_local_llm },
                         { id: "libretranslate", name: "LibreTranslate",     icon: "🔓", desc: localeManager.strings.home.engine_desc_libretranslate },
                     ]
                     property var engineIds: engineDefs.map(function(e) { return e.id })
@@ -714,6 +725,58 @@ Item {
                             ColumnLayout {
                                 Layout.fillWidth: true
                                 spacing: 10
+                                visible: settingsBackend.engine === "hy_mt2"
+                                Component.onCompleted: settingsBackend.refreshHyMt2Models()
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: t ? t.spaceMD : 12
+                                    InputField {
+                                        label: localeManager.strings.home.local_llm_base_url_label
+                                        text: settingsBackend.hyMt2Url
+                                        placeholder: "http://127.0.0.1:1234/v1"
+                                        onEditingFinished: (newText) => { settingsBackend.hyMt2Url = newText }
+                                    }
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 10
+                                    StyledCombo {
+                                        Layout.fillWidth: true
+                                        model: [localeManager.strings.home.model_name_label].concat(settingsBackend.hyMt2Models)
+                                        currentIndex: settingsBackend.hyMt2Models.indexOf(settingsBackend.hyMt2Model) + 1
+                                        onActivated: (index) => { settingsBackend.hyMt2Model = index > 0 ? settingsBackend.hyMt2Models[index - 1] : "" }
+                                    }
+                                    Button { text: "↻"; onClicked: settingsBackend.refreshHyMt2Models() }
+                                    Text { text: settingsBackend.hyMt2ModelStatus; color: t ? t.textSecondary : "#9090b8"; font.pixelSize: 11 }
+                                }
+                                RowLayout {
+                                    spacing: 10
+                                    Text { text: "Workers (1–8)"; color: t ? t.textPrimary : "#f0f0ff" }
+                                    Slider {
+                                        from: 1; to: 8; stepSize: 1
+                                        value: settingsBackend.hyMt2Workers
+                                        onMoved: settingsBackend.hyMt2Workers = Math.round(value)
+                                    }
+                                    Text { text: settingsBackend.hyMt2Workers; color: t ? t.accentLight : "#a89bf9" }
+                                }
+                                InputField {
+                                    label: localeManager.strings.home.hy_style_label || "Translation style"
+                                    text: settingsBackend.hyMt2Style
+                                    placeholder: localeManager.strings.home.hy_style_placeholder || "Natural fantasy RPG dialogue"
+                                    onEditingFinished: (newText) => { settingsBackend.hyMt2Style = newText }
+                                }
+                                Text {
+                                    text: localeManager.strings.home.hy_glossary_hint || "Manage terms in Data > Glossary"
+                                    color: t ? t.textSecondary : "#9090b8"
+                                    font.pixelSize: 11
+                                }
+                            }
+
+                            // Local LLM Settings
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 10
                                 visible: settingsBackend.engine === "local_llm"
 
                                 RowLayout {
@@ -829,7 +892,7 @@ Item {
                 // --- PROGRESS CARD ---
                 AppCard {
                     Layout.fillWidth: true
-                    implicitHeight: appBackend.isRunning || appBackend.progressTotal > 0 ? 110 : 76
+                    implicitHeight: appBackend.isRunning || appBackend.progressTotal > 0 ? 132 : 76
                     Behavior on implicitHeight { NumberAnimation { duration: 200; easing.type: Easing.OutQuad } }
 
                     ColumnLayout {
@@ -858,8 +921,30 @@ Item {
                         ShimmerProgressBar {
                             themeObj: t
                             visible: appBackend.isRunning || appBackend.progressTotal > 0
+                            isIndeterminate: appBackend.isRunning && appBackend.progressTotal === 0
+                            showLoadingLight: appBackend.isRunning && (appBackend.stageText.toLowerCase() === "validating" || appBackend.stageText.toLowerCase() === "parsing")
                             value: appBackend.progressTotal > 0 ? (appBackend.progressCurrent / appBackend.progressTotal) : 0.0
-                            statusText: appBackend.progressText
+                            statusText: appBackend.isRunning && appBackend.progressTotal === 0
+                                ? (localeManager.strings.home.preparing_translation || "Preparing translation...")
+                                : (appBackend.isRunning && appBackend.stageText.toLowerCase() === "parsing"
+                                    ? (localeManager.strings.home.parsing_files || "Parsing files") + "... " + appBackend.progressCurrent + "/" + appBackend.progressTotal
+                                    : appBackend.progressText)
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            visible: appBackend.isRunning && appBackend.progressTotal > 0 && appBackend.stageText.toLowerCase() === "translating"
+                            Text {
+                                text: (localeManager.strings.home.progress_speed || "Speed") + ": " + appBackend.translationSpeed.toFixed(1) + " " + (localeManager.strings.home.progress_items_per_second || "texts/s")
+                                font.pixelSize: 11
+                                color: t ? t.textSecondary : "#9090b8"
+                            }
+                            Item { Layout.fillWidth: true }
+                            Text {
+                                text: (localeManager.strings.home.progress_remaining || "Time remaining") + ": " + root.formatRemaining(appBackend.remainingSeconds)
+                                font.pixelSize: 11
+                                color: t ? t.textSecondary : "#9090b8"
+                            }
                         }
 
                         // Compact idle message
@@ -871,6 +956,45 @@ Item {
                                 text: appBackend.projectPath ? (appBackend.detectedEngine.length > 0 ? (appBackend.detectedEngine + " — " + appBackend.progressText) : appBackend.progressText) : localeManager.strings.home.drop_zone_title
                                 font.pixelSize: t ? t.fontSizeSM : 12
                                 color: t ? t.textMuted : "#55556a"
+                            }
+                        }
+                    }
+                }
+
+                AppCard {
+                    Layout.fillWidth: true
+                    visible: appBackend.qualityIssues.length > 0
+                    implicitHeight: qualityColumn.implicitHeight + 28
+
+                    ColumnLayout {
+                        id: qualityColumn
+                        anchors { left: parent.left; right: parent.right; top: parent.top; margins: 14 }
+                        spacing: 8
+                        Text {
+                            text: (localeManager.strings.home.quality_review_title || "Translations to review") + " (" + appBackend.qualityIssues.length + ")"
+                            color: t ? t.warning : "#f5b74f"
+                            font.bold: true
+                            font.pixelSize: 13
+                        }
+                        Repeater {
+                            model: appBackend.qualityIssues.slice(0, 5)
+                            Text {
+                                Layout.fillWidth: true
+                                text: modelData.key + " · " + modelData.reason
+                                color: t ? t.textSecondary : "#9090b8"
+                                font.pixelSize: 11
+                                elide: Text.ElideMiddle
+                            }
+                        }
+                        RowLayout {
+                            Button {
+                                text: localeManager.strings.home.quality_retry || "Retry issues"
+                                enabled: !appBackend.isRunning
+                                onClicked: appBackend.retryQualityIssues()
+                            }
+                            Button {
+                                text: localeManager.strings.home.quality_open || "Open full list"
+                                onClicked: appBackend.openQualityReport()
                             }
                         }
                     }

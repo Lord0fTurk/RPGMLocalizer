@@ -2,6 +2,42 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.1] - 2026-09-30
+
+### Added
+- **Local Hy-MT2 Translation Engine Support** (Contributed by [@peresew3734](https://github.com/peresew3734) in PR [#3](https://github.com/Lord0fTurk/RPGMLocalizer/pull/3)):
+  - **Dedicated `HyMT2Translator` Subsystem**: Implemented official prompt and sampling profiles for Tencent's open-source Hy-MT2 (Hunyuan-MT2) translation model via local OpenAI-compatible backends (LM Studio, Ollama, llama.cpp).
+  - **Comprehensive Multi-Language Mapping**: Added 40+ language identifiers (`HY_MT2_LANGUAGES`) matching official Hy-MT2 prompt targets without system role requirement.
+  - **Custom Translation Style Directives (`hy_mt2_style`)**: Introduced user-customizable style prompts (e.g. fantasy RPG dialogue, casual speech) seamlessly injected into user-prompt instructions.
+  - **Architecture-Aware Sampling Presets**: Dynamic sampling configuration supporting MoE architectures (`30b-a3b` with top_p=1.0) and dense models (top_p=0.6, top_k=20, repeat_penalty=1.05) with automatic non-compliant parameter fallback.
+  - **Pre-Run Model & Server Verification (`verify_connection`)**: Added eager health-check verifying server availability and model existence against `/models` before launching translation batches.
+  - **Asynchronous Model Discovery**: Integrated dynamic model enumeration in `SettingsBackend` via `QNetworkAccessManager` (`refreshHyMt2Models`), with live server status feedback and refresh trigger.
+  - **Configurable Worker Concurrency**: User-defined worker slider (1–8 concurrent workers) and bounded batch windowing (1–100).
+  - **Scoped Translation Memory Caching**: Isolated cache namespace incorporating model name, style directive, server URL, and glossary hash to prevent cross-model translation memory contamination.
+- **Translation Quality Verification & Structural Integrity Guard** (Contributed by [@peresew3734](https://github.com/peresew3734)):
+  - **Structural Invariant Inspector (`src/core/translation_quality.py`)**: Detects translation anomalies including altered/dropped escape codes (`SegmentType.CODE`), corrupted format placeholders (`${...}`, `{name}`, `%s`, `%d`), and mismatching line break counts (`\n`).
+  - **Automatic Unmerged Retries**: Automatically retries failed or corrupted translations individually without block merging.
+  - **Quality Review Persistence (`quality_review.json`)**: Unresolved translation discrepancies are isolated to a review ledger in the cache directory instead of writing corrupt bytes to game files.
+  - **Interactive Review Card in HomeTab**: Displays live issue count, issue previews with error reasons, one-click "Retry issues" pipeline trigger, and direct JSON report opener.
+- **Enhanced Telemetry & Progress Feedback** (Contributed by [@peresew3734](https://github.com/peresew3734)):
+  - **Throughput & ETA Calculation**: Added real-time translation speed telemetry (`texts/s`) and intelligent time-remaining countdown (hours, minutes, seconds).
+  - **Granular Parsing Progress**: Live file-by-file extraction status reporting (`Parsing files... X/Total`).
+  - **Indeterminate Traveling Light (`ShimmerProgressBar.qml`)**: Added animated moving accent glow on track during preparation and validation phases.
+- **Comprehensive Test Coverage** (Contributed by [@peresew3734](https://github.com/peresew3734)):
+  - Added 4 test suites with 14 unit tests: `test_editor_explicit_load.py`, `test_hy_mt2_workers.py`, `test_js_parsing_safety.py`, and `test_translation_quality_resume.py`.
+
+### Changed
+- **Explicit Project Loading in Editor Tab**: Replaced automatic background scanning upon tab switch with explicit user-triggered scanning ("Load Project" button), eliminating UI stalls on large projects (Contributed by [@peresew3734](https://github.com/peresew3734)).
+- **Virtual Environment Auto-Detection in `baslat.bat`**: Updated launcher to automatically prioritize local `.venv\Scripts\python.exe` when available, falling back to system `py -3.12` (Contributed by [@peresew3734](https://github.com/peresew3734)).
+- **Multi-Language Interface Synchronization**: Added new i18n localization keys across English (`en.json`) and Turkish (`tr.json`) for speed telemetry, quality review, and Hy-MT2 configuration.
+
+### Fixed
+- **Tree-Sitter Native C-Stack Overflow & Access Violation Prevention on Windows** (Contributed by [@peresew3734](https://github.com/peresew3734)):
+  - Replaced recursive `Node.children` iteration with non-recursive TreeCursor `cursor = node.walk()` in `JavaScriptAstAuditExtractor`, preventing C-level call stack exhaustion on deeply nested JS scripts.
+  - Added thread synchronization lock (`_TREE_SITTER_LOCK`) around Tree-Sitter language compilation and AST extraction.
+  - Isolated JS AST parsing on Windows into a separate helper process (`src/core/parsers/js_ast_worker.py` via `python main.py --js-ast-worker`), protecting the main application from native memory access violations.
+  - Enforced serialized JS file extraction and constrained concurrent worker counts on files >=4MB to prevent RAM exhaustion.
+
 ## [1.0.0] - 2026-09-23
 
 ### Added
